@@ -84,23 +84,23 @@ func runValidate(streams streams, path string, resolveSecrets bool) error {
 		return errReported
 	}
 	for _, warning := range candidate.Warnings() {
-		fmt.Fprintln(streams.stderr, "warning:", warning.String())
+		_, _ = fmt.Fprintln(streams.stderr, "warning:", warning.String())
 	}
-	fmt.Fprintln(streams.stdout, "configuration valid")
+	_, _ = fmt.Fprintln(streams.stdout, "configuration valid")
 	return nil
 }
 
 func printDiagnostics(out io.Writer, err error) {
 	var failure *config.Error
 	if !errors.As(err, &failure) {
-		fmt.Fprintln(out, "error: configuration could not be loaded")
+		_, _ = fmt.Fprintln(out, "error: configuration could not be loaded")
 		return
 	}
 	for _, diagnostic := range failure.Diagnostics {
 		if diagnostic.Line > 0 {
-			fmt.Fprintf(out, "%s (line %d, column %d)\n", diagnostic, diagnostic.Line, diagnostic.Column)
+			_, _ = fmt.Fprintf(out, "%s (line %d, column %d)\n", diagnostic, diagnostic.Line, diagnostic.Column)
 			continue
 		}
-		fmt.Fprintln(out, diagnostic)
+		_, _ = fmt.Fprintln(out, diagnostic)
 	}
 }

@@ -26,7 +26,7 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	root.SetArgs(args)
 	if err := root.ExecuteContext(ctx); err != nil {
 		if !errors.Is(err, errReported) {
-			fmt.Fprintln(stderr, "error:", err)
+			_, _ = fmt.Fprintln(stderr, "error:", err)
 		}
 		return 1
 	}
@@ -36,7 +36,7 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 func newRootCommand(out streams) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "comporta",
-		Short: "Configuration runtime of the Comporta LLM gateway",
+		Short: "Comporta LLM gateway",
 		// Cobra must not print raw errors: the commands write sanitized
 		// diagnostics themselves.
 		SilenceErrors: true,
@@ -46,5 +46,6 @@ func newRootCommand(out streams) *cobra.Command {
 	root.SetErr(out.stderr)
 	root.PersistentFlags().String("config", defaultConfigPath, "path to the configuration file")
 	root.AddCommand(newConfigCommand(out))
+	root.AddCommand(newServeCommand(out))
 	return root
 }
