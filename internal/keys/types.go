@@ -35,6 +35,8 @@ var (
 	ErrIndeterminate = errors.New("the change to keys.json may or may not have been saved; check with \"comporta keys list\"")
 	ErrEntropy       = errors.New("the system random source failed")
 	ErrInvalidKey    = errors.New("invalid key syntax")
+
+	errInvalidApp = errors.New("invalid app name")
 )
 
 // ActiveLimitError reports that an app already holds the maximum of active keys.
