@@ -1,0 +1,147 @@
+# yaml-language-server: $schema=../schema/comporta.schema.json
+#
+# Every configuration field, set to a representative value. Fields left out of
+# a real file take the defaults described in the schema. Prices below are
+# illustrative overrides, not a statement about current provider prices.
+
+data_dir: ./data
+timezone: America/Sao_Paulo
+fail_mode: fail_closed
+
+listeners:
+  proxy:
+    bind: 127.0.0.1
+    port: 8080
+  admin:
+    bind: 127.0.0.1
+    port: 8081
+  allowed_hosts:
+    - gateway.internal
+  max_body_bytes: 10000000
+  read_header_timeout: 5s
+  non_streaming_timeout: 300s
+  streaming_idle_timeout: 60s
+  upstream_header_timeout: 60s
+
+providers:
+  anthropic:
+    api_format: anthropic
+    base_url: https://api.anthropic.com
+    api_key: ${ANTHROPIC_API_KEY}
+    tls_min_version: "1.3"
+    models:
+      - claude-sonnet-4-5
+      - claude-haiku-4-5
+  openai:
+    api_format: openai
+    base_url: https://api.openai.com
+    api_key_file: /run/secrets/openai
+    models:
+      - gpt-5-mini
+  ollama:
+    api_format: openai
+    base_url: http://localhost:11434
+    models:
+      - ollama/qwen2.5
+
+pricing:
+  claude-haiku-4-5:
+    input: 1.00
+    output: 5.00
+    cache_write: 1.25
+    cache_read: 0.10
+  gpt-5-mini:
+    input: 0.25
+    output: 2.00
+    cache_write: 0
+    cache_read: 0.025
+
+apps:
+  bot-discord:
+    require_user: true
+    allowed_models:
+      - claude-sonnet-4-5
+      - claude-haiku-4-5
+      - gpt-5-mini
+    max_tokens: 4096
+    on_limit: downgrade
+    downgrade_to: claude-haiku-4-5
+    timezone: America/Sao_Paulo
+    fail_mode: fail_open
+    limits:
+      requests_per_minute: 120
+      tokens_per_minute: 200000
+      max_concurrent: 20
+    budget:
+      usd_per_day: 2.00
+      usd_per_month: 40.00
+      tokens_per_day: 500000
+      tokens_per_month: 10000000
+    hard_cap:
+      usd_per_day: 2.40
+      usd_per_month: 48.00
+    per_user:
+      limits:
+        requests_per_minute: 20
+        max_concurrent: 4
+      budget:
+        tokens_per_day: 10000
+      hard_cap:
+        tokens_per_day: 12000
+    loop_guard:
+      enabled: true
+      similar_requests: 10
+      similar_window: 30s
+      requests_per_minute: 60
+      cooldown: 120s
+    fallback:
+      - claude-haiku-4-5
+      - gpt-5-mini
+    cache:
+      enabled: true
+      ttl_seconds: 600
+      shared_across_users: false
+    detection:
+      cpf: redact
+      cnpj: redact
+      card: block
+      email: detect
+      phone: detect
+      pix: detect
+      secret: block
+      rehydrate: false
+  batch-jobs:
+    allowed_models:
+      - ollama/qwen2.5
+    on_limit: warn
+    budget:
+      tokens_per_day: 1000000
+
+cache:
+  max_bytes: 256000000
+
+alerts:
+  thresholds: [50, 80, 100]
+  anomaly_multiplier: 5
+  anomaly_min_usd: 0.50
+  channels:
+    ops-webhook:
+      type: webhook
+      url: ${ALERT_WEBHOOK_URL}
+      signing_secret_file: /run/secrets/alert-signing
+    ops-discord:
+      type: discord
+      url: ${DISCORD_WEBHOOK_URL}
+    ops-slack:
+      type: slack
+      url_file: /run/secrets/slack-webhook
+    ops-ntfy:
+      type: ntfy
+      server_url: https://ntfy.sh
+      topic: comporta-alerts
+      token: ${NTFY_TOKEN}
+
+telemetry:
+  metrics_enabled: true
+  otel_enabled: true
+  otel_endpoint: https://otel.internal:4318

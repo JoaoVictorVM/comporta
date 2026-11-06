@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=../schema/comporta.schema.json
+#
+# Minimal configuration. Copy this file to comporta.yaml and set
+# ANTHROPIC_API_KEY in the environment or in a .env file next to it.
+
+timezone: America/Sao_Paulo
+
+providers:
+  anthropic:
+    api_format: anthropic
+    base_url: https://api.anthropic.com
+    api_key: ${ANTHROPIC_API_KEY}
+    models:
+      - claude-sonnet-4-5
+      - claude-haiku-4-5
+
+apps:
+  my-app:
+    allowed_models:
+      - claude-sonnet-4-5
+      - claude-haiku-4-5
+    budget:
+      usd_per_day: 2.00

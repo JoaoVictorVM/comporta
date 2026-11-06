@@ -1,0 +1,68 @@
+version: "3"
+
+vars:
+  GOVULNCHECK_VERSION: v1.9.0
+  GITLEAKS_VERSION: v8.30.1
+
+tasks:
+  build:
+    desc: Build the binary into bin/
+    cmds:
+      - go build -o bin/comporta{{exeExt}} ./cmd/comporta
+
+  run:
+    desc: Run serve with comporta.yaml from the current directory
+    cmds:
+      - go run ./cmd/comporta serve {{.CLI_ARGS}}
+
+  validate:
+    desc: Validate every example without secrets
+    cmds:
+      - for file in examples/*.yaml; do go run ./cmd/comporta config validate "$file" || exit 1; done
+
+  fmt:
+    desc: Format the code
+    cmds:
+      - gofmt -w .
+
+  fmt-check:
+    desc: Fail when a file is not formatted
+    cmds:
+      - test -z "$(gofmt -l .)"
+
+  lint:
+    desc: Run static checks
+    cmds:
+      - go vet ./...
+
+  test:
+    desc: Run the test suite
+    cmds:
+      - go test ./...
+
+  test-race:
+    desc: Run the test suite with the race detector, which needs a C toolchain
+    env:
+      CGO_ENABLED: "1"
+    cmds:
+      - go test -race ./...
+
+  vuln:
+    desc: Scan dependencies for known vulnerabilities
+    cmds:
+      - go run golang.org/x/vuln/cmd/govulncheck@{{.GOVULNCHECK_VERSION}} ./...
+
+  secrets:
+    desc: Scan the Git history for secrets
+    cmds:
+      - go run github.com/zricethezav/gitleaks/v8@{{.GITLEAKS_VERSION}} git --redact .
+
+  check:
+    desc: Run every local verification
+    cmds:
+      - task: fmt-check
+      - task: lint
+      - task: test
+      - task: validate
+      - task: vuln
+      - task: secrets

@@ -1,0 +1,9 @@
+timezone: UTC
+providers:
+  p:
+    api_format: openai
+    base_url: https://api.example.com
+    api_key: ${P_KEY}
+    models: [m]
+pricing:
+  m: {input: -1, output: 1, cache_write: 0, cache_read: 0}

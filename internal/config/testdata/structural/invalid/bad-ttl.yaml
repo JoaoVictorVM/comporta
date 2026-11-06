@@ -1,0 +1,11 @@
+timezone: UTC
+providers:
+  p:
+    api_format: openai
+    base_url: https://api.example.com
+    api_key: ${P_KEY}
+    models: [m]
+apps:
+  a:
+    allowed_models: [m]
+    cache: {ttl_seconds: 3601}
