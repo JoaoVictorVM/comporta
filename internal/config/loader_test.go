@@ -171,3 +171,37 @@ func TestDefaultsApplied(t *testing.T) {
 		t.Errorf("data dir default: %s", cfg.DataDir)
 	}
 }
+
+func TestCandidateStructuralQueries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "comporta.yaml")
+	text := `timezone: UTC
+data_dir: ./state
+providers:
+  anthropic:
+    api_format: anthropic
+    base_url: https://api.anthropic.com
+    api_key: ${COMPORTA_UNSET_FOR_THIS_TEST}
+    models: [model-a]
+apps:
+  zeta:
+    allowed_models: [model-a]
+  alpha:
+    allowed_models: [model-a]
+`
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := Load(path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := candidate.DataDir(), filepath.Join(filepath.Dir(path), "state"); got != want {
+		t.Fatalf("data dir %q, want %q", got, want)
+	}
+	if got := candidate.AppNames(); len(got) != 2 || got[0] != "alpha" || got[1] != "zeta" {
+		t.Fatalf("apps %v", got)
+	}
+	if !candidate.HasApp("alpha") || candidate.HasApp("Alpha") || candidate.HasApp("missing") {
+		t.Fatal("app lookup must be exact")
+	}
+}
