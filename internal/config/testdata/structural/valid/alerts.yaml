@@ -1,0 +1,18 @@
+timezone: UTC
+providers:
+  p:
+    api_format: openai
+    base_url: https://api.example.com
+    api_key: ${P_KEY}
+    models: [m]
+alerts:
+  thresholds: [10, 90]
+  channels:
+    w:
+      type: webhook
+      url: ${U}
+      signing_secret_file: s
+    n:
+      type: ntfy
+      server_url: https://ntfy.example
+      topic: t

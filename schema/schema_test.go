@@ -10,6 +10,8 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"go.yaml.in/yaml/v3"
+
+	"github.com/JoaoVictorVM/comporta/internal/config"
 )
 
 func compileSchema(t *testing.T) *jsonschema.Schema {
@@ -124,6 +126,46 @@ func TestEveryExampleValidatesAgainstSchema(t *testing.T) {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			if err := schema.Validate(loadInstance(t, path)); err != nil {
 				t.Fatalf("example does not match the schema: %v", err)
+			}
+		})
+	}
+}
+
+func TestSchemaAndRuntimeAgreeOnStructuralFixtures(t *testing.T) {
+	schema := compileSchema(t)
+	loadRuntime := func(path string) error {
+		_, err := config.Load(path, config.Options{SystemTimezone: "UTC"})
+		return err
+	}
+	const root = "../internal/config/testdata/structural"
+	valid, err := filepath.Glob(root + "/valid/*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid, err := filepath.Glob(root + "/invalid/*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(valid) == 0 || len(invalid) == 0 {
+		t.Fatal("structural fixtures not found")
+	}
+	for _, path := range valid {
+		t.Run("valid/"+filepath.Base(path), func(t *testing.T) {
+			if err := schema.Validate(loadInstance(t, path)); err != nil {
+				t.Errorf("schema rejected a valid fixture: %v", err)
+			}
+			if err := loadRuntime(path); err != nil {
+				t.Errorf("runtime rejected a valid fixture: %v", err)
+			}
+		})
+	}
+	for _, path := range invalid {
+		t.Run("invalid/"+filepath.Base(path), func(t *testing.T) {
+			if err := schema.Validate(loadInstance(t, path)); err == nil {
+				t.Error("schema accepted an invalid fixture")
+			}
+			if err := loadRuntime(path); err == nil {
+				t.Error("runtime accepted an invalid fixture")
 			}
 		})
 	}

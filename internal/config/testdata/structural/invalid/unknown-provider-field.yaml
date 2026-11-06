@@ -1,0 +1,8 @@
+timezone: UTC
+providers:
+  p:
+    api_format: openai
+    base_url: https://api.example.com
+    api_key: ${P_KEY}
+    models: [m]
+    surprise: 1
