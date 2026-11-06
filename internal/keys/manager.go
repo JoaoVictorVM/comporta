@@ -282,7 +282,7 @@ func (m *Manager) watch(ctx context.Context) {
 	for {
 		var fire <-chan time.Time
 		if pending {
-			timer.Reset(max(debounceDeadline(first, last).Sub(time.Now()), 0))
+			timer.Reset(max(time.Until(debounceDeadline(first, last)), 0))
 			fire = timer.C
 		}
 		var events <-chan fsnotify.Event

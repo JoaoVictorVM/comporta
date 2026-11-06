@@ -294,7 +294,7 @@ func validAppName(name string) bool {
 	}
 	for i := range len(name) {
 		c := name[i]
-		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
 			return false
 		}
 	}
@@ -307,7 +307,7 @@ func isLowerHex(text string, length int) bool {
 	}
 	for i := range len(text) {
 		c := text[i]
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return false
 		}
 	}

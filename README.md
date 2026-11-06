@@ -2,14 +2,18 @@
 
 Open-source LLM gateway, in development.
 
-**Current state:** this repository delivers the configuration runtime only. `comporta serve` loads and validates the configuration, resolves its secrets and applies saved changes without a restart, but it **opens no network ports and proxies no traffic yet**. The proxy, authentication, limits, policies, metering, alerts, telemetry and the admin panel are not implemented, so settings for them are validated and made available without taking effect.
+**Current state:** this repository delivers the configuration runtime and the app key lifecycle. `comporta serve` loads and validates the configuration and the key store, resolves secrets and applies saved changes without a restart, but it **opens no network ports and proxies no traffic yet**. Authentication exists as a tested internal module that nothing exposes over the network: a key cannot be used against a running service until the proxy lands. The proxy, limits, policies, metering, alerts, telemetry and the admin panel are not implemented, so settings for them are validated and made available without taking effect.
 
 ## Commands
 
 ```sh
 comporta config validate [path]                    # structure and references, no secrets needed
 comporta config validate [path] --resolve-secrets  # also reads the environment, .env and secret files
-comporta serve [--config path]                     # keeps the configuration active until interrupted
+comporta keys create <app> [--config path]         # creates a key and prints it once
+comporta keys rotate <app> [--config path]         # adds a key, keeping the others valid
+comporta keys list [--config path]                 # lists keys without revealing them
+comporta keys revoke <key-id> [--config path]      # revokes a key
+comporta serve [--config path]                     # keeps configuration and keys active until interrupted
 ```
 
 `config validate` exits 0 when the file is valid and 1 with a list of errors otherwise. Results go to stdout and diagnostics to stderr. The structural mode is meant for CI: it checks the format of secret references, but it does not prove that a secret exists or that a provider works.
@@ -22,6 +26,7 @@ The path comes from the positional argument or `--config`, and defaults to `comp
 go build -o comporta ./cmd/comporta
 cp examples/comporta.yaml comporta.yaml
 echo 'ANTHROPIC_API_KEY=your-key' > .env
+./comporta keys create my-app
 ./comporta serve
 ```
 
@@ -65,6 +70,36 @@ config reload rejected: apps.bot-discord.on_limit: must be one of block, downgra
 - **Deleted file:** the previous configuration stays active, a warning is logged every 60 seconds and the file is picked up again when it returns.
 - **Secret rotation:** changing only a secret file does not trigger a reload. Save the configuration file, even unchanged, to reread secret files.
 - **At startup** there is no previous configuration, so any failure aborts.
+
+## App keys
+
+Apps authenticate with keys that Comporta generates. A key is shown once, when it is created, and only its SHA-256 hash is stored, so a lost key cannot be recovered: revoke it and create another. [ADR 0001](docs/adr/0001-app-key-hashing.md) explains why plain SHA-256 is the right hash here.
+
+```text
+$ comporta keys create my-app
+Key for my-app (shown only once): cmp_<43 base62 characters>
+Store it in the app's environment. Key ID: k_<32 hex characters>
+
+$ comporta keys list
+KEY ID  APP     STATUS  CREATED AT            LAST USED AT
+k_<id>  my-app  active  2026-11-06T12:00:00Z  never
+```
+
+These commands read the configuration without resolving secrets and write directly to the data directory, so they need no provider credentials and work with or without a running service. They exit 0 on success and 1 otherwise. An app name must be defined in the configuration.
+
+- **Provisioning:** `serve` refuses to start without `keys.json` and never creates it, so run `keys create` first. A store that exists with no active key is valid, and every credential is rejected.
+- **Rotation:** each app can have 2 active keys. `keys rotate` adds the second one. Move the app to it, then `keys revoke` the old one. Rotation never revokes anything by itself.
+- **Revocation:** a running service applies it within 2 seconds on a local disk, without a restart. Operations already authenticated are not interrupted. Revoked records stay in the file, which holds at most 10,000 records, so that a later attempt reports the key as revoked.
+- **Recovery:** while `keys.json` is missing, invalid or too open, authentication is blocked with 503 regardless of `fail_mode`, and resumes when the file is valid again. Comporta never recreates a damaged file: restore it from a backup, or remove it and create new keys.
+- **Last used:** the time is saved every 5 seconds and on shutdown, so it is approximate and a crash can lose the latest update.
+
+### Files
+
+`keys.json`, `keys.lock` and a data directory created by these commands are private to the user running Comporta: modes 0600 and 0700 on Linux and macOS, and a protected ACL limited to that user, SYSTEM and Administrators on Windows, which is equivalent in effect but is not POSIX 0600. An existing file with broader access, or a link in its place, is refused rather than fixed. An existing data directory is left as it is. Writes are atomic and coordinated by an operating system lock, which requires a local disk: network volumes are not supported.
+
+### Authentication limits
+
+After 20 failed attempts from one address within 60 seconds, that address gets 429 with `Retry-After` for 5 minutes, even with a valid key. This protection is held in memory per process and a restart clears it. It uses only the address of the connection and ignores `Forwarded`, `X-Forwarded-For` and `X-Real-IP`, so all clients behind one reverse proxy share a single counter and can block each other.
 
 ## Development
 

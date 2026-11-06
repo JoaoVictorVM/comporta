@@ -49,11 +49,10 @@ func (c *fakeClock) advance(d time.Duration) {
 }
 
 type fixture struct {
-	dir     string
-	path    string
-	config  *config.Manager
-	store   *keys.Store
-	manager *keys.Manager
+	dir    string
+	path   string
+	config *config.Manager
+	store  *keys.Store
 }
 
 func newFixture(t *testing.T) *fixture {
