@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/JoaoVictorVM/comporta/schema/comporta.schema.json",
+  "title": "Comporta configuration",
+  "description": "Single-file gateway configuration. Relational rules, such as model references and hard caps, are enforced by `comporta config validate`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["providers"],
+  "properties": {
+    "data_dir": {"type": "string", "minLength": 1, "description": "Data directory, relative to this file. Default: ./data. Changing it requires a restart."},
+    "timezone": {"type": "string", "minLength": 1, "description": "IANA timezone for budgets. Default: system timezone, which must have an IANA identifier."},
+    "fail_mode": {"$ref": "#/$defs/failMode", "description": "Behavior when limit state is unavailable. Default: fail_closed."},
+    "listeners": {"$ref": "#/$defs/listeners"},
+    "providers": {
+      "type": "object",
+      "description": "Upstream providers by name. At least one is required.",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[a-z0-9-]{1,40}$"},
+      "additionalProperties": {"$ref": "#/$defs/provider"}
+    },
+    "apps": {
+      "type": "object",
+      "description": "Applications by name. Default: none.",
+      "propertyNames": {"pattern": "^[a-z0-9-]{1,40}$"},
+      "additionalProperties": {"$ref": "#/$defs/app"}
+    },
+    "pricing": {
+      "type": "object",
+      "description": "Price overrides by declared model ID. An override replaces the whole entry.",
+      "additionalProperties": {"$ref": "#/$defs/price"}
+    },
+    "cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_bytes": {"$ref": "#/$defs/positiveInteger", "description": "Total memory ceiling for the response cache. Default: 256000000."}
+      }
+    },
+    "alerts": {"$ref": "#/$defs/alerts"},
+    "telemetry": {"$ref": "#/$defs/telemetry"}
+  },
+  "$defs": {
+    "positiveInteger": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+    "positiveMoney": {"type": "number", "exclusiveMinimum": 0, "description": "USD, at most 6 decimal places."},
+    "nonNegativeMoney": {"type": "number", "minimum": 0, "description": "USD, at most 6 decimal places."},
+    "failMode": {"enum": ["fail_closed", "fail_open"]},
+    "detectionMode": {"enum": ["off", "detect", "redact", "block"], "description": "Default: off."},
+    "secretRef": {
+      "type": "string",
+      "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}$",
+      "description": "Environment reference that fills the whole value, such as ${API_KEY}. Literal values are rejected."
+    },
+    "secretFile": {"type": "string", "minLength": 1, "description": "Secret file, relative to this file. Reread when the configuration is saved."},
+    "duration": {"type": "string", "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$", "description": "Go duration string, such as 30s."},
+    "models": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api_format", "base_url", "models"],
+      "properties": {
+        "api_format": {"enum": ["anthropic", "openai"], "description": "Wire format. Ollama uses openai."},
+        "base_url": {"type": "string", "description": "Absolute URL without credentials, query or fragment. Plain HTTP only for localhost, loopback or private IP literals."},
+        "api_key": {"$ref": "#/$defs/secretRef"},
+        "api_key_file": {"$ref": "#/$defs/secretFile"},
+        "models": {"$ref": "#/$defs/models", "minItems": 1, "description": "Model IDs. Each ID must be unique across all providers."},
+        "tls_min_version": {"enum": ["1.2", "1.3"], "description": "Minimum TLS version, as a quoted string. Default: 1.2."}
+      },
+      "oneOf": [
+        {"required": ["api_key"], "not": {"required": ["api_key_file"]}},
+        {"required": ["api_key_file"], "not": {"required": ["api_key"]}},
+        {"not": {"anyOf": [{"required": ["api_key"]}, {"required": ["api_key_file"]}]}}
+      ]
+    },
+    "listener": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bind": {"type": "string", "description": "IP address. Default: 127.0.0.1. Changing it requires a restart."},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Default: 8080 for proxy, 8081 for admin. Changing it requires a restart."}
+      }
+    },
+    "listeners": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "proxy": {"$ref": "#/$defs/listener"},
+        "admin": {"$ref": "#/$defs/listener"},
+        "allowed_hosts": {
+          "type": "array",
+          "description": "Hosts added to the base list localhost, 127.0.0.1 and [::1]. No wildcards, URLs or paths.",
+          "items": {"type": "string", "pattern": "^[^*/\\s]+$"}
+        },
+        "max_body_bytes": {"$ref": "#/$defs/positiveInteger", "description": "Default: 10000000."},
+        "read_header_timeout": {"$ref": "#/$defs/duration", "description": "Default: 5s."},
+        "non_streaming_timeout": {"$ref": "#/$defs/duration", "description": "Default: 300s."},
+        "streaming_idle_timeout": {"$ref": "#/$defs/duration", "description": "Default: 60s."},
+        "upstream_header_timeout": {"$ref": "#/$defs/duration", "description": "Default: 60s."}
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests_per_minute": {"$ref": "#/$defs/positiveInteger"},
+        "tokens_per_minute": {"$ref": "#/$defs/positiveInteger"},
+        "max_concurrent": {"$ref": "#/$defs/positiveInteger", "description": "Default: 20 for an app, 4 per user."}
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "usd_per_day": {"$ref": "#/$defs/positiveMoney"},
+        "usd_per_month": {"$ref": "#/$defs/positiveMoney"},
+        "tokens_per_day": {"$ref": "#/$defs/positiveInteger"},
+        "tokens_per_month": {"$ref": "#/$defs/positiveInteger"}
+      }
+    },
+    "hardCap": {
+      "$ref": "#/$defs/budget",
+      "description": "Ceiling per budget dimension. Each dimension needs a matching budget and must be at least that budget. With on_limit downgrade, omitted dimensions default to 120%, rounded up. With on_limit warn, an omitted dimension has no hard ceiling."
+    },
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed_models"],
+      "properties": {
+        "require_user": {"type": "boolean", "description": "Default: false."},
+        "allowed_models": {"$ref": "#/$defs/models", "minItems": 1, "description": "Declared models this app may use."},
+        "max_tokens": {"$ref": "#/$defs/positiveInteger", "description": "Default: 4096."},
+        "on_limit": {"enum": ["block", "downgrade", "warn"], "description": "Default: block."},
+        "downgrade_to": {"type": "string", "minLength": 1, "description": "Required for on_limit downgrade. Must be allowed and have a known price."},
+        "timezone": {"type": "string", "minLength": 1, "description": "Default: the root timezone."},
+        "fail_mode": {"$ref": "#/$defs/failMode", "description": "Default: the root fail_mode."},
+        "limits": {"$ref": "#/$defs/limits"},
+        "budget": {"$ref": "#/$defs/budget"},
+        "hard_cap": {"$ref": "#/$defs/hardCap"},
+        "per_user": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "limits": {"$ref": "#/$defs/limits"},
+            "budget": {"$ref": "#/$defs/budget"},
+            "hard_cap": {"$ref": "#/$defs/hardCap"}
+          }
+        },
+        "loop_guard": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean", "description": "Default: true."},
+            "similar_requests": {"$ref": "#/$defs/positiveInteger", "description": "Default: 10."},
+            "similar_window": {"$ref": "#/$defs/duration", "description": "Default: 30s."},
+            "requests_per_minute": {"$ref": "#/$defs/positiveInteger", "description": "Default: 60."},
+            "cooldown": {"$ref": "#/$defs/duration", "description": "Default: 120s."}
+          }
+        },
+        "fallback": {"$ref": "#/$defs/models", "maxItems": 4, "description": "Ordered fallback chain of allowed models. Default: empty."},
+        "cache": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {"type": "boolean", "description": "Default: false."},
+            "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "description": "Default: 600."},
+            "shared_across_users": {"type": "boolean", "description": "Default: false. Enabling it can expose personal content of one user to another."}
+          }
+        },
+        "detection": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpf": {"$ref": "#/$defs/detectionMode"},
+            "cnpj": {"$ref": "#/$defs/detectionMode"},
+            "card": {"$ref": "#/$defs/detectionMode"},
+            "email": {"$ref": "#/$defs/detectionMode"},
+            "phone": {"$ref": "#/$defs/detectionMode"},
+            "pix": {"$ref": "#/$defs/detectionMode"},
+            "secret": {"$ref": "#/$defs/detectionMode"},
+            "rehydrate": {"type": "boolean", "description": "Default: false. Applies only to non-streaming responses."}
+          }
+        }
+      }
+    },
+    "price": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "output", "cache_write", "cache_read"],
+      "properties": {
+        "input": {"$ref": "#/$defs/nonNegativeMoney", "description": "USD per million tokens."},
+        "output": {"$ref": "#/$defs/nonNegativeMoney", "description": "USD per million tokens."},
+        "cache_write": {"$ref": "#/$defs/nonNegativeMoney", "description": "USD per million tokens."},
+        "cache_read": {"$ref": "#/$defs/nonNegativeMoney", "description": "USD per million tokens."}
+      }
+    },
+    "alerts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "channels": {
+          "type": "object",
+          "description": "Alert channels by name. A channel is enabled by being present.",
+          "propertyNames": {"pattern": "^[a-z0-9-]{1,40}$"},
+          "additionalProperties": {"$ref": "#/$defs/alertChannel"}
+        },
+        "thresholds": {
+          "type": "array",
+          "description": "Budget percentages, strictly increasing. Default: [50, 80, 100].",
+          "items": {"type": "integer", "minimum": 1, "maximum": 100},
+          "uniqueItems": true
+        },
+        "anomaly_multiplier": {"$ref": "#/$defs/positiveInteger", "description": "Default: 5."},
+        "anomaly_min_usd": {"$ref": "#/$defs/nonNegativeMoney", "description": "Default: 0.50."}
+      }
+    },
+    "alertChannel": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {"const": "webhook"},
+            "url": {"$ref": "#/$defs/secretRef"},
+            "url_file": {"$ref": "#/$defs/secretFile"},
+            "signing_secret": {"$ref": "#/$defs/secretRef"},
+            "signing_secret_file": {"$ref": "#/$defs/secretFile"}
+          },
+          "allOf": [
+            {"oneOf": [{"required": ["url"]}, {"required": ["url_file"]}]},
+            {"oneOf": [{"required": ["signing_secret"]}, {"required": ["signing_secret_file"]}]}
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {"enum": ["discord", "slack"]},
+            "url": {"$ref": "#/$defs/secretRef"},
+            "url_file": {"$ref": "#/$defs/secretFile"}
+          },
+          "oneOf": [{"required": ["url"]}, {"required": ["url_file"]}]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "server_url", "topic"],
+          "properties": {
+            "type": {"const": "ntfy"},
+            "server_url": {"type": "string", "description": "Server URL without credentials, query or fragment."},
+            "topic": {"type": "string", "minLength": 1},
+            "token": {"$ref": "#/$defs/secretRef"},
+            "token_file": {"$ref": "#/$defs/secretFile"}
+          },
+          "not": {"required": ["token", "token_file"]}
+        }
+      ]
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "metrics_enabled": {"type": "boolean", "description": "Default: true."},
+        "otel_enabled": {"type": "boolean", "description": "Default: false. When true, otel_endpoint is required."},
+        "otel_endpoint": {"type": "string", "description": "Absolute HTTP(S) URL without credentials, query or fragment."}
+      }
+    }
+  }
+}
