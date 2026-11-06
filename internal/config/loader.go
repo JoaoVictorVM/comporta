@@ -93,15 +93,22 @@ func singleError(d Diagnostic) error { return &Error{Diagnostics: []Diagnostic{d
 // without loading it entirely.
 func readConfigFile(fsys FileSystem, path string) ([]byte, error) {
 	data, err := readLimited(fsys, path, MaxConfigBytes+1)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil, singleError(Diagnostic{Code: CodeConfigMissing, Message: "configuration file not found"})
-	case err != nil:
-		return nil, singleError(Diagnostic{Code: CodeConfigUnreadable, Message: "configuration file cannot be read: " + classifyIOError(err)})
-	case len(data) > MaxConfigBytes:
-		return nil, tooLargeError()
+	if err := checkConfigRead(data, err); err != nil {
+		return nil, err
 	}
 	return data, nil
+}
+
+func checkConfigRead(data []byte, err error) error {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return singleError(Diagnostic{Code: CodeConfigMissing, Message: "configuration file not found"})
+	case err != nil:
+		return singleError(Diagnostic{Code: CodeConfigUnreadable, Message: "configuration file cannot be read: " + classifyIOError(err)})
+	case len(data) > MaxConfigBytes:
+		return tooLargeError()
+	}
+	return nil
 }
 
 func tooLargeError() error {
@@ -113,7 +120,7 @@ func readLimited(fsys FileSystem, path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	return io.ReadAll(io.LimitReader(file, limit))
 }
 
