@@ -1,11 +1,13 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -223,5 +225,39 @@ func TestSecretNeverRendersItsValue(t *testing.T) {
 	}
 	if secret.Reveal() != canary {
 		t.Fatal("Reveal must return the value")
+	}
+}
+
+func TestReloadRereadsSecretFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "comporta.yaml")
+	writeFile(t, path, fileKeyYAML("key.txt"))
+	writeFile(t, filepath.Join(dir, "key.txt"), "first\n")
+	manager, err := NewManager(ManagerOptions{
+		Path:    path,
+		Options: secretOptions(nil),
+		inspect: func(string) (bool, error) { return false, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile(t, filepath.Join(dir, "key.txt"), "second\n")
+	if status := manager.Reload(context.Background()); status.Result != ResultApplied {
+		t.Fatalf("status: %+v", status)
+	}
+	if key, _ := manager.Capture().ProviderAPIKey("p"); key.Reveal() != "second" {
+		t.Fatal("a reload must reread the secret file")
+	}
+
+	if err := os.Remove(filepath.Join(dir, "key.txt")); err != nil {
+		t.Fatal(err)
+	}
+	status := manager.Reload(context.Background())
+	if status.Result != ResultRejected || !hasDiagnostic(status.Errors, CodeSecretFileUnreadable, "providers.p.api_key_file") {
+		t.Fatalf("a secret file that vanished must reject the reload: %+v", status)
+	}
+	if key, _ := manager.Capture().ProviderAPIKey("p"); key.Reveal() != "second" {
+		t.Fatal("the previous secret must stay active")
 	}
 }
