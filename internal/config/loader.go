@@ -5,10 +5,12 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -72,6 +74,18 @@ func (c *Candidate) Warnings() []Diagnostic {
 	out := make([]Diagnostic, len(c.warnings))
 	copy(out, c.warnings)
 	return out
+}
+
+// DataDir is the absolute data directory.
+func (c *Candidate) DataDir() string { return c.cfg.DataDir }
+
+// AppNames lists apps in sorted order.
+func (c *Candidate) AppNames() []string { return slices.Sorted(maps.Keys(c.cfg.Apps)) }
+
+// HasApp reports whether an app with exactly this name is defined.
+func (c *Candidate) HasApp(name string) bool {
+	_, ok := c.cfg.Apps[name]
+	return ok
 }
 
 // Load reads and validates the file at path. A failure is always an *Error.

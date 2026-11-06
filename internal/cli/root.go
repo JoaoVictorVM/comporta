@@ -46,6 +46,7 @@ func newRootCommand(out streams) *cobra.Command {
 	root.SetErr(out.stderr)
 	root.PersistentFlags().String("config", defaultConfigPath, "path to the configuration file")
 	root.AddCommand(newConfigCommand(out))
+	root.AddCommand(newKeysCommand(out))
 	root.AddCommand(newServeCommand(out))
 	return root
 }
