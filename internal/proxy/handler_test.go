@@ -13,12 +13,14 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/JoaoVictorVM/comporta/internal/testkit"
 )
 
-const (
-	anthropicBody = `{"model":"fake-claude","max_tokens":32,"messages":[{"role":"user","content":"Ola"}],"stream":false,"future_option":{"enabled":true}}`
-	openAIBody    = `{"model":"fake-gpt","messages":[{"role":"user","content":"Ola"}]}`
-	countBody     = `{"model":"fake-claude","messages":[{"role":"user","content":"Ola"}],"system":"s"}`
+var (
+	anthropicBody = testkit.AnthropicBody()
+	openAIBody    = testkit.OpenAIBody()
+	countBody     = testkit.CountBody()
 )
 
 func TestBodyLimitWithAndWithoutContentLength(t *testing.T) {
@@ -298,7 +300,7 @@ func TestForwardingUsesProviderCredentialOnly(t *testing.T) {
 func TestStreamingBodyGetsOnlyTheDocumentedPatch(t *testing.T) {
 	upstream, server := startUpstream(t, sseReply("data: [DONE]\n\n"))
 	fx := newFixture(t, server.URL, fixtureOptions{})
-	text := `{"model":"fake-gpt", "messages":[{"role":"user","content":"é"}],"n":1.50,"stream":true,"stream_options":{"future_option":1},"z":{"a":null}}`
+	text := `{"model":"fake-gpt", "messages":[{"role":"user","content":"` + testkit.Prompt("é") + `"}],"n":1.50,"stream":true,"stream_options":{"future_option":1},"z":{"a":null}}`
 	want := strings.Replace(text, `{"future_option":1}`, `{"future_option":1,"include_usage":true}`, 1)
 	want = strings.TrimSuffix(want, "}") + `,"user":"` + fx.identity.AnonymousHash("bot").Hex() + `"}`
 	if response, body := fx.post("/v1/chat/completions", "openai", text); response.StatusCode != http.StatusOK {
@@ -423,7 +425,7 @@ func TestHooksRunInOrderAndCanStop(t *testing.T) {
 }
 
 func TestPrivacyCanaries(t *testing.T) {
-	const canary = "canary-prompt-text"
+	canary := testkit.Prompt("canary-prompt-text")
 	_, server := startUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)

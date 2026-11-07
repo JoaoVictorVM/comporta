@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/fakeprovider"
+	"github.com/JoaoVictorVM/comporta/internal/testkit"
 )
 
-const (
-	gptBody   = `{"model":"fake-gpt","messages":[{"role":"user","content":"Ola"}]}`
-	gptStream = `{"model":"fake-gpt","messages":[{"role":"user","content":"Ola"}],"stream":true}`
+var (
+	gptBody   = testkit.OpenAIBody()
+	gptStream = testkit.OpenAIStreamBody()
 )
 
 func TestConfigDeterminesListenersAndUpstream(t *testing.T) {

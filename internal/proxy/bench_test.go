@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JoaoVictorVM/comporta/internal/testkit"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
@@ -17,7 +18,7 @@ func benchmarkBody(messages int) []byte {
 		if i > 0 {
 			body.WriteByte(',')
 		}
-		fmt.Fprintf(&body, `{"role":"user","content":"message number %d with some synthetic text"}`, i)
+		fmt.Fprintf(&body, `{"role":"user","content":%q}`, testkit.Prompt(fmt.Sprintf("message number %d with some synthetic text", i)))
 	}
 	body.WriteString(`]}`)
 	return []byte(body.String())

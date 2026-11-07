@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/JoaoVictorVM/comporta/internal/testkit"
 )
 
 type countingSink struct {
@@ -131,7 +133,7 @@ func TestSinkFailureCannotPanicHandler(t *testing.T) {
 }
 
 func TestResultContainsNoContent(t *testing.T) {
-	const canary = "canary-content"
+	canary := testkit.Prompt("canary-content")
 	_, server := startUpstream(t, sseReply("data: {\"choices\":[{\"delta\":{\"content\":\""+canary+"\"}}]}\n\n"+usageChunk+doneChunk))
 	fx := newFixture(t, server.URL, fixtureOptions{})
 	fx.post("/v1/chat/completions", "openai",
@@ -215,7 +217,7 @@ func TestCancelledAttemptCarriesIdentity(t *testing.T) {
 }
 
 func TestResultNeverRetainsContentOrRawUser(t *testing.T) {
-	const canary = "canary-content"
+	canary := testkit.Prompt("canary-content")
 	_, server := startUpstream(t, nil)
 	fx := newFixture(t, server.URL, fixtureOptions{})
 	fx.post("/v1/chat/completions", "openai",
