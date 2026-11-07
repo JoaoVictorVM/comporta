@@ -12,10 +12,12 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/keys"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
 	"github.com/JoaoVictorVM/comporta/internal/server"
+	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
 func newServeCommand(out streams) *cobra.Command {
-	return &cobra.Command{
+	var resetHistory bool
+	command := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the gateway: the proxy and admin listeners, until interrupted",
 		Long: "Load the configuration and app keys, open the proxy and admin listeners and apply " +
@@ -38,9 +40,20 @@ func newServeCommand(out streams) *cobra.Command {
 				logger.Error(err.Error())
 				return errReported
 			}
+			// Before the listeners: without a key no request can be pseudonymized, and
+			// this failure does not depend on the financial fail mode.
+			if _, err := useridentity.Open(command.Context(), useridentity.Options{
+				Dir: snapshot.DataDir(), ResetHistory: resetHistory, Logger: logger,
+			}); err != nil {
+				logger.Error(err.Error())
+				return errReported
+			}
 			return runGateway(command.Context(), logger, manager, keyManager)
 		},
 	}
+	command.Flags().BoolVar(&resetHistory, "reset-user-history", false,
+		"Recover from a lost hmac.key. Refused while usage data exists: it never deletes files and never replaces a key")
+	return command
 }
 
 func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager) error {
