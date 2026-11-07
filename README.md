@@ -16,6 +16,7 @@ comporta keys rotate <app> [--config path]         # adds a key, keeping the oth
 comporta keys list [--config path]                 # lists keys without revealing them
 comporta keys revoke <key-id> [--config path]      # revokes a key
 comporta serve [--config path]                     # runs the proxy and admin listeners until interrupted
+comporta serve --reset-user-history                # recovery from a lost hmac.key, see End users
 comporta fake-provider [--port 9090] [--bind ip] [--scenario name]  # local imitation of both provider APIs
 ```
 
@@ -105,7 +106,7 @@ These commands read the configuration without resolving secrets and write direct
 
 ### Files
 
-`keys.json`, `keys.lock` and a data directory created by these commands are private to the user running Comporta: modes 0600 and 0700 on Linux and macOS, and a protected ACL limited to that user, SYSTEM and Administrators on Windows, which is equivalent in effect but is not POSIX 0600. An existing file with broader access, or a link in its place, is refused rather than fixed. An existing data directory is left as it is. Writes are atomic and coordinated by an operating system lock, which requires a local disk: network volumes are not supported.
+`keys.json`, `keys.lock`, `hmac.key`, `hmac.lock` and a data directory created by these commands are private to the user running Comporta: modes 0600 and 0700 on Linux and macOS, and a protected ACL limited to that user, SYSTEM and Administrators on Windows, which is equivalent in effect but is not POSIX 0600. An existing file with broader access, or a link in its place, is refused rather than fixed. An existing data directory is left as it is. Writes are atomic and coordinated by an operating system lock, which requires a local disk: network volumes are not supported.
 
 ### Authentication limits
 
@@ -126,7 +127,7 @@ The proxy listens on `127.0.0.1:8080` and the admin listener on `127.0.0.1:8081`
 
 Every other path or method returns 404 `endpoint not allowed by Comporta`, without forwarding anything, so an app cannot use your provider key for files, batches or admin APIs. The admin listener has only `GET /healthz`, which answers `{"status":"ok"}` and says nothing about providers.
 
-**What reaches the provider:** the body exactly as received, byte for byte, including unknown fields. The one change today is on OpenAI-format streaming, where `stream_options.include_usage` is set to `true` so that usage can be measured. If the client did not ask for it, the extra usage chunk is removed before delivery. Only `content-type`, `anthropic-version` and `anthropic-beta` are forwarded; every other client header is dropped, and the app key is replaced by the provider key. The destination comes only from the configuration. Redirects are never followed, proxy environment variables are ignored, and a remote provider name that resolves to a private, loopback or link-local address is refused. A base URL may end in `/v1` or not; the same path results.
+**What reaches the provider:** the body exactly as received, byte for byte, including unknown fields, with two changes. End-user fields are replaced by a pseudonym, as [End users](#end-users) describes. On OpenAI-format streaming, `stream_options.include_usage` is set to `true` so that usage can be measured, and if the client did not ask for it, the extra usage chunk is removed before delivery. Only `content-type`, `anthropic-version` and `anthropic-beta` are forwarded; every other client header is dropped, and the app key is replaced by the provider key. The destination comes only from the configuration. Redirects are never followed, proxy environment variables are ignored, and a remote provider name that resolves to a private, loopback or link-local address is refused. A base URL may end in `/v1` or not; the same path results.
 
 **Errors** use the format of the route and carry a `comporta_code`. Provider error messages are never passed on, because they can echo prompts: status and category are preserved and the message is rebuilt. Inside a stream already started, the failure is an error event followed by closing the stream, so a truncated stream never looks like a success.
 
@@ -135,6 +136,7 @@ Every other path or method returns 404 `endpoint not allowed by Comporta`, witho
 | `endpoint_not_allowed` | 404 | Route or method outside the list |
 | `host_not_allowed` | 421 | `Host` not allowed |
 | `invalid_request` | 400 | Invalid JSON, types, duplicate keys or query |
+| `user_required`, `user_invalid`, `user_email_not_allowed`, `user_document_not_allowed` | 400 | End-user identifier missing or refused, see [End users](#end-users) |
 | `model_unknown`, `provider_format_mismatch` | 400 | Model not declared, or declared in another API format |
 | `unsupported_media_type` | 415 | Body is not uncompressed JSON |
 | `request_too_large` | 413 | Body over `max_body_bytes` |
@@ -153,9 +155,45 @@ Every other path or method returns 404 `endpoint not allowed by Comporta`, witho
 
 ### Usage and privacy
 
-Each provider call produces one internal result with counters, timing and categories, never content, user identifiers or raw errors. It is not stored anywhere yet. A counter the provider did not report stays unknown instead of becoming zero, and tokens are never estimated. When a client disconnects, the provider call is canceled within 1 s and only what was already observed is recorded, so the usage of an interrupted stream can be lower than what the provider bills.
+Each provider call produces one internal result with counters, timing, categories and the user's pseudonym, never content, raw user identifiers or raw errors. It is not stored anywhere yet. A counter the provider did not report stays unknown instead of becoming zero, and tokens are never estimated. When a client disconnects, the provider call is canceled within 1 s and only what was already observed is recorded, so the usage of an interrupted stream can be lower than what the provider bills.
 
-Prompts and responses stay in memory for the duration of the request and are not logged. End-user identifiers from `X-Comporta-User`, `metadata.user_id` or `user` are read but not validated or pseudonymized yet: **the header is removed, but those body fields still reach the provider as sent.**
+Prompts and responses stay in memory for the duration of the request and are not logged, and no option enables logging them. A privacy test sends marked prompts and identifiers through the gateway, including error paths, and fails if a marker appears in logs, answers built by the gateway, results or generated files. It covers those destinations today; [`tests/privacy/coverage.json`](tests/privacy/coverage.json) lists the ones that do not exist yet (database, metrics, traces and alert payloads), which join the test when they are built.
+
+### End users
+
+To attribute requests to the people using your app, send an opaque ID. In most SDKs that is one line, and it is the only code change later per-user limits will need:
+
+```python
+client = anthropic.Anthropic(base_url="http://127.0.0.1:8080", api_key=key, default_headers={"X-Comporta-User": user.id})
+client = openai.OpenAI(base_url="http://127.0.0.1:8080/v1", api_key=key, default_headers={"X-Comporta-User": user.id})
+```
+
+The ID is read from `X-Comporta-User`, then `metadata.user_id`, then `user`. The first one present is used, on every format, and a present but empty value is refused instead of falling through to the next. The header goes no further than the gateway.
+
+**What is accepted:** 1 to 128 characters of `A-Z a-z 0-9 _ . : -`, compared exactly: no trimming and no change of case. IDs shaped like an email address, or a valid CPF or CNPJ (numeric or alphanumeric, with or without the usual mask, check digits verified), are refused. A long ID that merely contains such a number is fine, and an opaque ID that happens to form a valid document is refused too. Only these fields are checked: an ID your app copies into a message or into another metadata field is content, and stays as it is.
+
+| `comporta_code` | Message |
+|---|---|
+| `user_required` | `this app requires a user ID (X-Comporta-User header)` |
+| `user_invalid` | `user ID must be 1-128 characters of [A-Za-z0-9_.:-]` |
+| `user_email_not_allowed` | `user ID looks like an email address; send an opaque ID instead` |
+| `user_document_not_allowed` | `user ID looks like a CPF or CNPJ; send an opaque ID instead` |
+
+**Without an ID:** an app with `require_user: true` gets `user_required`, read from the configuration in force when the request arrived. Otherwise the request counts as the app's anonymous user, kept apart from a user whose ID is literally `anonymous`. `GET /v1/models` never asks for a user.
+
+**What the provider sees:** a pseudonym of 32 hexadecimal characters, HMAC-SHA256 truncated to 16 bytes, stable across restarts and app key rotation. The same person in two apps gets two different pseudonyms, so renaming an app also breaks that app's continuity. Every known identity field in the body is replaced, including ones that lost the precedence, and the native field is added when missing: `metadata.user_id` on `/v1/messages`, which makes a `metadata` that is not an object a 400, and `user` on `/v1/chat/completions`. `count_tokens` replaces what is present and adds nothing. The raw ID is never logged or stored.
+
+**What this does not prove:** Comporta authenticates the app, not its users. The app decides which ID goes with which person and can send any ID it likes, so a pseudonym is only as trustworthy as the app that sent it.
+
+### The identity key
+
+`serve` loads `hmac.key` from the data directory before opening any port, and creates it on the first run. It holds 32 random bytes and follows the same [file protections](#files) as the app keys. A file of any other size or with broader access stops the service: Comporta never repairs or replaces it. There is no configuration for it, and changes to the file only apply after a restart.
+
+**Back it up together with the data directory, and keep it private.** Anyone with the key and a list of candidate IDs can recognize pseudonyms. Replacing or losing the key breaks the continuity of per-user history, because the same user gets a new pseudonym, and there is no migration. To rotate it, stop the service and plan for that break. App keys are independent, so rotating them changes nothing here.
+
+When the key is missing, Comporta only creates one if it can prove that nothing depends on the old one: the directory must hold nothing besides `keys.json`, `keys.lock`, `hmac.lock` and its own temporary files. Anything else stops the service with `hmac.key not found but usage data exists; restore the key or start with --reset-user-history`, even an unrelated file, because it cannot tell. Restore the key, or point `data_dir` at a new directory and move the app keys there.
+
+`--reset-user-history` exists for that recovery, but Comporta does not store usage yet, so it has nothing it could safely reset: with other files present it refuses with `user history reset requires usage storage support; restore hmac.key or use a new data directory`. It never deletes files, and with a valid key in place it changes nothing. When usage storage arrives, a reset will remove what links data to users and keep each app's spending, so it cannot reopen a budget.
 
 ## Fake provider
 
@@ -181,8 +219,8 @@ docker compose up -d
 curl http://127.0.0.1:8081/healthz
 ```
 
-Keys live in the volume and survive recreating the container. `COMPORTA_CONFIG` selects another configuration file, which is mounted read-only. The image has no shell or curl, so check it from the host. Reaching the service from another machine means publishing the proxy port elsewhere and adding its name to `allowed_hosts`; never publish the admin port that way.
+App keys and `hmac.key` live in the volume and survive recreating the container, so back up the volume as a whole. `COMPORTA_CONFIG` selects another configuration file, which is mounted read-only. The image has no shell or curl, so check it from the host. Reaching the service from another machine means publishing the proxy port elsewhere and adding its name to `allowed_hosts`; never publish the admin port that way.
 
 ## Development
 
-The repository uses [Task](https://taskfile.dev). `task --list` shows the available tasks, and `task check` runs formatting, static checks, tests, example validation and the vulnerability and secret scanners. The race detector needs a C toolchain: `task test-race`. `task test-sdk` runs the official Python SDKs at the versions pinned in `tests/sdk/requirements.txt`, and `task test-container` builds the image and verifies its restrictions; neither needs provider credentials.
+The repository uses [Task](https://taskfile.dev). `task --list` shows the available tasks, and `task check` runs formatting, static checks, tests, example validation and the vulnerability and secret scanners. The race detector needs a C toolchain: `task test-race`. `task test-privacy` runs the privacy test, `task test-sdk` runs the official Python SDKs at the versions pinned in `tests/sdk/requirements.txt`, and `task test-container` builds the image and verifies its restrictions; none of them needs provider credentials. A test that adds a prompt builds it with `internal/testkit`, or the marked `prompt` helper in the SDK suite, and new destinations for data go in `tests/privacy/coverage.json` in the same change.

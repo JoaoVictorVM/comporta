@@ -3,8 +3,12 @@
 package integration
 
 import (
+	"archive/tar"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/JoaoVictorVM/comporta/internal/testkit"
 )
 
 const containerProject = "comporta-container-test"
@@ -176,5 +182,125 @@ func TestContainerProvisionAndRestart(t *testing.T) {
 	waitForHealth(t)
 	if status := modelsStatus(t, key); status != http.StatusOK {
 		t.Fatalf("the key did not survive recreating the container: %d", status)
+	}
+}
+
+// copyFromContainer returns what is at a path of the service container as a tar stream,
+// which also carries owner and mode. The image has no shell to ask with. Standard output
+// is kept apart and never printed, because it can hold the key.
+func copyFromContainer(t *testing.T, path string) []byte {
+	t.Helper()
+	containerID := strings.TrimSpace(compose(t, "ps", "-q", "comporta"))
+	output, err := exec.Command("docker", "cp", containerID+":"+path, "-").Output()
+	if err != nil {
+		t.Fatalf("docker cp %s: %v", path, err)
+	}
+	return output
+}
+
+func readKeyEntry(t *testing.T) (*tar.Header, []byte) {
+	t.Helper()
+	reader := tar.NewReader(bytes.NewReader(copyFromContainer(t, "/data/hmac.key")))
+	header, err := reader.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return header, data
+}
+
+func TestContainerHMACKeyPersistsAcrossRestart(t *testing.T) {
+	key := startProvisioned(t)
+	_, first := readKeyEntry(t)
+	if len(first) != 32 {
+		t.Fatalf("the key has %d bytes", len(first))
+	}
+	compose(t, "restart")
+	waitForHealth(t)
+	_, afterRestart := readKeyEntry(t)
+	compose(t, "down")
+	compose(t, "up", "-d")
+	waitForHealth(t)
+	_, afterRecreate := readKeyEntry(t)
+	// The pseudonym is a function of the key, the app and the ID, so the same bytes in
+	// the volume are the same pseudonym for every user.
+	if !bytes.Equal(first, afterRestart) || !bytes.Equal(first, afterRecreate) {
+		t.Fatal("the identity key changed, which would break every user's history")
+	}
+	if status := modelsStatus(t, key); status != http.StatusOK {
+		t.Fatalf("models status %d", status)
+	}
+}
+
+func TestContainerIdentityKeyIsPrivate(t *testing.T) {
+	startProvisioned(t)
+	header, data := readKeyEntry(t)
+	if header.Mode&0o077 != 0 || header.Mode&0o600 != 0o600 {
+		t.Errorf("mode %o", header.Mode)
+	}
+	if header.Uid != 65532 {
+		t.Errorf("owner %d", header.Uid)
+	}
+	if logs := compose(t, "logs"); strings.Contains(logs, fmt.Sprintf("%x", data)) {
+		t.Error("the logs expose the identity key")
+	}
+}
+
+func TestContainerPrivacyCanary(t *testing.T) {
+	key := startProvisioned(t)
+	scanner := testkit.NewScanner(testkit.Needles()...)
+	// These requests are refused before any provider call, so a synthetic provider
+	// credential is enough and nothing leaves the host.
+	for name, user := range map[string]string{"email": testkit.EmailID(), "spaced": testkit.SpacedID(), "document": testkit.DocumentID()} {
+		request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:8080/v1/messages", strings.NewReader(testkit.AnthropicBody()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Api-Key", key)
+		request.Header.Set("X-Comporta-User", user)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		answer, err := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status %d", name, response.StatusCode)
+		}
+		scanner.Scan("errors", name, answer)
+	}
+	scanner.Scan("logs", "container", []byte(compose(t, "logs")))
+	reader := tar.NewReader(bytes.NewReader(copyFromContainer(t, "/data")))
+	files := 0
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if header.Typeflag != tar.TypeReg {
+			continue
+		}
+		files++
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanner.Scan("files", filepath.Base(header.Name), data)
+	}
+	if files == 0 {
+		t.Fatal("the volume held nothing to inspect")
+	}
+	if err := scanner.Err("errors", "logs", "files"); err != nil {
+		t.Fatal(err)
 	}
 }

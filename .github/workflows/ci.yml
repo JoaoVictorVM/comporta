@@ -23,6 +23,9 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - name: Choose the privacy marker of this run
+        shell: bash
+        run: echo "COMPORTA_PRIVACY_MARKER=cmpcanary$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')" >> "$GITHUB_ENV"
       - name: Check formatting
         shell: bash
         run: test -z "$(gofmt -l .)"
@@ -32,6 +35,8 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
+      - name: Privacy canary
+        run: go test -count=1 ./internal/testkit ./tests/privacy
       - name: Validate examples
         shell: bash
         run: |
@@ -49,6 +54,9 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - name: Choose the privacy marker of this run
+        shell: bash
+        run: echo "COMPORTA_PRIVACY_MARKER=cmpcanary$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')" >> "$GITHUB_ENV"
       - name: Test with the race detector
         run: go test -race ./...
 
@@ -65,6 +73,9 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
+      - name: Choose the privacy marker of this run
+        shell: bash
+        run: echo "COMPORTA_PRIVACY_MARKER=cmpcanary$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')" >> "$GITHUB_ENV"
       - name: Install the pinned SDKs
         run: python -m pip install --require-hashes -r tests/sdk/requirements.txt
       - name: Run the official SDKs against the fake provider
@@ -80,9 +91,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - name: Choose the privacy marker of this run
+        shell: bash
+        run: echo "COMPORTA_PRIVACY_MARKER=cmpcanary$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')" >> "$GITHUB_ENV"
       - name: Vet the container tests
         run: go vet -tags container ./tests/integration
-      - name: Verify the image, compose restrictions and key persistence
+      - name: Verify the image, compose restrictions, key persistence and privacy
         run: go test -tags container -timeout 15m ./tests/integration -run 'Compose|Container'
 
   scan:

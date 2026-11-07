@@ -40,6 +40,11 @@ tasks:
     cmds:
       - go test ./...
 
+  test-privacy:
+    desc: Run marked traffic through the gateway and examine everything it leaves behind
+    cmds:
+      - go test -count=1 ./internal/testkit ./tests/privacy
+
   test-race:
     desc: Run the test suite with the race detector, which needs a C toolchain
     env:
@@ -55,7 +60,7 @@ tasks:
       - '{{if eq OS "windows"}}.venv/Scripts/python{{else}}.venv/bin/python{{end}} -m pytest tests/sdk/compatibility_test.py -q'
 
   test-container:
-    desc: Build the image and verify compose, hardening and key persistence. Needs Docker and ports 8080 and 8081 free
+    desc: Build the image and verify compose, hardening, key persistence and privacy. Needs Docker and ports 8080 and 8081 free
     cmds:
       - go test -tags container -timeout 15m ./tests/integration -run 'Compose|Container'
 
@@ -75,6 +80,7 @@ tasks:
       - task: fmt-check
       - task: lint
       - task: test
+      - task: test-privacy
       - task: validate
       - task: vuln
       - task: secrets
