@@ -125,3 +125,17 @@ func TestAbsoluteAndAuthorityTargetsAreRejected(t *testing.T) {
 		t.Fatal("a forward proxy request reached the handler")
 	}
 }
+
+func TestRefusalIsDeliveredWithUnreadBody(t *testing.T) {
+	rt, recorder := startProxySurface(t)
+	body := strings.Repeat("x", 128<<10)
+	for range 20 {
+		reply := rawRequest(t, rt.ProxyAddr(), call("POST", "/v1/files", "Content-Length: 131072\r\n")+body)
+		if statusOf(reply) != "404" || !strings.Contains(reply, "endpoint_not_allowed") {
+			t.Fatalf("reply: %.200q", reply)
+		}
+	}
+	if recorder.hits.Load() != 0 {
+		t.Fatal("the request reached the handler")
+	}
+}

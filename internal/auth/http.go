@@ -15,6 +15,7 @@ import (
 
 const (
 	headerAPIKey        = "X-Api-Key"
+	headerAnthropicVer  = "Anthropic-Version"
 	headerAuthorization = "Authorization"
 	maxCredentialHeader = 256
 	bearerScheme        = "bearer"
@@ -37,10 +38,12 @@ func Anthropic(*http.Request) Format { return FormatAnthropic }
 // OpenAI selects the OpenAI format, for Chat Completions.
 func OpenAI(*http.Request) Format { return FormatOpenAI }
 
-// ModelsFormat selects for the models route, shared by both APIs: x-api-key means
-// Anthropic and anything else OpenAI. Conflicting credentials are rejected later.
+// ModelsFormat selects for the models route, shared by both APIs. The credential
+// header alone is not enough, since recent Anthropic SDKs also send a bearer token;
+// anthropic-version is what every one of them sends and OpenAI clients never do.
+// Conflicting credentials are rejected later.
 func ModelsFormat(r *http.Request) Format {
-	if len(r.Header.Values(headerAPIKey)) > 0 {
+	if len(r.Header.Values(headerAPIKey)) > 0 || len(r.Header.Values(headerAnthropicVer)) > 0 {
 		return FormatAnthropic
 	}
 	return FormatOpenAI
@@ -159,14 +162,16 @@ func connectionAddress(r *http.Request) (netip.Addr, bool) {
 
 // extractCredential refuses every ambiguity instead of picking one of the values:
 // a repeated header or two methods at once could otherwise authenticate one way
-// here and be read another way by a later consumer.
+// here and be read another way by a later consumer. Anthropic routes take either
+// header because SDK versions differ in how they send the same api_key; OpenAI SDKs
+// only ever send a bearer token.
 func extractCredential(r *http.Request, format Format) (string, bool) {
 	apiKeys := r.Header.Values(headerAPIKey)
 	authorizations := r.Header.Values(headerAuthorization)
 	switch {
 	case format == FormatAnthropic && len(apiKeys) == 1 && len(authorizations) == 0:
 		return apiKeys[0], len(apiKeys[0]) <= maxCredentialHeader
-	case format == FormatOpenAI && len(authorizations) == 1 && len(apiKeys) == 0:
+	case len(authorizations) == 1 && len(apiKeys) == 0:
 		return bearerToken(authorizations[0])
 	}
 	return "", false

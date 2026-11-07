@@ -1,0 +1,5 @@
+# Source of requirements.txt. Regenerate with:
+#   uv pip compile tests/sdk/requirements.in --universal --python-version 3.12 --generate-hashes -o tests/sdk/requirements.txt
+anthropic
+openai
+pytest

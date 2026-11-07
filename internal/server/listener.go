@@ -1,9 +1,16 @@
 package server
 
 import (
+	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
+)
+
+const (
+	lingerTimeout  = 250 * time.Millisecond
+	lingerMaxBytes = 1 << 20
 )
 
 // admissionListener gives each new connection the header deadline of the current
@@ -38,6 +45,8 @@ type admittedConn struct {
 	net.Conn
 	deadline time.Time
 	pending  atomic.Bool
+	closing  sync.Once
+	closed   error
 }
 
 func (c *admittedConn) SetReadDeadline(t time.Time) error {
@@ -45,4 +54,31 @@ func (c *admittedConn) SetReadDeadline(t time.Time) error {
 		return c.Conn.SetReadDeadline(c.deadline)
 	}
 	return c.Conn.SetReadDeadline(t)
+}
+
+// CloseWrite keeps net/http able to half-close before closing a connection whose
+// request body was not read.
+func (c *admittedConn) CloseWrite() error {
+	if closer, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return closer.CloseWrite()
+	}
+	return nil
+}
+
+// Close lingers briefly for what the client is still sending. Closing a socket with
+// unread input resets it, which can destroy a response the client has not read yet:
+// that is the common case here, since a request is refused without reading its body.
+// It returns at once because http.Server may call it while holding its own lock.
+func (c *admittedConn) Close() error {
+	c.closing.Do(func() {
+		if c.CloseWrite() != nil || c.Conn.SetReadDeadline(time.Now().Add(lingerTimeout)) != nil {
+			c.closed = c.Conn.Close()
+			return
+		}
+		go func() {
+			_, _ = io.CopyN(io.Discard, c.Conn, lingerMaxBytes)
+			_ = c.Conn.Close()
+		}()
+	})
+	return c.closed
 }
