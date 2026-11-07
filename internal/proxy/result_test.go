@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/JoaoVictorVM/comporta/internal/testkit"
 )
 
 type countingSink struct {
@@ -130,7 +133,7 @@ func TestSinkFailureCannotPanicHandler(t *testing.T) {
 }
 
 func TestResultContainsNoContent(t *testing.T) {
-	const canary = "canary-content"
+	canary := testkit.Prompt("canary-content")
 	_, server := startUpstream(t, sseReply("data: {\"choices\":[{\"delta\":{\"content\":\""+canary+"\"}}]}\n\n"+usageChunk+doneChunk))
 	fx := newFixture(t, server.URL, fixtureOptions{})
 	fx.post("/v1/chat/completions", "openai",
@@ -145,5 +148,93 @@ func TestResultContainsNoContent(t *testing.T) {
 	}
 	if result.AppName != "bot" || result.AttemptIndex != 1 || result.RequestID == "" || result.StartedAt.Location() != time.UTC {
 		t.Fatalf("result %+v", result)
+	}
+}
+
+func TestEveryAttemptCarriesResolvedIdentity(t *testing.T) {
+	statuses := map[string]http.HandlerFunc{
+		"success": nil,
+		"upstream error": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		},
+	}
+	for name, reply := range statuses {
+		t.Run(name, func(t *testing.T) {
+			_, server := startUpstream(t, reply)
+			fx := newFixture(t, server.URL, fixtureOptions{})
+			request := fx.request(http.MethodPost, "/v1/chat/completions", "openai", openAIBody)
+			request.Header.Set("X-Comporta-User", "user_123")
+			fx.do(request)
+			result := fx.sink.wait(t)
+			if result.Anonymous || result.UserHash.Hex() != hashOf(t, fx, "user_123") {
+				t.Fatalf("anonymous %v", result.Anonymous)
+			}
+		})
+	}
+	t.Run("count tokens", func(t *testing.T) {
+		_, server := startUpstream(t, nil)
+		fx := newFixture(t, server.URL, fixtureOptions{})
+		fx.post("/v1/messages/count_tokens", "anthropic", countBody)
+		result := fx.sink.wait(t)
+		if !result.Anonymous || result.UserHash.Hex() != fx.identity.AnonymousHash("bot").Hex() {
+			t.Fatalf("anonymous %v", result.Anonymous)
+		}
+	})
+	t.Run("provider unreachable", func(t *testing.T) {
+		_, server := startUpstream(t, nil)
+		fx := newFixture(t, server.URL, fixtureOptions{})
+		server.Close()
+		fx.post("/v1/chat/completions", "openai", openAIBody)
+		result := fx.sink.wait(t)
+		if result.UserHash.IsZero() || !result.Anonymous {
+			t.Fatal("a failed connection must still carry the identity")
+		}
+	})
+}
+
+func TestCancelledAttemptCarriesIdentity(t *testing.T) {
+	_, server := startUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(deltaChunk))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	fx := newFixture(t, server.URL, fixtureOptions{})
+	request := fx.request(http.MethodPost, "/v1/chat/completions", "openai", streamOpenAIBody)
+	request.Header.Set("X-Comporta-User", "user_123")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bufio.NewReader(response.Body).ReadString('\n'); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	result := fx.sink.wait(t)
+	if !result.ClientDisconnected || result.UserHash.Hex() != hashOf(t, fx, "user_123") {
+		t.Fatalf("disconnected %v", result.ClientDisconnected)
+	}
+}
+
+func TestResultNeverRetainsContentOrRawUser(t *testing.T) {
+	canary := testkit.Prompt("canary-content")
+	_, server := startUpstream(t, nil)
+	fx := newFixture(t, server.URL, fixtureOptions{})
+	fx.post("/v1/chat/completions", "openai",
+		`{"model":"fake-gpt","messages":[{"role":"user","content":"`+canary+`"}],"user":"`+rawUserCanary+`"}`)
+	result := fx.sink.wait(t)
+	serialized, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := result.UserHash.Hex()
+	for name, text := range map[string]string{
+		"json": string(serialized), "v": fmt.Sprintf("%v", result), "plus": fmt.Sprintf("%+v", result), "gosyn": fmt.Sprintf("%#v", result),
+	} {
+		for _, secret := range []string{canary, rawUserCanary, hash} {
+			if strings.Contains(text, secret) {
+				t.Errorf("%s exposes %q: %s", name, secret, text)
+			}
+		}
 	}
 }

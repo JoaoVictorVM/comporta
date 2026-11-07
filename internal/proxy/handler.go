@@ -15,6 +15,7 @@ import (
 
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/config"
+	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
 // Rejection stops a request at a pipeline stage with a sanitized answer.
@@ -66,7 +67,10 @@ type Options struct {
 	Transports *TransportPool
 	Sink       ResultSink
 	Hooks      Hooks
-	Logger     *slog.Logger
+	// Identity pseudonymizes end users. Without it conversation requests fail: leaving
+	// it out never turns pseudonymization off.
+	Identity *useridentity.Service
+	Logger   *slog.Logger
 	// Now replaces the clock in tests.
 	Now func() time.Time
 }
@@ -77,6 +81,7 @@ type Handler struct {
 	transports *TransportPool
 	sink       ResultSink
 	hooks      Hooks
+	identity   *useridentity.Service
 	logger     *slog.Logger
 	now        func() time.Time
 }
@@ -85,7 +90,7 @@ type Handler struct {
 func NewHandler(options Options) *Handler {
 	handler := &Handler{
 		auth: options.Auth, transports: options.Transports, sink: options.Sink,
-		hooks: options.Hooks, logger: options.Logger, now: options.Now,
+		hooks: options.Hooks, identity: options.Identity, logger: options.Logger, now: options.Now,
 	}
 	if handler.transports == nil {
 		handler.transports = NewTransportPool(nil, nil)
@@ -248,6 +253,10 @@ func (o *operation) serve(r *http.Request) {
 	}
 	envelope := request.envelope
 	o.stream = envelope.Stream
+	if failure := request.applyIdentity(o.handler.identity, o.route, o.snapshot); failure != nil {
+		WriteFailure(o.w, o.format, *failure)
+		return
+	}
 
 	hooks := o.handler.hooks
 	content := RequestContent{Document: request.document, Body: body}

@@ -13,12 +13,14 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/JoaoVictorVM/comporta/internal/testkit"
 )
 
-const (
-	anthropicBody = `{"model":"fake-claude","max_tokens":32,"messages":[{"role":"user","content":"Ola"}],"stream":false,"future_option":{"enabled":true}}`
-	openAIBody    = `{"model":"fake-gpt","messages":[{"role":"user","content":"Ola"}]}`
-	countBody     = `{"model":"fake-claude","messages":[{"role":"user","content":"Ola"}],"system":"s"}`
+var (
+	anthropicBody = testkit.AnthropicBody()
+	openAIBody    = testkit.OpenAIBody()
+	countBody     = testkit.CountBody()
 )
 
 func TestBodyLimitWithAndWithoutContentLength(t *testing.T) {
@@ -289,16 +291,18 @@ func TestForwardingUsesProviderCredentialOnly(t *testing.T) {
 	if strings.Contains(flat, fx.key) || strings.Contains(flat, rawUserCanary) || strings.Contains(flat, "9.9.9.9") || strings.Contains(flat, "a=b") {
 		t.Fatalf("client data leaked upstream: %s", flat)
 	}
-	if string(upstream.body) != anthropicBody {
-		t.Fatalf("body changed: %s", upstream.body)
+	want := strings.TrimSuffix(anthropicBody, "}") + `,"metadata":{"user_id":"` + hashOf(t, fx, rawUserCanary) + `"}}`
+	if string(upstream.body) != want {
+		t.Fatalf("got  %s\nwant %s", upstream.body, want)
 	}
 }
 
 func TestStreamingBodyGetsOnlyTheDocumentedPatch(t *testing.T) {
 	upstream, server := startUpstream(t, sseReply("data: [DONE]\n\n"))
 	fx := newFixture(t, server.URL, fixtureOptions{})
-	text := `{"model":"fake-gpt", "messages":[{"role":"user","content":"é"}],"n":1.50,"stream":true,"stream_options":{"future_option":1},"z":{"a":null}}`
+	text := `{"model":"fake-gpt", "messages":[{"role":"user","content":"` + testkit.Prompt("é") + `"}],"n":1.50,"stream":true,"stream_options":{"future_option":1},"z":{"a":null}}`
 	want := strings.Replace(text, `{"future_option":1}`, `{"future_option":1,"include_usage":true}`, 1)
+	want = strings.TrimSuffix(want, "}") + `,"user":"` + fx.identity.AnonymousHash("bot").Hex() + `"}`
 	if response, body := fx.post("/v1/chat/completions", "openai", text); response.StatusCode != http.StatusOK {
 		t.Fatalf("status %d, body %s", response.StatusCode, body)
 	}
@@ -421,7 +425,7 @@ func TestHooksRunInOrderAndCanStop(t *testing.T) {
 }
 
 func TestPrivacyCanaries(t *testing.T) {
-	const canary = "canary-prompt-text"
+	canary := testkit.Prompt("canary-prompt-text")
 	_, server := startUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -457,5 +461,85 @@ func TestPrivacyCanaries(t *testing.T) {
 		if readErr == nil && strings.Contains(string(content), canary) {
 			t.Errorf("%s holds request content", entry.Name())
 		}
+	}
+}
+
+func TestIdentityFailureNeverCallsProvider(t *testing.T) {
+	upstream, server := startUpstream(t, nil)
+	prepared := atomic.Int64{}
+	fx := newFixture(t, server.URL, fixtureOptions{hooks: Hooks{
+		Prepare: func(context.Context, *Envelope, RequestContent) *Rejection {
+			prepared.Add(1)
+			return nil
+		},
+	}})
+	request := fx.request(http.MethodPost, "/v1/chat/completions", "openai", openAIBody)
+	request.Header.Set("X-Comporta-User", "joao@mail.com")
+	response, body := fx.do(request)
+	if response.StatusCode != http.StatusBadRequest || comportaCode(t, body) != string(CodeUserEmailNotAllowed) {
+		t.Fatalf("status %d: %s", response.StatusCode, body)
+	}
+	if upstream.count() != 0 || prepared.Load() != 0 {
+		t.Fatalf("provider %d, hook %d", upstream.count(), prepared.Load())
+	}
+}
+
+func TestIdentityRunsBeforePrepare(t *testing.T) {
+	upstream, server := startUpstream(t, nil)
+	var seen, seenAtSend atomic.Value
+	fx := newFixture(t, server.URL, fixtureOptions{hooks: Hooks{
+		Prepare: func(_ context.Context, envelope *Envelope, _ RequestContent) *Rejection {
+			seen.Store(envelope.Identity.Hash().Hex())
+			if _, _, ok := envelope.RawUser(); ok {
+				t.Error("a hook could read the raw identifier")
+			}
+			return nil
+		},
+		BeforeSend: func(_ context.Context, _ *Envelope, content RequestContent) *Rejection {
+			seenAtSend.Store(string(content.Body))
+			return nil
+		},
+	}})
+	request := fx.request(http.MethodPost, "/v1/chat/completions", "openai", openAIBody)
+	request.Header.Set("X-Comporta-User", "user_123")
+	if response, body := fx.do(request); response.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", response.StatusCode, body)
+	}
+	want := hashOf(t, fx, "user_123")
+	if seen.Load() != want {
+		t.Fatalf("the hook saw %v", seen.Load())
+	}
+	if got, _ := seenAtSend.Load().(string); got != upstream.lastBody() || !strings.Contains(got, want) {
+		t.Fatalf("the last stage saw another body: %s", got)
+	}
+}
+
+func TestMissingIdentityServiceFailsClosed(t *testing.T) {
+	upstream, server := startUpstream(t, nil)
+	fx := newFixture(t, server.URL, fixtureOptions{})
+	fx.handler.identity = nil
+	request := fx.request(http.MethodPost, "/v1/chat/completions", "openai", `{"model":"fake-gpt","messages":[],"user":"user_123"}`)
+	response, body := fx.do(request)
+	if response.StatusCode != http.StatusInternalServerError || comportaCode(t, body) != string(CodeInternalError) {
+		t.Fatalf("status %d: %s", response.StatusCode, body)
+	}
+	if upstream.count() != 0 {
+		t.Fatal("an unprocessed identity reached the provider")
+	}
+	if strings.Contains(body, "user_123") {
+		t.Fatalf("the response echoes the identifier: %s", body)
+	}
+}
+
+func TestModelsDoesNotRequireUser(t *testing.T) {
+	_, server := startUpstream(t, nil)
+	fx := newFixture(t, server.URL, fixtureOptions{requireUser: true})
+	response, body := fx.do(fx.request(http.MethodGet, "/v1/models", "openai", ""))
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", response.StatusCode, body)
+	}
+	fx.handler.identity = nil
+	if again, text := fx.do(fx.request(http.MethodGet, "/v1/models", "openai", "")); again.StatusCode != http.StatusOK {
+		t.Fatalf("the catalog must not depend on identity: %d %s", again.StatusCode, text)
 	}
 }

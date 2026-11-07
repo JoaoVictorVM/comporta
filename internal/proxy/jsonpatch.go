@@ -151,6 +151,10 @@ func (d *Document) String(span Span) (string, bool) {
 type Patch struct {
 	At   Span
 	Text []byte
+	// transportOnly marks a change that does not alter what the client asked for. It
+	// is a property of the patch and not of its position, because two insertions at
+	// the end of the same object share a position.
+	transportOnly bool
 }
 
 // SetMember builds the patch that sets a key of an object: it replaces only the

@@ -5,8 +5,10 @@ provider credential or network access is involved.
 """
 
 import base64
+import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -25,6 +27,24 @@ REPO = Path(__file__).resolve().parents[2]
 SYNTHETIC_PROVIDER_KEY = "synthetic-provider-key"
 TINY_PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
 WEATHER_TOOL = {"name": "get_weather", "description": "Weather", "input_schema": {"type": "object", "properties": {}}}
+
+MARKER = os.environ.get("COMPORTA_PRIVACY_MARKER") or "cmpcanary" + secrets.token_hex(16)
+USER_MARKER = "cmpuser" + MARKER.removeprefix("cmpcanary")
+PROMPTS_SENT = {"count": 0}
+
+
+def prompt(text):
+    """Every prompt of this suite goes through here, so that a run can look for the marker."""
+    PROMPTS_SENT["count"] += 1
+    return f"{text} {MARKER}"
+
+
+def assert_no_marker(path):
+    data = path.read_bytes()
+    escaped = json.dumps(MARKER).strip('"').encode()
+    for needle in (MARKER.encode(), USER_MARKER.encode(), escaped):
+        # Only the file name is reported, so that the failure does not repeat the content.
+        assert needle not in data, f"privacy marker found in {path.name}"
 
 
 def free_port():
@@ -98,7 +118,9 @@ listeners:
         wait_for_port(self.admin_port, serve)
 
     def start(self, command, environment):
-        process = subprocess.Popen(command, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        output = open(Path(self.dir) / f"process-{len(self.processes)}.log", "wb")
+        process = subprocess.Popen(command, env=environment, stdout=output, stderr=subprocess.STDOUT)
+        output.close()
         self.processes.append(process)
         return process
 
@@ -107,13 +129,19 @@ listeners:
             process.terminate()
         for process in self.processes:
             process.wait(timeout=20)
-        shutil.rmtree(self.dir, ignore_errors=True)
+        try:
+            outputs = [path for path in Path(self.dir).rglob("*") if path.is_file()]
+            assert any(path.suffix == ".log" for path in outputs), "no process output to inspect"
+            for path in outputs:
+                assert_no_marker(path)
+        finally:
+            shutil.rmtree(self.dir, ignore_errors=True)
 
-    def anthropic(self):
-        return anthropic.Anthropic(base_url=f"http://127.0.0.1:{self.proxy_port}", api_key=self.key, max_retries=0)
+    def anthropic(self, **options):
+        return anthropic.Anthropic(base_url=f"http://127.0.0.1:{self.proxy_port}", api_key=self.key, max_retries=0, **options)
 
-    def openai(self):
-        return openai.OpenAI(base_url=f"http://127.0.0.1:{self.proxy_port}/v1", api_key=self.key, max_retries=0)
+    def openai(self, **options):
+        return openai.OpenAI(base_url=f"http://127.0.0.1:{self.proxy_port}/v1", api_key=self.key, max_retries=0, **options)
 
 
 @pytest.fixture
@@ -135,6 +163,12 @@ def gateway(make_gateway):
     return make_gateway()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def prompts_were_sent():
+    yield
+    assert PROMPTS_SENT["count"] > 0, "the suite sent no marked prompt, so its scan proved nothing"
+
+
 def test_anthropic_sync_and_stream(gateway):
     client = gateway.anthropic()
     message = client.messages.create(
@@ -143,7 +177,7 @@ def test_anthropic_sync_and_stream(gateway):
         messages=[{
             "role": "user",
             "content": [
-                {"type": "text", "text": "synthetic prompt"},
+                {"type": "text", "text": prompt("synthetic prompt")},
                 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": TINY_PNG}},
             ],
         }],
@@ -153,7 +187,7 @@ def test_anthropic_sync_and_stream(gateway):
     assert message.usage.input_tokens == 10
     assert message.usage.output_tokens == 2
 
-    with client.messages.stream(model="fake-claude", max_tokens=32, messages=[{"role": "user", "content": "synthetic"}]) as stream:
+    with client.messages.stream(model="fake-claude", max_tokens=32, messages=[{"role": "user", "content": prompt("synthetic")}]) as stream:
         text = "".join(stream.text_stream)
         final = stream.get_final_message()
     assert text == "Olá mundo"
@@ -167,7 +201,7 @@ def test_openai_sync_and_stream(gateway):
         messages=[{
             "role": "user",
             "content": [
-                {"type": "text", "text": "synthetic prompt"},
+                {"type": "text", "text": prompt("synthetic prompt")},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{TINY_PNG}"}},
             ],
         }],
@@ -177,13 +211,13 @@ def test_openai_sync_and_stream(gateway):
     assert completion.choices[0].message.content == "Olá"
     assert completion.usage.total_tokens == 12
 
-    chunks = list(client.chat.completions.create(model="fake-gpt", stream=True, messages=[{"role": "user", "content": "synthetic"}]))
+    chunks = list(client.chat.completions.create(model="fake-gpt", stream=True, messages=[{"role": "user", "content": prompt("synthetic")}]))
     text = "".join(chunk.choices[0].delta.content or "" for chunk in chunks if chunk.choices)
     assert text == "Olá mundo"
     assert all(chunk.usage is None for chunk in chunks), "the client did not ask for the usage chunk"
 
     asked = list(client.chat.completions.create(
-        model="fake-gpt", stream=True, stream_options={"include_usage": True}, messages=[{"role": "user", "content": "synthetic"}],
+        model="fake-gpt", stream=True, stream_options={"include_usage": True}, messages=[{"role": "user", "content": prompt("synthetic")}],
     ))
     assert asked[-1].usage.prompt_tokens == 10
     assert asked[-1].choices == []
@@ -195,26 +229,72 @@ def test_models_both_sdks(gateway):
 
 
 def test_anthropic_count_tokens(gateway):
-    counted = gateway.anthropic().messages.count_tokens(model="fake-claude", messages=[{"role": "user", "content": "synthetic"}])
+    counted = gateway.anthropic().messages.count_tokens(model="fake-claude", messages=[{"role": "user", "content": prompt("synthetic")}])
     assert counted.input_tokens == 10
 
 
 def test_stream_failure_is_not_success(make_gateway):
     gateway = make_gateway("disconnect-midstream")
     with pytest.raises(anthropic.APIError):
-        with gateway.anthropic().messages.stream(model="fake-claude", max_tokens=8, messages=[{"role": "user", "content": "x"}]) as stream:
+        with gateway.anthropic().messages.stream(model="fake-claude", max_tokens=8, messages=[{"role": "user", "content": prompt("x")}]) as stream:
             list(stream.text_stream)
     with pytest.raises(openai.APIError):
-        list(gateway.openai().chat.completions.create(model="fake-gpt", stream=True, messages=[{"role": "user", "content": "x"}]))
+        list(gateway.openai().chat.completions.create(model="fake-gpt", stream=True, messages=[{"role": "user", "content": prompt("x")}]))
 
 
 def test_provider_errors_reach_the_sdks_as_their_own_types(make_gateway):
     gateway = make_gateway("rate-limit")
     with pytest.raises(anthropic.RateLimitError) as caught:
-        gateway.anthropic().messages.create(model="fake-claude", max_tokens=8, messages=[{"role": "user", "content": "x"}])
+        gateway.anthropic().messages.create(model="fake-claude", max_tokens=8, messages=[{"role": "user", "content": prompt("x")}])
     assert caught.value.body["error"]["comporta_code"] == "provider_rate_limited"
     with pytest.raises(openai.RateLimitError):
-        gateway.openai().chat.completions.create(model="fake-gpt", messages=[{"role": "user", "content": "x"}])
+        gateway.openai().chat.completions.create(model="fake-gpt", messages=[{"role": "user", "content": prompt("x")}])
+
+
+def test_anthropic_identity_header_and_metadata(gateway):
+    with_header = gateway.anthropic(default_headers={"X-Comporta-User": USER_MARKER})
+    message = with_header.messages.create(model="fake-claude", max_tokens=8, messages=[{"role": "user", "content": prompt("synthetic")}])
+    assert message.content[0].text == "Olá"
+
+    in_body = gateway.anthropic().messages.create(
+        model="fake-claude", max_tokens=8, metadata={"user_id": USER_MARKER}, messages=[{"role": "user", "content": prompt("synthetic")}],
+    )
+    assert in_body.content[0].text == "Olá"
+
+    counted = with_header.messages.count_tokens(model="fake-claude", messages=[{"role": "user", "content": prompt("synthetic")}])
+    assert counted.input_tokens == 10
+
+    rejected = gateway.anthropic(default_headers={"X-Comporta-User": f"{USER_MARKER}@mail.example"})
+    with pytest.raises(anthropic.BadRequestError) as caught:
+        rejected.messages.create(model="fake-claude", max_tokens=8, messages=[{"role": "user", "content": prompt("synthetic")}])
+    assert caught.value.body["error"]["comporta_code"] == "user_email_not_allowed"
+    assert USER_MARKER not in str(caught.value.body)
+
+
+def test_openai_identity_header_and_user(gateway):
+    with_header = gateway.openai(default_headers={"X-Comporta-User": USER_MARKER})
+    completion = with_header.chat.completions.create(model="fake-gpt", messages=[{"role": "user", "content": prompt("synthetic")}])
+    assert completion.choices[0].message.content == "Olá"
+
+    in_body = gateway.openai().chat.completions.create(model="fake-gpt", user=USER_MARKER, messages=[{"role": "user", "content": prompt("synthetic")}])
+    assert in_body.choices[0].message.content == "Olá"
+
+    rejected = gateway.openai(default_headers={"X-Comporta-User": "52998224725"})
+    with pytest.raises(openai.BadRequestError) as caught:
+        rejected.chat.completions.create(model="fake-gpt", messages=[{"role": "user", "content": prompt("synthetic")}])
+    assert caught.value.body["comporta_code"] == "user_document_not_allowed"
+
+
+def test_identity_streaming_compatibility(gateway):
+    client = gateway.anthropic(default_headers={"X-Comporta-User": USER_MARKER})
+    with client.messages.stream(model="fake-claude", max_tokens=8, messages=[{"role": "user", "content": prompt("synthetic")}]) as stream:
+        assert "".join(stream.text_stream) == "Olá mundo"
+
+    chunks = list(gateway.openai().chat.completions.create(
+        model="fake-gpt", stream=True, user=USER_MARKER, messages=[{"role": "user", "content": prompt("synthetic")}],
+    ))
+    assert "".join(chunk.choices[0].delta.content or "" for chunk in chunks if chunk.choices) == "Olá mundo"
+    assert all(chunk.usage is None for chunk in chunks), "the client did not ask for the usage chunk"
 
 
 def test_blocked_endpoint_returns_404(gateway):

@@ -10,14 +10,19 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/JoaoVictorVM/comporta/internal/testkit"
+)
+
+var (
+	streamOpenAIBody    = testkit.OpenAIStreamBody()
+	streamAnthropicBody = testkit.AnthropicStreamBody()
 )
 
 const (
-	streamOpenAIBody    = `{"model":"fake-gpt","messages":[{"role":"user","content":"x"}],"stream":true}`
-	streamAnthropicBody = `{"model":"fake-claude","max_tokens":5,"messages":[{"role":"user","content":"x"}],"stream":true}`
-	usageChunk          = "data: {\"id\":\"c\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n"
-	deltaChunk          = "data: {\"id\":\"c\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":null}\n\n"
-	doneChunk           = "data: [DONE]\n\n"
+	usageChunk = "data: {\"id\":\"c\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\n"
+	deltaChunk = "data: {\"id\":\"c\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":null}\n\n"
+	doneChunk  = "data: [DONE]\n\n"
 )
 
 // sseReply writes the text as one stream response.

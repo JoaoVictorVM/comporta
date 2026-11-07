@@ -5,17 +5,22 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
 const sinkTimeout = time.Second
 
 // AttemptResult describes one upstream attempt. It holds counters and categories
-// only: no content, no user identifier, no raw error.
+// only: no content, no raw user identifier, no raw error. UserHash is what later stages
+// key per-user data by, always together with AppName and Anonymous.
 type AttemptResult struct {
 	RequestID          string
 	AttemptIndex       int
 	AppName            string
 	KeyID              string
+	UserHash           useridentity.Hash
+	Anonymous          bool
 	Operation          Operation
 	Provider           string
 	ModelRequested     string
@@ -68,6 +73,8 @@ func newAttempt(envelope *Envelope, provider string, admission time.Time, now fu
 			AttemptIndex:   1,
 			AppName:        envelope.AppName,
 			KeyID:          envelope.KeyID,
+			UserHash:       envelope.Identity.Hash(),
+			Anonymous:      envelope.Identity.Anonymous(),
 			Operation:      envelope.Operation,
 			Provider:       provider,
 			ModelRequested: envelope.ModelRequested,

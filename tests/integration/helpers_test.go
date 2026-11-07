@@ -22,6 +22,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/keys"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
 	"github.com/JoaoVictorVM/comporta/internal/server"
+	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
 const providerSecret = "provider-key-for-tests"
@@ -60,6 +61,8 @@ func (c *resultCollector) last(t *testing.T) proxy.AttemptResult {
 
 // gateway is a complete service: managers, both listeners, a fake upstream.
 type gateway struct {
+	userHeader string
+	handler    *proxy.Handler
 	t          *testing.T
 	path       string
 	dir        string
@@ -67,6 +70,7 @@ type gateway struct {
 	store      *keys.Store
 	keyManager *keys.Manager
 	runtime    *server.Runtime
+	identity   *useridentity.Service
 	results    *resultCollector
 	upstream   *httptest.Server
 	requests   chan fakeprovider.Request
@@ -109,6 +113,11 @@ listeners:
 
 func startGateway(t *testing.T, fake fakeprovider.Options, extraListeners string) *gateway {
 	t.Helper()
+	return startGatewayWithHooks(t, fake, extraListeners, proxy.Hooks{})
+}
+
+func startGatewayWithHooks(t *testing.T, fake fakeprovider.Options, extraListeners string, hooks proxy.Hooks) *gateway {
+	t.Helper()
 	t.Setenv("COMPORTA_INTEGRATION_KEY", providerSecret)
 	requests := make(chan fakeprovider.Request, 16)
 	previous := fake.OnRequest
@@ -142,9 +151,13 @@ func startGateway(t *testing.T, fake fakeprovider.Options, extraListeners string
 	if err != nil {
 		t.Fatal(err)
 	}
+	identity, err := useridentity.Open(context.Background(), useridentity.Options{Dir: manager.Capture().DataDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	results := &resultCollector{}
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), auth.NewGuard(nil, nil))
-	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results})
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results, Identity: identity, Hooks: hooks})
 	runtime, err := server.Open(context.Background(), server.Options{
 		Source:  manager,
 		Proxy:   server.ProxySurface(manager, handler),
@@ -167,8 +180,8 @@ func startGateway(t *testing.T, fake fakeprovider.Options, extraListeners string
 		handler.Close()
 	})
 	return &gateway{
-		t: t, path: path, dir: dir, config: manager, store: store, keyManager: keyManager,
-		runtime: runtime, results: results, upstream: upstream, requests: requests, baseYAML: text,
+		handler: handler, t: t, path: path, dir: dir, config: manager, store: store, keyManager: keyManager,
+		runtime: runtime, identity: identity, results: results, upstream: upstream, requests: requests, baseYAML: text,
 	}
 }
 
@@ -179,14 +192,12 @@ func (g *gateway) createKey(app string) keys.Created {
 	if err != nil {
 		g.t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	// Asking the manager and not the listener: each refused attempt counts against the
+	// address, and a slow reload under load would trip the guard before the key arrives.
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		request, _ := http.NewRequest(http.MethodGet, g.proxyURL("/v1/models"), nil)
-		request.Header.Set("Authorization", "Bearer "+created.Key.Reveal())
-		response, err := http.DefaultClient.Do(request)
-		if err == nil {
-			_ = response.Body.Close()
-			if response.StatusCode == http.StatusOK {
+		for entry := range g.keyManager.Capture().Entries() {
+			if entry.Identity.KeyID() == created.Metadata.ID {
 				return created
 			}
 		}
@@ -223,6 +234,9 @@ func (g *gateway) call(path, key, body string) (*http.Response, string) {
 		request.Header.Set("Anthropic-Version", "2023-06-01")
 	} else {
 		request.Header.Set("Authorization", "Bearer "+key)
+	}
+	if g.userHeader != "" {
+		request.Header.Set("X-Comporta-User", g.userHeader)
 	}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {

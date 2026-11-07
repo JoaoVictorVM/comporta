@@ -19,6 +19,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/keys"
+	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
 const (
@@ -43,26 +44,32 @@ apps:
 
 // fixture is a handler on a real socket, with real key and configuration managers.
 type fixture struct {
-	t       testing.TB
-	config  *config.Manager
-	path    string
-	key     string
-	sink    *collector
-	handler *Handler
-	server  *httptest.Server
+	t        testing.TB
+	config   *config.Manager
+	path     string
+	key      string
+	sink     *collector
+	handler  *Handler
+	identity *useridentity.Service
+	server   *httptest.Server
 }
 
 type fixtureOptions struct {
-	listeners string
-	hooks     Hooks
-	logs      io.Writer
+	listeners   string
+	hooks       Hooks
+	logs        io.Writer
+	requireUser bool
 }
 
 func newFixture(t testing.TB, upstream string, options fixtureOptions) *fixture {
 	t.Helper()
 	t.Setenv("COMPORTA_PROXY_TEST_KEY", providerCanary)
 	path := filepath.Join(t.TempDir(), "comporta.yaml")
-	content := fmt.Sprintf(configTemplate, upstream, options.listeners)
+	extra := options.listeners
+	if options.requireUser {
+		extra = "    require_user: true\n" + extra
+	}
+	content := fmt.Sprintf(configTemplate, upstream, extra)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -79,9 +86,13 @@ func newFixture(t testing.TB, upstream string, options fixtureOptions) *fixture 
 		t.Fatal(err)
 	}
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), auth.NewGuard(nil, nil))
+	identity, err := useridentity.Open(context.Background(), useridentity.Options{Dir: manager.Capture().DataDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	sink := &collector{}
-	handler := newTestHandler(authHTTP, sink, options)
-	fx := &fixture{t: t, config: manager, path: path, key: created.Key.Reveal(), sink: sink, handler: handler}
+	handler := newTestHandler(authHTTP, sink, identity, options)
+	fx := &fixture{t: t, config: manager, path: path, key: created.Key.Reveal(), sink: sink, handler: handler, identity: identity}
 	fx.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		target, _, _ := strings.Cut(r.RequestURI, "?")
 		route, ok := MatchRoute(r.Method, target)
@@ -232,12 +243,12 @@ func startUpstream(t *testing.T, reply http.HandlerFunc) (*recordingUpstream, *h
 	return upstream, server
 }
 
-func newTestHandler(authHTTP *auth.HTTP, sink ResultSink, options fixtureOptions) *Handler {
+func newTestHandler(authHTTP *auth.HTTP, sink ResultSink, identity *useridentity.Service, options fixtureOptions) *Handler {
 	logger := slog.New(slog.DiscardHandler)
 	if options.logs != nil {
 		logger = slog.New(slog.NewJSONHandler(options.logs, nil))
 	}
-	return NewHandler(Options{Auth: authHTTP, Sink: sink, Hooks: options.hooks, Logger: logger})
+	return NewHandler(Options{Auth: authHTTP, Sink: sink, Hooks: options.hooks, Identity: identity, Logger: logger})
 }
 
 func startBenchUpstream(b *testing.B) string {

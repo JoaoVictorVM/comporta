@@ -28,6 +28,10 @@ const (
 	CodeProviderError           Code = "provider_error"
 	CodeInternalError           Code = "internal_error"
 	CodeClientDisconnected      Code = "client_disconnected"
+	CodeUserRequired            Code = "user_required"
+	CodeUserInvalid             Code = "user_invalid"
+	CodeUserEmailNotAllowed     Code = "user_email_not_allowed"
+	CodeUserDocumentNotAllowed  Code = "user_document_not_allowed"
 )
 
 // ErrorClass groups failures for internal decisions, such as a later fallback.

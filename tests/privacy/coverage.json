@@ -1,0 +1,60 @@
+{
+  "constructors": ["AnthropicBody", "AnthropicStreamBody", "CountBody", "OpenAIBody", "OpenAIStreamBody"],
+  "instrumented_go_files": [
+    "internal/proxy/bench_test.go",
+    "internal/proxy/handler_test.go",
+    "internal/proxy/result_test.go",
+    "internal/proxy/sse_test.go",
+    "tests/integration/config_proxy_test.go",
+    "tests/privacy/canary_test.go"
+  ],
+  "parser_only_go_files": [
+    {
+      "file": "internal/proxy/envelope_test.go",
+      "reason": "Spelling cases for the parser and the signature. They call the parser directly and never reach a log, a sink, a provider or an error path."
+    }
+  ],
+  "instrumented_sdk_file": "tests/sdk/compatibility_test.py",
+  "cases": [
+    "process/success",
+    "process/rate-limit",
+    "process/overload",
+    "process/disconnect-midstream",
+    "process/header-timeout",
+    "process/client-disconnect",
+    "process/invalid-identity",
+    "process/missing-user",
+    "process/invalid-request",
+    "pipeline/provider-receives-prompt",
+    "pipeline/upstream-error-echo",
+    "pipeline/stream-error-echo",
+    "pipeline/hook-panic",
+    "pipeline/sink-failure",
+    "pipeline/timeout",
+    "pipeline/client-disconnect",
+    "startup/keyfile-failure"
+  ],
+  "channels": [
+    {"name": "logs", "status": "covered", "description": "Structured logs and stdout or stderr of every process in a run, including the fake provider"},
+    {"name": "errors", "status": "covered", "description": "JSON and SSE answers the gateway builds, reconstructed from provider failures"},
+    {"name": "results", "status": "covered", "description": "Every attempt result published, as JSON and through fmt"},
+    {"name": "files", "status": "covered", "description": "Files generated under the data directory, including temporaries and keys"},
+    {"name": "database", "status": "unavailable", "required_by": "usage storage", "description": "Records, WAL, aggregates and events, examined after checkpoint and close"},
+    {"name": "metrics", "status": "unavailable", "required_by": "telemetry", "description": "Local collector: names, labels and values"},
+    {"name": "traces", "status": "unavailable", "required_by": "telemetry", "description": "Local collector: span attributes"},
+    {"name": "alerts", "status": "unavailable", "required_by": "alerts", "description": "Local webhook receiver: actual payloads"}
+  ],
+  "jobs": {
+    "test": "Go canary on Linux, Windows and macOS",
+    "race": "Go canary with the race detector",
+    "sdk": "Official SDKs with marked prompts, scanning the output of every process",
+    "container": "Marked requests against the image, scanning the container logs"
+  },
+  "consumer_contract": [
+    "Records store AttemptResult.UserHash.Hex() with AppName and Anonymous, and never add a raw user column",
+    "Per-user limits, loop state and cache key on the pair of app and hash, plus the anonymous flag",
+    "Search and deletion call LookupHash for each app in history, including removed apps, and pick anonymous explicitly",
+    "A storage-backed HistoryGuard replaces the filesystem guard before the database is created, and its reset keeps spending totals",
+    "Each channel above moves to covered when it exists, in the same change, and the suite then requires it"
+  ]
+}

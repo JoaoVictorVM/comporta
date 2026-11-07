@@ -18,6 +18,7 @@ import (
 
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/keys"
+	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
 // Operation distinguishes generation, which consumes tokens, from the advisory
@@ -51,38 +52,39 @@ type Optional[T any] struct {
 func known[T any](value T) Optional[T] { return Optional[T]{Value: value, Known: true} }
 
 // Envelope holds what the pipeline stages need to know about one request. The raw
-// user identifier stays unexported and reachable only through RawUser, and every
-// generic representation (fmt, slog, JSON) shows approved metadata only.
+// user identifier stays unexported and reachable only through RawUser until identity
+// is resolved, when it is dropped. Every generic representation (fmt, slog, JSON) shows
+// approved metadata only, which leaves out the pseudonym as well.
 type Envelope struct {
-	RequestID          string
-	AppName            string
-	KeyID              string
-	ConfigGeneration   int64
-	APIFormat          auth.Format
-	Endpoint           string
-	Operation          Operation
-	ModelRequested     string
-	ModelEffective     string
-	MaxTokens          Optional[int64]
-	OutputLimitField   string
-	Stream             bool
-	Temperature        Optional[string]
-	UserSource         UserSource
-	LastMessagesHash   Optional[[32]byte]
-	RequestHash        [32]byte
-	BodySizeOriginal   int64
-	BodySizeEffective  int64
-	ImageCount         int64
-	ClientAskedUsage   bool
-	rawUser            string
-	transportOnlyPatch []Patch
+	RequestID         string
+	AppName           string
+	KeyID             string
+	ConfigGeneration  int64
+	APIFormat         auth.Format
+	Endpoint          string
+	Operation         Operation
+	ModelRequested    string
+	ModelEffective    string
+	MaxTokens         Optional[int64]
+	OutputLimitField  string
+	Stream            bool
+	Temperature       Optional[string]
+	UserSource        UserSource
+	Identity          useridentity.Identity
+	LastMessagesHash  Optional[[32]byte]
+	RequestHash       [32]byte
+	BodySizeOriginal  int64
+	BodySizeEffective int64
+	ImageCount        int64
+	ClientAskedUsage  bool
+	rawUser           string
 }
 
-// RawUser returns the identifier sent by the client. It is sensitive and must not
-// reach a log, an event or a persisted record.
+// RawUser returns the identifier sent by the client, until identity is resolved. It is
+// sensitive and must not reach a log, an event or a persisted record.
 func (e *Envelope) RawUser() (string, UserSource, bool) {
-	if e.UserSource == UserSourceNone {
-		return "", UserSourceNone, false
+	if e.UserSource == UserSourceNone || e.Identity.Resolved() {
+		return "", e.UserSource, false
 	}
 	return e.rawUser, e.UserSource, true
 }
@@ -224,7 +226,7 @@ func parseRequest(route Route, r *http.Request, body []byte, identity keys.Ident
 func (p *prepared) refreshHashes() {
 	semantic := make([]Patch, 0, len(p.patches))
 	for _, patch := range p.patches {
-		if !slices.ContainsFunc(p.envelope.transportOnlyPatch, func(other Patch) bool { return other.At == patch.At }) {
+		if !patch.transportOnly {
 			semantic = append(semantic, patch)
 		}
 	}
@@ -384,8 +386,8 @@ func applyUsagePatch(p *prepared) string {
 	if err != nil {
 		return "request body could not be prepared"
 	}
+	patch.transportOnly = true
 	p.patches = append(p.patches, patch)
-	envelope.transportOnlyPatch = append(envelope.transportOnlyPatch, patch)
 	return ""
 }
 

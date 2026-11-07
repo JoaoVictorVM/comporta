@@ -288,3 +288,140 @@ func TestServeInvalidConfigExitsOne(t *testing.T) {
 		})
 	}
 }
+
+func dataFile(path, name string) string {
+	return filepath.Join(filepath.Dir(path), "data", name)
+}
+
+func assertPortsFree(t *testing.T, ports ...int) {
+	t.Helper()
+	for _, port := range ports {
+		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			t.Fatalf("port %d stayed bound: %v", port, err)
+		}
+		_ = listener.Close()
+	}
+}
+
+func TestServeInitializesIdentityBeforeListeners(t *testing.T) {
+	t.Setenv("COMPORTA_TEST_KEY", "value")
+	path, proxyPort, adminPort := listenerConfig(t)
+	provision(t, path)
+	// A directory in the key's place cannot be read as a key, and must keep every
+	// port closed instead of reaching the listeners.
+	if err := os.Mkdir(dataFile(path, "hmac.key"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := run(t, "serve", "--config", path)
+	if code != 1 || strings.Contains(stderr, "listening") || strings.Contains(stderr, filepath.Dir(path)) {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	assertPortsFree(t, proxyPort, adminPort)
+}
+
+func TestMissingHistoryKeyAbortsStartup(t *testing.T) {
+	t.Setenv("COMPORTA_TEST_KEY", "value")
+	path, proxyPort, adminPort := listenerConfig(t)
+	provision(t, path)
+	if err := os.WriteFile(dataFile(path, "usage.db"), []byte("spend"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := run(t, "serve", "--config", path)
+	want := "hmac.key not found but usage data exists; restore the key or start with --reset-user-history"
+	if code != 1 || !strings.Contains(stderr, want) {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	assertPortsFree(t, proxyPort, adminPort)
+	if _, err := os.Stat(dataFile(path, "hmac.key")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("no key may be generated")
+	}
+}
+
+func TestResetFlagWithoutAdapterRefusesHistory(t *testing.T) {
+	t.Setenv("COMPORTA_TEST_KEY", "value")
+	path, proxyPort, adminPort := listenerConfig(t)
+	provision(t, path)
+	usage := dataFile(path, "usage.db")
+	if err := os.WriteFile(usage, []byte("spend"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := run(t, "serve", "--reset-user-history", "--config", path)
+	want := "user history reset requires usage storage support; restore hmac.key or use a new data directory"
+	if code != 1 || !strings.Contains(stderr, want) {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	assertPortsFree(t, proxyPort, adminPort)
+	if data, err := os.ReadFile(usage); err != nil || string(data) != "spend" {
+		t.Fatalf("usage data was touched: %q, %v", data, err)
+	}
+}
+
+func TestRestartReusesHMACKey(t *testing.T) {
+	t.Setenv("COMPORTA_TEST_KEY", "value")
+	path, _, _ := listenerConfig(t)
+	provision(t, path)
+	logs, stop := startServe(t, path)
+	waitForLog(t, logs, "configuration active")
+	if !strings.Contains(logs.String(), "user identity key created") {
+		t.Fatalf("logs: %s", logs.String())
+	}
+	if code := stop(); code != 0 {
+		t.Fatalf("exit %d: %s", code, logs.String())
+	}
+	first, err := os.ReadFile(dataFile(path, "hmac.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 32 {
+		t.Fatalf("key has %d bytes", len(first))
+	}
+	logs, stop = startServe(t, path)
+	waitForLog(t, logs, "configuration active")
+	if strings.Contains(logs.String(), "user identity key created") {
+		t.Fatalf("a restart must load the key: %s", logs.String())
+	}
+	if code := stop(); code != 0 {
+		t.Fatalf("exit %d: %s", code, logs.String())
+	}
+	second, err := os.ReadFile(dataFile(path, "hmac.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("the key changed across a restart")
+	}
+}
+
+func TestResetFlagWithExistingKeyChangesNothing(t *testing.T) {
+	t.Setenv("COMPORTA_TEST_KEY", "value")
+	path, _, _ := listenerConfig(t)
+	provision(t, path)
+	logs, stop := startServe(t, path)
+	waitForLog(t, logs, "configuration active")
+	if code := stop(); code != 0 {
+		t.Fatalf("exit %d: %s", code, logs.String())
+	}
+	before, err := os.ReadFile(dataFile(path, "hmac.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr lockedBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	exit := make(chan int, 1)
+	go func() {
+		exit <- Execute(ctx, []string{"serve", "--reset-user-history", "--config", path}, &stdout, &stderr)
+	}()
+	waitForLog(t, &stderr, "configuration active")
+	cancel()
+	if code := <-exit; code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "changed nothing") {
+		t.Fatalf("logs: %s", stderr.String())
+	}
+	after, err := os.ReadFile(dataFile(path, "hmac.key"))
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("the flag touched the key: %v", err)
+	}
+}
