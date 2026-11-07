@@ -295,3 +295,75 @@ func TestUsagePatch(t *testing.T) {
 		})
 	}
 }
+
+// resolvedFixture parses a request and runs the identity stage against a real snapshot.
+func resolvedFixture(t *testing.T, route Route, body string, headers ...string) (*prepared, *fixture) {
+	t.Helper()
+	_, server := startUpstream(t, nil)
+	fx := newFixture(t, server.URL, fixtureOptions{})
+	result := mustParse(t, route, body, headers...)
+	if failure := result.applyIdentity(fx.identity, route, fx.config.Capture()); failure != nil {
+		t.Fatalf("failure %+v", failure)
+	}
+	return result, fx
+}
+
+func TestResolvedEnvelopeDropsRawUser(t *testing.T) {
+	result, _ := resolvedFixture(t, RouteChatCompletions, `{"model":"m","messages":[],"user":"`+rawUserCanary+`"}`)
+	value, source, ok := result.envelope.RawUser()
+	if ok || value != "" {
+		t.Fatalf("raw identifier still reachable: %q", value)
+	}
+	if source != UserSourceField || result.envelope.UserSource != UserSourceField {
+		t.Fatalf("the category must stay: %q", source)
+	}
+	if result.envelope.rawUser != "" {
+		t.Fatal("the raw identifier stayed in the envelope")
+	}
+	if !result.envelope.Identity.Resolved() || result.envelope.Identity.Anonymous() {
+		t.Fatal("identity not resolved")
+	}
+}
+
+func TestIdentityRepresentationsStaySanitized(t *testing.T) {
+	result, fx := resolvedFixture(t, RouteChatCompletions, `{"model":"m","messages":[],"user":"`+rawUserCanary+`"}`)
+	envelope := result.envelope
+	hash := hashOf(t, fx, rawUserCanary)
+	marshaled, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged, text strings.Builder
+	slog.New(slog.NewJSONHandler(&logged, nil)).Info("x", "envelope", envelope, "value", *envelope, "identity", envelope.Identity)
+	slog.New(slog.NewTextHandler(&text, nil)).Info("x", "envelope", envelope, "identity", envelope.Identity)
+	for name, value := range map[string]string{
+		"json": string(marshaled), "slog": logged.String(), "text": text.String(),
+		"v": fmt.Sprintf("%v", envelope), "plus": fmt.Sprintf("%+v", *envelope), "gosyn": fmt.Sprintf("%#v", *envelope),
+		"identity": fmt.Sprintf("%+v", envelope.Identity),
+	} {
+		if strings.Contains(value, rawUserCanary) || strings.Contains(value, hash) {
+			t.Errorf("%s exposes the identity: %s", name, value)
+		}
+	}
+}
+
+func TestHashRecomputedAfterIdentity(t *testing.T) {
+	plain := `{"model":"m","messages":[],"stream":true}`
+	parsed := mustParse(t, RouteChatCompletions, plain)
+	if parsed.envelope.RequestHash != sha256.Sum256([]byte(plain)) {
+		t.Fatal("before identity, the hash covers the body as sent")
+	}
+	result, fx := resolvedFixture(t, RouteChatCompletions, plain, "X-Comporta-User", "user_123")
+	hash := hashOf(t, fx, "user_123")
+	semantic := `{"model":"m","messages":[],"stream":true,"user":"` + hash + `"}`
+	if result.envelope.RequestHash != sha256.Sum256([]byte(semantic)) {
+		t.Fatal("the hash must follow the pseudonymized body")
+	}
+	effective := result.effectiveBody()
+	if result.envelope.BodySizeEffective != int64(len(effective)) || result.envelope.BodySizeOriginal != int64(len(plain)) {
+		t.Fatalf("sizes %d %d", result.envelope.BodySizeOriginal, result.envelope.BodySizeEffective)
+	}
+	if !strings.Contains(string(effective), `"include_usage":true`) || !strings.Contains(string(effective), hash) {
+		t.Fatalf("effective %s", effective)
+	}
+}

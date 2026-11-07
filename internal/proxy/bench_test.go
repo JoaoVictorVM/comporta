@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
 func benchmarkBody(messages int) []byte {
@@ -83,5 +85,30 @@ func BenchmarkRequestThroughHandler(b *testing.B) {
 		if response.StatusCode != http.StatusOK {
 			b.Fatalf("status %d", response.StatusCode)
 		}
+	}
+}
+
+// BenchmarkIdentityStage measures what the identity stage adds to a request. It is
+// local and compares runs on one machine; it says nothing about latency under load.
+func BenchmarkIdentityStage(b *testing.B) {
+	service, err := useridentity.Open(b.Context(), useridentity.Options{Dir: b.TempDir()})
+	if err != nil {
+		b.Fatal(err)
+	}
+	document, err := ParseDocument([]byte(`{"model":"m","messages":[],"metadata":{"user_id":"user_123","channel":"demo"},"stream":true}`))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		identity, err := service.Resolve("bot", "user_123", true, true)
+		if err != nil {
+			b.Fatal(err)
+		}
+		patches, failure := identityPatches(document, RouteMessages, identity.Hash().Hex())
+		if failure != nil {
+			b.Fatal(failure.Message)
+		}
+		document.Apply(patches)
 	}
 }

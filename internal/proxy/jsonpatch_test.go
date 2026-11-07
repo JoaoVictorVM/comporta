@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -150,5 +152,89 @@ func TestMembersAndElementsLocateValues(t *testing.T) {
 	list, _ := document.Path("l")
 	if elements := document.Elements(list); len(elements) != 3 || string(document.Bytes(elements[1])) != `"x"` {
 		t.Fatalf("elements: %+v", elements)
+	}
+}
+
+func TestIdentityAndUsageRootInsertionsCompose(t *testing.T) {
+	upstream, server := startUpstream(t, sseReply("data: [DONE]\n\n"))
+	fx := newFixture(t, server.URL, fixtureOptions{})
+	body := `{"model":"fake-gpt","messages":[],"stream":true}`
+	if response, text := fx.post("/v1/chat/completions", "openai", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", response.StatusCode, text)
+	}
+	hash := fx.identity.AnonymousHash("bot").Hex()
+	want := `{"model":"fake-gpt","messages":[],"stream":true,"stream_options":{"include_usage":true},"user":"` + hash + `"}`
+	if got := upstream.lastBody(); got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+	if !json.Valid([]byte(upstream.lastBody())) {
+		t.Fatal("invalid JSON")
+	}
+
+	present := `{"model":"fake-gpt","messages":[],"user":"user_123","stream":true}`
+	if response, text := fx.post("/v1/chat/completions", "openai", present); response.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", response.StatusCode, text)
+	}
+	replaced := `{"model":"fake-gpt","messages":[],"user":"` + hashOf(t, fx, "user_123") + `","stream":true,"stream_options":{"include_usage":true}}`
+	if got := upstream.lastBody(); got != replaced {
+		t.Fatalf("got  %s\nwant %s", got, replaced)
+	}
+
+	last := `{"model":"fake-gpt","messages":[],"stream":true,"user":"user_123"}`
+	if response, text := fx.post("/v1/chat/completions", "openai", last); response.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", response.StatusCode, text)
+	}
+	adjacent := `{"model":"fake-gpt","messages":[],"stream":true,"user":"` + hashOf(t, fx, "user_123") + `","stream_options":{"include_usage":true}}`
+	if got := upstream.lastBody(); got != adjacent {
+		t.Fatalf("a replacement next to an insertion: %s", got)
+	}
+}
+
+func TestMetadataInsertionPreservesUnknownBytes(t *testing.T) {
+	upstream, server := startUpstream(t, nil)
+	fx := newFixture(t, server.URL, fixtureOptions{})
+	body := "{ \"model\" : \"fake-claude\",\n\t\"max_tokens\":1,\"messages\":[],\"metadata\": {\"a\\u00e9\":1.50 , \"z\":[ null ]\n},\"n\":123456789012345678901234567890 }  \n"
+	if response, text := fx.post("/v1/messages", "anthropic", body); response.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", response.StatusCode, text)
+	}
+	hash := fx.identity.AnonymousHash("bot").Hex()
+	want := strings.Replace(body, `[ null ]`, `[ null ],"user_id":"`+hash+`"`, 1)
+	if got := upstream.lastBody(); got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+}
+
+func TestIdentityPatchNotExcludedWithUsagePatch(t *testing.T) {
+	service := newTestIdentityService(t)
+	apply := func(id string) *prepared {
+		result := mustParse(t, RouteChatCompletions, `{"model":"m","messages":[],"stream":true}`)
+		identity, err := service.Resolve("bot", id, true, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		patches, failure := identityPatches(result.document, RouteChatCompletions, identity.Hash().Hex())
+		if failure != nil {
+			t.Fatalf("failure %+v", failure)
+		}
+		result.patches = append(result.patches, patches...)
+		result.refreshHashes()
+		return result
+	}
+	first, second := apply("user_1"), apply("user_2")
+	// Both patches insert at the same offset: telling them apart by position would drop
+	// the identity from the hash along with the usage request.
+	if first.patches[0].At != first.patches[1].At {
+		t.Fatalf("the case needs insertions at one offset: %+v", first.patches)
+	}
+	if first.envelope.RequestHash == second.envelope.RequestHash {
+		t.Fatal("two users must not share a request hash")
+	}
+	hash, err := service.LookupHash("bot", "user_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.Sum256([]byte(`{"model":"m","messages":[],"stream":true,"user":"` + hash.Hex() + `"}`))
+	if first.envelope.RequestHash != want {
+		t.Fatal("the hash must cover the identity and leave out the usage request")
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/keys"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
 	"github.com/JoaoVictorVM/comporta/internal/server"
+	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
 const providerSecret = "provider-key-for-tests"
@@ -67,6 +68,7 @@ type gateway struct {
 	store      *keys.Store
 	keyManager *keys.Manager
 	runtime    *server.Runtime
+	identity   *useridentity.Service
 	results    *resultCollector
 	upstream   *httptest.Server
 	requests   chan fakeprovider.Request
@@ -142,9 +144,13 @@ func startGateway(t *testing.T, fake fakeprovider.Options, extraListeners string
 	if err != nil {
 		t.Fatal(err)
 	}
+	identity, err := useridentity.Open(context.Background(), useridentity.Options{Dir: manager.Capture().DataDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	results := &resultCollector{}
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), auth.NewGuard(nil, nil))
-	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results})
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results, Identity: identity})
 	runtime, err := server.Open(context.Background(), server.Options{
 		Source:  manager,
 		Proxy:   server.ProxySurface(manager, handler),
@@ -168,7 +174,7 @@ func startGateway(t *testing.T, fake fakeprovider.Options, extraListeners string
 	})
 	return &gateway{
 		t: t, path: path, dir: dir, config: manager, store: store, keyManager: keyManager,
-		runtime: runtime, results: results, upstream: upstream, requests: requests, baseYAML: text,
+		runtime: runtime, identity: identity, results: results, upstream: upstream, requests: requests, baseYAML: text,
 	}
 }
 

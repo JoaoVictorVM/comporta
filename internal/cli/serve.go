@@ -42,13 +42,14 @@ func newServeCommand(out streams) *cobra.Command {
 			}
 			// Before the listeners: without a key no request can be pseudonymized, and
 			// this failure does not depend on the financial fail mode.
-			if _, err := useridentity.Open(command.Context(), useridentity.Options{
+			identity, err := useridentity.Open(command.Context(), useridentity.Options{
 				Dir: snapshot.DataDir(), ResetHistory: resetHistory, Logger: logger,
-			}); err != nil {
+			})
+			if err != nil {
 				logger.Error(err.Error())
 				return errReported
 			}
-			return runGateway(command.Context(), logger, manager, keyManager)
+			return runGateway(command.Context(), logger, manager, keyManager, identity)
 		},
 	}
 	command.Flags().BoolVar(&resetHistory, "reset-user-history", false,
@@ -56,10 +57,10 @@ func newServeCommand(out streams) *cobra.Command {
 	return command
 }
 
-func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager) error {
+func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service) error {
 	guard := auth.NewGuard(nil, logger)
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), guard)
-	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Logger: logger})
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Identity: identity, Logger: logger})
 	defer handler.Close()
 	gateway, err := server.Open(ctx, server.Options{
 		Source:  manager,

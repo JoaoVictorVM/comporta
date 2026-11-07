@@ -66,7 +66,8 @@ func TestProxyStripsComportaCredentials(t *testing.T) {
 	if request.Header.Get("X-Api-Key") != providerSecret || request.Header.Get("Anthropic-Version") != "2023-06-01" {
 		t.Fatalf("headers %s", flat)
 	}
-	if string(request.Body) != body {
+	anonymous := gw.identity.AnonymousHash("bot").Hex()
+	if want := strings.TrimSuffix(body, "}") + `,"metadata":{"user_id":"` + anonymous + `"}}`; string(request.Body) != want {
 		t.Fatalf("body %s", request.Body)
 	}
 }
