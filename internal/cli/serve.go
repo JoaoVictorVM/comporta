@@ -46,7 +46,8 @@ func newServeCommand(out streams) *cobra.Command {
 func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager) error {
 	guard := auth.NewGuard(nil, logger)
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), guard)
-	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP})
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Logger: logger})
+	defer handler.Close()
 	gateway, err := server.Open(ctx, server.Options{
 		Source:  manager,
 		Proxy:   server.ProxySurface(manager, handler),

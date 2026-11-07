@@ -109,3 +109,24 @@ func TestHealthBodyIsStatic(t *testing.T) {
 		t.Fatalf("status %d, body %v", response.StatusCode, body)
 	}
 }
+
+func FuzzNormalizeHost(f *testing.F) {
+	for _, seed := range []string{"localhost", "[::1]:8080", "evil.example", "a@b", "[fe80::1%25en0]", "x:1:2", "*.a"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, raw string) {
+		host, ok := NormalizeHost(raw)
+		if !ok {
+			return
+		}
+		if strings.ContainsAny(host, "@/\\?#%* \t,") {
+			t.Fatalf("%q normalized to %q", raw, host)
+		}
+		if again, stable := NormalizeHost(host); !stable || again != host {
+			t.Fatalf("%q is not stable: %q", host, again)
+		}
+		if echoableHost.MatchString(host) && strings.ContainsAny(host, "\"\\") {
+			t.Fatalf("%q is unsafe to echo", host)
+		}
+	})
+}

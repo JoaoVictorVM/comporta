@@ -162,11 +162,29 @@ func checkEndpoint(raw string, allowQuery bool) (local bool, problem string) {
 	if parsed.Fragment != "" || (!allowQuery && parsed.RawQuery != "") {
 		return false, "must not contain a query or fragment"
 	}
+	if ambiguousPath(parsed.EscapedPath()) {
+		return false, "must not contain dot segments, backslashes or encoded separators in the path"
+	}
 	local = isLocalHost(parsed.Hostname())
 	if parsed.Scheme == "http" && !local {
 		return false, "plain http is only allowed for localhost, loopback or private IP literals"
 	}
 	return local, ""
+}
+
+// ambiguousPath refuses a path that an intermediary could read differently than the
+// gateway does, since request paths are appended to it.
+func ambiguousPath(path string) bool {
+	lower := strings.ToLower(path)
+	if strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") || strings.Contains(lower, "\\") {
+		return true
+	}
+	for segment := range strings.SplitSeq(strings.ReplaceAll(lower, "%2e", "."), "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func isLocalHost(host string) bool {
