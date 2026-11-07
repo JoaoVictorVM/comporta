@@ -43,7 +43,7 @@ apps:
 
 // fixture is a handler on a real socket, with real key and configuration managers.
 type fixture struct {
-	t       *testing.T
+	t       testing.TB
 	config  *config.Manager
 	path    string
 	key     string
@@ -58,7 +58,7 @@ type fixtureOptions struct {
 	logs      io.Writer
 }
 
-func newFixture(t *testing.T, upstream string, options fixtureOptions) *fixture {
+func newFixture(t testing.TB, upstream string, options fixtureOptions) *fixture {
 	t.Helper()
 	t.Setenv("COMPORTA_PROXY_TEST_KEY", providerCanary)
 	path := filepath.Join(t.TempDir(), "comporta.yaml")
@@ -238,4 +238,19 @@ func newTestHandler(authHTTP *auth.HTTP, sink ResultSink, options fixtureOptions
 		logger = slog.New(slog.NewJSONHandler(options.logs, nil))
 	}
 	return NewHandler(Options{Auth: authHTTP, Sink: sink, Hooks: options.hooks, Logger: logger})
+}
+
+func startBenchUpstream(b *testing.B) string {
+	b.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	b.Cleanup(server.Close)
+	return server.URL
+}
+
+func newBenchFixture(b *testing.B, upstream string) *fixture {
+	b.Helper()
+	return newFixture(b, upstream, fixtureOptions{})
 }

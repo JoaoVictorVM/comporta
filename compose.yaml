@@ -1,0 +1,24 @@
+services:
+  comporta:
+    build: .
+    image: comporta:local
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # The container binds 0.0.0.0 internally; these keep both ports on the host's
+    # loopback. Publishing the admin port more widely would expose it to the network.
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
+    environment:
+      - ANTHROPIC_API_KEY
+    volumes:
+      - comporta-data:/data
+      - ${COMPORTA_CONFIG:-./examples/comporta-container.yaml}:/etc/comporta/comporta.yaml:ro
+
+volumes:
+  comporta-data:

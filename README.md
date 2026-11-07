@@ -2,7 +2,9 @@
 
 Open-source LLM gateway, in development.
 
-**Current state:** this repository delivers the configuration runtime and the app key lifecycle. `comporta serve` loads and validates the configuration and the key store, resolves secrets and applies saved changes without a restart, but it **opens no network ports and proxies no traffic yet**. Authentication exists as a tested internal module that nothing exposes over the network: a key cannot be used against a running service until the proxy lands. The proxy, limits, policies, metering, alerts, telemetry and the admin panel are not implemented, so settings for them are validated and made available without taking effect.
+**Current state:** this repository delivers the configuration runtime, the app key lifecycle and the request proxy. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
+
+**Not implemented yet:** limits, budgets, policies (including `max_tokens` caps and `allowed_models` enforcement on calls), metering and persistence, end-user identity handling, fallback, cache, loop guard, sensitive data detection, alerts, telemetry and the admin panel. Their settings are validated and made available **without taking effect**, so do not rely on them as protection. Usage is measured per request but not stored yet.
 
 ## Commands
 
@@ -13,7 +15,8 @@ comporta keys create <app> [--config path]         # creates a key and prints it
 comporta keys rotate <app> [--config path]         # adds a key, keeping the others valid
 comporta keys list [--config path]                 # lists keys without revealing them
 comporta keys revoke <key-id> [--config path]      # revokes a key
-comporta serve [--config path]                     # keeps configuration and keys active until interrupted
+comporta serve [--config path]                     # runs the proxy and admin listeners until interrupted
+comporta fake-provider [--port 9090] [--bind ip] [--scenario name]  # local imitation of both provider APIs
 ```
 
 `config validate` exits 0 when the file is valid and 1 with a list of errors otherwise. Results go to stdout and diagnostics to stderr. The structural mode is meant for CI: it checks the format of secret references, but it does not prove that a secret exists or that a provider works.
@@ -28,6 +31,13 @@ cp examples/comporta.yaml comporta.yaml
 echo 'ANTHROPIC_API_KEY=your-key' > .env
 ./comporta keys create my-app
 ./comporta serve
+```
+
+Then point an existing SDK at the gateway. Nothing else in the application changes:
+
+```python
+client = anthropic.Anthropic(base_url="http://localhost:8080", api_key="cmp_...")
+client = openai.OpenAI(base_url="http://localhost:8080/v1", api_key="cmp_...")
 ```
 
 [`examples/comporta.yaml`](examples/comporta.yaml) is minimal and [`examples/comporta-full.yaml`](examples/comporta-full.yaml) shows every field. Prices in the examples are illustrative. The published JSON Schema, [`schema/comporta.schema.json`](schema/comporta.schema.json), gives editors autocomplete and validation, and documents each default. Relational rules, such as model references and hard caps, are enforced only by `config validate`.
@@ -101,6 +111,78 @@ These commands read the configuration without resolving secrets and write direct
 
 After 20 failed attempts from one address within 60 seconds, that address gets 429 with `Retry-After` for 5 minutes, even with a valid key. This protection is held in memory per process and a restart clears it. It uses only the address of the connection and ignores `Forwarded`, `X-Forwarded-For` and `X-Real-IP`, so all clients behind one reverse proxy share a single counter and can block each other.
 
+On Anthropic routes a key may come in `x-api-key` or as a bearer token, because SDK versions differ in which one they send for the same `api_key`. OpenAI routes take a bearer token only. Sending both, or repeating either, is refused.
+
+## Proxy
+
+The proxy listens on `127.0.0.1:8080` and the admin listener on `127.0.0.1:8081`. They are separate: no admin route exists on the proxy, and no conversation route on the admin listener. Both refuse a `Host` outside `localhost`, `127.0.0.1`, `[::1]` and `listeners.allowed_hosts` with 421, which protects against DNS rebinding. Forwarded headers are never trusted.
+
+| Endpoint | Format | Notes |
+|---|---|---|
+| `POST /v1/messages` | Anthropic | Normal and streaming |
+| `POST /v1/messages/count_tokens` | Anthropic | Advisory count, never treated as consumption |
+| `POST /v1/chat/completions` | OpenAI, also used for Ollama | Normal and streaming |
+| `GET /v1/models` | Chosen by the client | Local list, see below |
+
+Every other path or method returns 404 `endpoint not allowed by Comporta`, without forwarding anything, so an app cannot use your provider key for files, batches or admin APIs. The admin listener has only `GET /healthz`, which answers `{"status":"ok"}` and says nothing about providers.
+
+**What reaches the provider:** the body exactly as received, byte for byte, including unknown fields. The one change today is on OpenAI-format streaming, where `stream_options.include_usage` is set to `true` so that usage can be measured. If the client did not ask for it, the extra usage chunk is removed before delivery. Only `content-type`, `anthropic-version` and `anthropic-beta` are forwarded; every other client header is dropped, and the app key is replaced by the provider key. The destination comes only from the configuration. Redirects are never followed, proxy environment variables are ignored, and a remote provider name that resolves to a private, loopback or link-local address is refused. A base URL may end in `/v1` or not; the same path results.
+
+**Errors** use the format of the route and carry a `comporta_code`. Provider error messages are never passed on, because they can echo prompts: status and category are preserved and the message is rebuilt. Inside a stream already started, the failure is an error event followed by closing the stream, so a truncated stream never looks like a success.
+
+| `comporta_code` | Status | Meaning |
+|---|---|---|
+| `endpoint_not_allowed` | 404 | Route or method outside the list |
+| `host_not_allowed` | 421 | `Host` not allowed |
+| `invalid_request` | 400 | Invalid JSON, types, duplicate keys or query |
+| `model_unknown`, `provider_format_mismatch` | 400 | Model not declared, or declared in another API format |
+| `unsupported_media_type` | 415 | Body is not uncompressed JSON |
+| `request_too_large` | 413 | Body over `max_body_bytes` |
+| `provider_unreachable`, `provider_redirect`, `invalid_upstream_response` | 502 | Provider could not be used |
+| `provider_timeout` | 504 | A deadline expired |
+| `provider_rate_limited`, `provider_overloaded`, `provider_error` | Provider's | Provider refused or failed |
+| `internal_error` | 500 | A panic, limited to that request and logged without content |
+
+**Limits:** request body 10 MB, response headers from the provider 60 s, non-streaming requests 300 s in total including reading the body, stream silence 60 s, all configurable under `listeners`. Fixed: 64 MB per non-streaming response, 10 MB per stream event, JSON nesting of 128 levels, 64 KiB of request headers. On shutdown, requests get 10 s to finish and are then canceled, so a long stream can end when the service stops.
+
+**Duplicate JSON keys are refused** anywhere in the body, because the gateway and the provider could otherwise read different values. Each client connection carries one request, which is what lets a reload change the header timeout, so clients open a new connection per request. Timeouts and allowed hosts apply to new requests after a reload; requests in flight keep the configuration and identity they started with. Connections to providers use HTTP/1.1.
+
+### Model catalog
+
+`GET /v1/models` lists the app's `allowed_models` in the format of the client, without calling a provider, so it costs nothing and says nothing about availability. `created` and `created_at` hold fixed values because the configuration has no release dates. The Anthropic format supports `limit`, `after_id` and `before_id`. This list is only a listing: until policies exist, an app can still call any declared model.
+
+### Usage and privacy
+
+Each provider call produces one internal result with counters, timing and categories, never content, user identifiers or raw errors. It is not stored anywhere yet. A counter the provider did not report stays unknown instead of becoming zero, and tokens are never estimated. When a client disconnects, the provider call is canceled within 1 s and only what was already observed is recorded, so the usage of an interrupted stream can be lower than what the provider bills.
+
+Prompts and responses stay in memory for the duration of the request and are not logged. End-user identifiers from `X-Comporta-User`, `metadata.user_id` or `user` are read but not validated or pseudonymized yet: **the header is removed, but those body fields still reach the provider as sent.**
+
+## Fake provider
+
+`comporta fake-provider` imitates both APIs with synthetic, deterministic responses, for tests without keys or cost. It listens on `127.0.0.1:9090` by default. The scenario is chosen when it starts, and no request can change it: `success`, `rate-limit` (429), `overload` (529), `header-timeout`, `slow-stream` and `disconnect-midstream`.
+
+```yaml
+providers:
+  fake:
+    api_format: anthropic
+    base_url: http://127.0.0.1:9090
+    models: [fake-claude]
+```
+
+## Container
+
+The image is distroless and runs as a non-root user. `compose.yaml` sets a read-only root filesystem, drops all capabilities, allows writes only to the `/data` volume and publishes both ports on `127.0.0.1` only. Inside the container the service binds `0.0.0.0`, as [`examples/comporta-container.yaml`](examples/comporta-container.yaml) shows.
+
+```sh
+export ANTHROPIC_API_KEY=your-key   # or put it in a .env file next to compose.yaml
+docker compose build
+docker compose run --rm comporta keys create my-app --config /etc/comporta/comporta.yaml
+docker compose up -d
+curl http://127.0.0.1:8081/healthz
+```
+
+Keys live in the volume and survive recreating the container. `COMPORTA_CONFIG` selects another configuration file, which is mounted read-only. The image has no shell or curl, so check it from the host. Reaching the service from another machine means publishing the proxy port elsewhere and adding its name to `allowed_hosts`; never publish the admin port that way.
+
 ## Development
 
-The repository uses [Task](https://taskfile.dev). `task --list` shows the available tasks, and `task check` runs formatting, static checks, tests, example validation and the vulnerability and secret scanners. The race detector needs a C toolchain: `task test-race`.
+The repository uses [Task](https://taskfile.dev). `task --list` shows the available tasks, and `task check` runs formatting, static checks, tests, example validation and the vulnerability and secret scanners. The race detector needs a C toolchain: `task test-race`. `task test-sdk` runs the official Python SDKs at the versions pinned in `tests/sdk/requirements.txt`, and `task test-container` builds the image and verifies its restrictions; neither needs provider credentials.
