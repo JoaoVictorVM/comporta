@@ -623,7 +623,7 @@ func (d *decoder) decodeRoot(root *yaml.Node) Config {
 	if root == nil {
 		return cfg
 	}
-	fields := d.fields(root, "", "data_dir", "timezone", "fail_mode", "providers", "apps", "listeners", "pricing", "cache", "alerts", "telemetry")
+	fields := d.fields(root, "", "data_dir", "timezone", "fail_mode", "providers", "apps", "listeners", "pricing", "cache", "alerts", "telemetry", "storage")
 	d.optText(fields, "data_dir", "", &cfg.DataDir)
 	d.optText(fields, "timezone", "", &cfg.Timezone)
 	optEnum(d, fields, "fail_mode", "", CodeInvalidValue, &cfg.FailMode, FailClosed, FailOpen)
@@ -646,6 +646,10 @@ func (d *decoder) decodeRoot(root *yaml.Node) Config {
 		d.named(node, "pricing", func(name string, value *yaml.Node, path string) {
 			cfg.Pricing[name] = d.decodePrice(value, path)
 		})
+	}
+	if node, ok := fields["storage"]; ok {
+		storage := d.fields(node, "storage", "retention_days")
+		d.optRange(storage, "retention_days", "storage", 1, 365, &cfg.Storage.RetentionDays)
 	}
 	if node, ok := fields["cache"]; ok {
 		cache := d.fields(node, "cache", "max_bytes")

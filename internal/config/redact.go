@@ -86,6 +86,7 @@ func publicTree(cfg *Config) map[string]any {
 			"anomaly_min_usd":    cfg.Alerts.AnomalyMinUSD.String(),
 		},
 		"telemetry": telemetry,
+		"storage":   map[string]any{"retention_days": cfg.Storage.RetentionDays},
 	}
 }
 
