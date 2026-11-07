@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=../schema/comporta.schema.json
+#
+# Configuration for the container in compose.yaml. It binds every interface inside
+# the container; compose.yaml is what limits both ports to the host's loopback.
+# ANTHROPIC_API_KEY comes from the environment of docker compose, or from a .env file
+# next to compose.yaml.
+
+data_dir: /data
+timezone: UTC
+
+providers:
+  anthropic:
+    api_format: anthropic
+    base_url: https://api.anthropic.com
+    api_key: ${ANTHROPIC_API_KEY}
+    models:
+      - claude-sonnet-4-5
+      - claude-haiku-4-5
+
+apps:
+  my-app:
+    allowed_models:
+      - claude-sonnet-4-5
+      - claude-haiku-4-5
+
+listeners:
+  proxy:
+    bind: 0.0.0.0
+    port: 8080
+  admin:
+    bind: 0.0.0.0
+    port: 8081

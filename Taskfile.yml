@@ -47,6 +47,18 @@ tasks:
     cmds:
       - go test -race ./...
 
+  test-sdk:
+    desc: Run the official SDKs against the gateway and the fake provider, in a virtual environment
+    cmds:
+      - python -m venv .venv
+      - '{{if eq OS "windows"}}.venv/Scripts/python{{else}}.venv/bin/python{{end}} -m pip install --quiet --require-hashes -r tests/sdk/requirements.txt'
+      - '{{if eq OS "windows"}}.venv/Scripts/python{{else}}.venv/bin/python{{end}} -m pytest tests/sdk/compatibility_test.py -q'
+
+  test-container:
+    desc: Build the image and verify compose, hardening and key persistence. Needs Docker and ports 8080 and 8081 free
+    cmds:
+      - go test -tags container -timeout 15m ./tests/integration -run 'Compose|Container'
+
   vuln:
     desc: Scan dependencies for known vulnerabilities
     cmds:

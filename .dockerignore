@@ -1,0 +1,14 @@
+# Everything is excluded by default, so a new local file (keys, data, agent or
+# planning material, .env variants) can never reach the builder by accident.
+*
+!go.mod
+!go.sum
+!cmd
+!internal
+**/*_test.go
+**/testdata
+**/.env*
+**/*.key
+**/*.pem
+**/keys.json
+**/keys.lock

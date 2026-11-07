@@ -1,0 +1,248 @@
+// Package integration exercises the gateway through real sockets, with the real
+// configuration and key managers and the built-in fake provider.
+package integration
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/JoaoVictorVM/comporta/internal/auth"
+	"github.com/JoaoVictorVM/comporta/internal/config"
+	"github.com/JoaoVictorVM/comporta/internal/fakeprovider"
+	"github.com/JoaoVictorVM/comporta/internal/keys"
+	"github.com/JoaoVictorVM/comporta/internal/proxy"
+	"github.com/JoaoVictorVM/comporta/internal/server"
+)
+
+const providerSecret = "provider-key-for-tests"
+
+type resultCollector struct {
+	mu      sync.Mutex
+	results []proxy.AttemptResult
+}
+
+func (c *resultCollector) Publish(_ context.Context, result proxy.AttemptResult) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.results = append(c.results, result)
+	return nil
+}
+
+func (c *resultCollector) last(t *testing.T) proxy.AttemptResult {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		count := len(c.results)
+		var result proxy.AttemptResult
+		if count > 0 {
+			result = c.results[count-1]
+		}
+		c.mu.Unlock()
+		if count > 0 {
+			return result
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("no attempt result")
+	return proxy.AttemptResult{}
+}
+
+// gateway is a complete service: managers, both listeners, a fake upstream.
+type gateway struct {
+	t          *testing.T
+	path       string
+	dir        string
+	config     *config.Manager
+	store      *keys.Store
+	keyManager *keys.Manager
+	runtime    *server.Runtime
+	results    *resultCollector
+	upstream   *httptest.Server
+	requests   chan fakeprovider.Request
+	baseYAML   string
+}
+
+func freePort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func configText(upstreamURL string, proxyPort, adminPort int, extraListeners string) string {
+	return fmt.Sprintf(`timezone: UTC
+providers:
+  anthropic:
+    api_format: anthropic
+    base_url: %[1]s
+    api_key: ${COMPORTA_INTEGRATION_KEY}
+    models: [fake-claude]
+  openai:
+    api_format: openai
+    base_url: %[1]s/v1
+    api_key: ${COMPORTA_INTEGRATION_KEY}
+    models: [fake-gpt]
+apps:
+  bot:
+    allowed_models: [fake-claude, fake-gpt]
+  other:
+    allowed_models: [fake-gpt]
+listeners:
+  proxy: {port: %[2]d}
+  admin: {port: %[3]d}
+%[4]s`, upstreamURL, proxyPort, adminPort, extraListeners)
+}
+
+func startGateway(t *testing.T, fake fakeprovider.Options, extraListeners string) *gateway {
+	t.Helper()
+	t.Setenv("COMPORTA_INTEGRATION_KEY", providerSecret)
+	requests := make(chan fakeprovider.Request, 16)
+	previous := fake.OnRequest
+	fake.OnRequest = func(request fakeprovider.Request) {
+		select {
+		case requests <- request:
+		default:
+		}
+		if previous != nil {
+			previous(request)
+		}
+	}
+	upstream := httptest.NewServer(fakeprovider.New(fake))
+	t.Cleanup(upstream.Close)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "comporta.yaml")
+	text := configText(upstream.URL, freePort(t), freePort(t), extraListeners)
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := config.NewManager(config.ManagerOptions{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := keys.NewStore(manager.Capture().DataDir())
+	if _, err := store.Create(context.Background(), "other"); err != nil {
+		t.Fatal(err)
+	}
+	keyManager, err := keys.NewManager(keys.ManagerOptions{Dir: manager.Capture().DataDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := &resultCollector{}
+	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), auth.NewGuard(nil, nil))
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results})
+	runtime, err := server.Open(context.Background(), server.Options{
+		Source:  manager,
+		Proxy:   server.ProxySurface(manager, handler),
+		Admin:   server.AdminSurface(manager),
+		Workers: []server.Worker{manager.Run, keyManager.Run},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runtime.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			t.Error("the gateway did not stop")
+		}
+		handler.Close()
+	})
+	return &gateway{
+		t: t, path: path, dir: dir, config: manager, store: store, keyManager: keyManager,
+		runtime: runtime, results: results, upstream: upstream, requests: requests, baseYAML: text,
+	}
+}
+
+// createKey makes a key and waits until the running service accepts it.
+func (g *gateway) createKey(app string) keys.Created {
+	g.t.Helper()
+	created, err := g.store.Create(context.Background(), app)
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		request, _ := http.NewRequest(http.MethodGet, g.proxyURL("/v1/models"), nil)
+		request.Header.Set("Authorization", "Bearer "+created.Key.Reveal())
+		response, err := http.DefaultClient.Do(request)
+		if err == nil {
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return created
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	g.t.Fatal("the key was not picked up")
+	return created
+}
+
+func (g *gateway) proxyURL(path string) string {
+	return "http://" + g.runtime.ProxyAddr().String() + path
+}
+
+func (g *gateway) reload(edit func(string) string) {
+	g.t.Helper()
+	g.baseYAML = edit(g.baseYAML)
+	if err := os.WriteFile(g.path, []byte(g.baseYAML), 0o600); err != nil {
+		g.t.Fatal(err)
+	}
+	if status := g.config.Reload(context.Background()); status.Result != config.ResultApplied {
+		g.t.Fatalf("reload: %+v", status)
+	}
+}
+
+func (g *gateway) call(path, key, body string) (*http.Response, string) {
+	g.t.Helper()
+	request, err := http.NewRequest(http.MethodPost, g.proxyURL(path), strings.NewReader(body))
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if strings.HasPrefix(path, "/v1/messages") {
+		request.Header.Set("X-Api-Key", key)
+		request.Header.Set("Anthropic-Version", "2023-06-01")
+	} else {
+		request.Header.Set("Authorization", "Bearer "+key)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	return response, string(data)
+}
+
+func (g *gateway) lastRequest() fakeprovider.Request {
+	g.t.Helper()
+	select {
+	case request := <-g.requests:
+		return request
+	case <-time.After(3 * time.Second):
+		g.t.Fatal("the provider received nothing")
+		return fakeprovider.Request{}
+	}
+}

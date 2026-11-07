@@ -241,8 +241,11 @@ func TestCredentialMustMatchTheRouteFormat(t *testing.T) {
 	f := newFixture(t)
 	key := f.create(t, "bot").Key.Reveal()
 	h := newHTTPFixture(t, f, f.keyManager(t))
-	if response := h.serve(Anthropic, withBearer(requestFrom("192.0.2.1:1"), key)); response.Code != http.StatusUnauthorized {
-		t.Fatalf("bearer on an Anthropic route: %d", response.Code)
+	if response := h.serve(Anthropic, withBearer(requestFrom("192.0.2.1:1"), key)); response.Code != http.StatusOK {
+		t.Fatalf("bearer on an Anthropic route, as recent SDKs send it: %d", response.Code)
+	}
+	if response := h.serve(Anthropic, withAPIKey(requestFrom("192.0.2.1:1"), key)); response.Code != http.StatusOK {
+		t.Fatalf("x-api-key on an Anthropic route: %d", response.Code)
 	}
 	if response := h.serve(OpenAI, withAPIKey(requestFrom("192.0.2.1:1"), key)); response.Code != http.StatusUnauthorized {
 		t.Fatalf("x-api-key on an OpenAI route: %d", response.Code)
@@ -272,6 +275,11 @@ func TestModelsFormatSelection(t *testing.T) {
 	both.Header.Set("x-api-key", "anything")
 	if ModelsFormat(both) != FormatAnthropic {
 		t.Fatal("conflicts are rejected later, in the Anthropic format")
+	}
+	versioned := withBearer(requestFrom("192.0.2.1:1"), "anything")
+	versioned.Header.Set("Anthropic-Version", "2023-06-01")
+	if ModelsFormat(versioned) != FormatAnthropic {
+		t.Fatal("an Anthropic SDK sending a bearer token selects Anthropic")
 	}
 }
 

@@ -218,3 +218,17 @@ func TestDiagnosticPositions(t *testing.T) {
 		t.Fatalf("documented message changed: %s", got)
 	}
 }
+
+func TestBaseURLRefusesAmbiguousPaths(t *testing.T) {
+	for _, base := range []string{
+		"https://x.example/a/../b", "https://x.example/./b", "https://x.example/a%2fb",
+		"https://x.example/a%2Fb", "https://x.example/a%5cb", "https://x.example/%2e%2e/b",
+	} {
+		requireDiagnostic(t, withProviderURL(base), CodeInvalidValue, "providers.p.base_url")
+	}
+	for _, base := range []string{"https://x.example/v1", "https://x.example/gateway/v1/", "http://localhost:11434"} {
+		if _, diags := loadText(t, withProviderURL(base), structuralOptions()); len(diags) > 0 {
+			t.Errorf("%s rejected: %+v", base, diags)
+		}
+	}
+}

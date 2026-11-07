@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +40,13 @@ func freePort(t *testing.T) int {
 	}
 	defer func() { _ = listener.Close() }()
 	return listener.Addr().(*net.TCPAddr).Port
+}
+
+// listenerConfig uses free ports, since the defaults may be in use on the machine.
+func listenerConfig(t *testing.T) (path string, proxyPort, adminPort int) {
+	t.Helper()
+	proxyPort, adminPort = freePort(t), freePort(t)
+	return writeConfig(t, validConfig+fmt.Sprintf("listeners: {proxy: {port: %d}, admin: {port: %d}}\n", proxyPort, adminPort)), proxyPort, adminPort
 }
 
 func provision(t *testing.T, path string) {
@@ -127,12 +135,16 @@ func TestServeRequiresReadableKeyStore(t *testing.T) {
 
 func TestServeRunsBothWatchersAndStops(t *testing.T) {
 	t.Setenv("COMPORTA_TEST_KEY", "value")
-	path := writeConfig(t, validConfig)
+	path, _, _ := listenerConfig(t)
 	provision(t, path)
 	logs, stop := startServe(t, path)
 	waitForLog(t, logs, "configuration active")
 
-	edited := strings.Replace(validConfig, "timezone: UTC", "timezone: America/Sao_Paulo", 1)
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(string(current), "timezone: UTC", "timezone: America/Sao_Paulo", 1)
 	if err := os.WriteFile(path, []byte(edited), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +161,7 @@ func TestServeRunsBothWatchersAndStops(t *testing.T) {
 
 func TestServeSavesNothingWhenNoKeyWasUsed(t *testing.T) {
 	t.Setenv("COMPORTA_TEST_KEY", "value")
-	path := writeConfig(t, validConfig)
+	path, _, _ := listenerConfig(t)
 	provision(t, path)
 	store := filepath.Join(filepath.Dir(path), "data", "keys.json")
 	before, err := os.ReadFile(store)
@@ -170,76 +182,77 @@ func TestServeSavesNothingWhenNoKeyWasUsed(t *testing.T) {
 	}
 }
 
-func TestServeStillOpensNoPorts(t *testing.T) {
-	t.Setenv("COMPORTA_TEST_KEY", "value")
-	proxy, admin := freePort(t), freePort(t)
-	path := writeConfig(t, validConfig+fmt.Sprintf("listeners: {proxy: {port: %d}, admin: {port: %d}}\n", proxy, admin))
+func TestServeOpensConfiguredListeners(t *testing.T) {
+	t.Setenv("COMPORTA_TEST_KEY", "canary-serve-key")
+	path, proxyPort, adminPort := listenerConfig(t)
 	provision(t, path)
 	logs, stop := startServe(t, path)
-	waitForLog(t, logs, "configuration active")
-	for _, port := range []int{proxy, admin} {
+	waitForLog(t, logs, "listening")
+
+	health, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/healthz", adminPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = health.Body.Close()
+	if health.StatusCode != http.StatusOK {
+		t.Fatalf("health status %d", health.StatusCode)
+	}
+	models, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/models", proxyPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = models.Body.Close()
+	if models.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("the proxy must require a key, got %d", models.StatusCode)
+	}
+
+	if code := stop(); code != 0 {
+		t.Fatalf("exit %d: %s", code, logs.String())
+	}
+	for _, port := range []int{proxyPort, adminPort} {
 		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
-			t.Fatalf("serve must not bind port %d: %v", port, err)
+			t.Fatalf("port %d still bound after shutdown: %v", port, err)
 		}
 		_ = listener.Close()
 	}
-	if strings.Contains(logs.String(), "listening") {
-		t.Fatalf("serve must not announce ports: %s", logs.String())
+	output := logs.String()
+	if !strings.Contains(output, `"level":"INFO"`) || !strings.Contains(output, "shutdown complete") {
+		t.Fatalf("logs must be JSON and report shutdown: %s", output)
 	}
-	if code := stop(); code != 0 {
-		t.Fatalf("exit %d", code)
+	if strings.Contains(output, "canary-serve-key") {
+		t.Fatalf("logs expose a secret: %s", output)
 	}
 }
 
-func TestServeLoadsAndWaitsForCancellation(t *testing.T) {
-	t.Setenv("COMPORTA_TEST_KEY", "canary-serve-key")
-	port := freePort(t)
-	path := writeConfig(t, validConfig+fmt.Sprintf("listeners: {proxy: {port: %d}}\n", port))
+func TestServeInvalidStoreOpensNoPorts(t *testing.T) {
+	t.Setenv("COMPORTA_TEST_KEY", "value")
+	path, proxyPort, adminPort := listenerConfig(t)
+	code, _, _ := run(t, "serve", "--config", path)
+	if code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	for _, port := range []int{proxyPort, adminPort} {
+		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			t.Fatalf("port %d stayed bound: %v", port, err)
+		}
+		_ = listener.Close()
+	}
+}
+
+func TestServeBindFailureExitsOne(t *testing.T) {
+	t.Setenv("COMPORTA_TEST_KEY", "value")
+	path, proxyPort, _ := listenerConfig(t)
 	provision(t, path)
-
-	var stdout, stderr lockedBuffer
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	exit := make(chan int, 1)
-	go func() { exit <- Execute(ctx, []string{"serve", "--config", path}, &stdout, &stderr) }()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(stderr.String(), "configuration active") {
-		if time.Now().After(deadline) {
-			t.Fatalf("serve did not become active: %s", stderr.String())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if strings.Contains(stderr.String(), "listening") {
-		t.Fatalf("serve must not announce open ports: %s", stderr.String())
-	}
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	taken, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", proxyPort))
 	if err != nil {
-		t.Fatalf("serve must not bind the configured port: %v", err)
+		t.Fatal(err)
 	}
-	_ = listener.Close()
-
-	select {
-	case code := <-exit:
-		t.Fatalf("serve exited early with %d: %s", code, stderr.String())
-	case <-time.After(100 * time.Millisecond):
-	}
-	cancel()
-	select {
-	case code := <-exit:
-		if code != 0 {
-			t.Fatalf("normal shutdown must exit 0, got %d", code)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("serve did not stop after cancellation")
-	}
-	logs := stderr.String()
-	if !strings.Contains(logs, `"level":"INFO"`) || !strings.Contains(logs, "shutdown complete") {
-		t.Fatalf("logs must be JSON and report shutdown: %s", logs)
-	}
-	if strings.Contains(logs, "canary-serve-key") {
-		t.Fatalf("logs expose a secret: %s", logs)
+	defer func() { _ = taken.Close() }()
+	code, _, stderr := run(t, "serve", "--config", path)
+	if code != 1 || !strings.Contains(stderr, "could not open the proxy listener") {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
 }
 
