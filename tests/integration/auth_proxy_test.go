@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -220,6 +221,7 @@ func TestClientDisconnectCancelsTheFakeWithinOneSecond(t *testing.T) {
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Api-Key", key)
 	finished := make(chan struct{})
+	firstByte := make(chan struct{})
 	go func() {
 		defer close(finished)
 		response, err := http.DefaultClient.Do(request)
@@ -228,13 +230,27 @@ func TestClientDisconnectCancelsTheFakeWithinOneSecond(t *testing.T) {
 		}
 		defer func() { _ = response.Body.Close() }()
 		buffer := make([]byte, 1024)
+		var once sync.Once
 		for {
-			if _, readErr := response.Body.Read(buffer); readErr != nil {
+			n, readErr := response.Body.Read(buffer)
+			if n > 0 {
+				once.Do(func() { close(firstByte) })
+			}
+			if readErr != nil {
 				return
 			}
 		}
 	}()
 	<-reached
+	// The fake sleeping only says the event left it. Once the client holds a byte the
+	// gateway has read the event, so the usage in it is what the result must keep.
+	select {
+	case <-firstByte:
+	case <-finished:
+		t.Fatal("the stream ended before its first event")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first event did not reach the client")
+	}
 	closedAt := time.Now()
 	cancel()
 	select {
