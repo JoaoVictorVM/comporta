@@ -18,6 +18,8 @@ type Usage struct {
 	Output        Optional[int64]
 	CacheWrite    Optional[int64]
 	CacheRead     Optional[int64]
+	CacheWrite5m  Optional[int64]
+	CacheWrite1h  Optional[int64]
 	RawInputTotal Optional[int64]
 }
 
@@ -26,6 +28,10 @@ type anthropicUsage struct {
 	Output     *int64 `json:"output_tokens"`
 	CacheWrite *int64 `json:"cache_creation_input_tokens"`
 	CacheRead  *int64 `json:"cache_read_input_tokens"`
+	Creation   *struct {
+		FiveMinutes *int64 `json:"ephemeral_5m_input_tokens"`
+		OneHour     *int64 `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation"`
 }
 
 type openAIUsage struct {
@@ -54,6 +60,7 @@ func assign(target *Optional[int64], value *int64) {
 // mergeAnthropic overwrites the counters present. Anthropic reports totals, so a
 // later event replaces an earlier value instead of adding to it.
 func (u *Usage) mergeAnthropic(raw json.RawMessage) error {
+	next := *u
 	var parsed anthropicUsage
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return errInvalidUsage
@@ -61,10 +68,28 @@ func (u *Usage) mergeAnthropic(raw json.RawMessage) error {
 	if err := nonNegative(parsed.Input, parsed.Output, parsed.CacheWrite, parsed.CacheRead); err != nil {
 		return err
 	}
-	assign(&u.Input, parsed.Input)
-	assign(&u.Output, parsed.Output)
-	assign(&u.CacheWrite, parsed.CacheWrite)
-	assign(&u.CacheRead, parsed.CacheRead)
+	assign(&next.Input, parsed.Input)
+	assign(&next.Output, parsed.Output)
+	assign(&next.CacheWrite, parsed.CacheWrite)
+	assign(&next.CacheRead, parsed.CacheRead)
+	if parsed.CacheWrite != nil && parsed.Creation == nil {
+		next.CacheWrite5m = Optional[int64]{}
+		next.CacheWrite1h = Optional[int64]{}
+	}
+	if parsed.Creation != nil {
+		if err := nonNegative(parsed.Creation.FiveMinutes, parsed.Creation.OneHour); err != nil {
+			return err
+		}
+		assign(&next.CacheWrite5m, parsed.Creation.FiveMinutes)
+		assign(&next.CacheWrite1h, parsed.Creation.OneHour)
+		if next.CacheWrite.Known && (next.CacheWrite5m.Value > next.CacheWrite.Value || next.CacheWrite1h.Value > next.CacheWrite.Value-next.CacheWrite5m.Value) {
+			return errInvalidUsage
+		}
+		if next.CacheWrite.Known && next.CacheWrite5m.Known && next.CacheWrite1h.Known && next.CacheWrite1h.Value != next.CacheWrite.Value-next.CacheWrite5m.Value {
+			return errInvalidUsage
+		}
+	}
+	*u = next
 	return nil
 }
 

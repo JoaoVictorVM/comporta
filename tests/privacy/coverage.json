@@ -1,11 +1,14 @@
 {
   "constructors": ["AnthropicBody", "AnthropicStreamBody", "CountBody", "OpenAIBody", "OpenAIStreamBody"],
   "instrumented_go_files": [
+    "internal/pricing/estimate_test.go",
     "internal/proxy/bench_test.go",
     "internal/proxy/handler_test.go",
     "internal/proxy/result_test.go",
     "internal/proxy/sse_test.go",
     "tests/integration/config_proxy_test.go",
+    "tests/integration/proxy_metering_test.go",
+    "tests/integration/metering_bench_test.go",
     "tests/privacy/canary_test.go"
   ],
   "parser_only_go_files": [
@@ -16,6 +19,7 @@
   ],
   "instrumented_sdk_file": "tests/sdk/compatibility_test.py",
   "cases": [
+    "process/database-recovery",
     "process/success",
     "process/rate-limit",
     "process/overload",
@@ -39,7 +43,7 @@
     {"name": "errors", "status": "covered", "description": "JSON and SSE answers the gateway builds, reconstructed from provider failures"},
     {"name": "results", "status": "covered", "description": "Every attempt result published, as JSON and through fmt"},
     {"name": "files", "status": "covered", "description": "Files generated under the data directory, including temporaries and keys"},
-    {"name": "database", "status": "unavailable", "required_by": "usage storage", "description": "Records, WAL, aggregates and events, examined after checkpoint and close"},
+    {"name": "database", "status": "covered", "description": "Records, WAL, aggregates and events, examined after checkpoint and close"},
     {"name": "metrics", "status": "unavailable", "required_by": "telemetry", "description": "Local collector: names, labels and values"},
     {"name": "traces", "status": "unavailable", "required_by": "telemetry", "description": "Local collector: span attributes"},
     {"name": "alerts", "status": "unavailable", "required_by": "alerts", "description": "Local webhook receiver: actual payloads"}

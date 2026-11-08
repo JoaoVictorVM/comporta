@@ -7,6 +7,7 @@
   "additionalProperties": false,
   "required": ["providers"],
   "properties": {
+    "storage": {"type":"object","additionalProperties":false,"properties":{"retention_days":{"type":"integer","minimum":1,"maximum":365,"default":30}}},
     "data_dir": {"type": "string", "minLength": 1, "description": "Data directory, relative to this file. Default: ./data. Changing it requires a restart."},
     "timezone": {"type": "string", "minLength": 1, "description": "IANA timezone for budgets. Default: system timezone, which must have an IANA identifier."},
     "fail_mode": {"$ref": "#/$defs/failMode", "description": "Behavior when limit state is unavailable. Default: fail_closed."},

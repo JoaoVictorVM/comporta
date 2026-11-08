@@ -11,13 +11,13 @@ providers:
     base_url: https://api.anthropic.com
     api_key: ${ANTHROPIC_API_KEY}
     models:
-      - claude-sonnet-4-5
+      - claude-sonnet-4-6
       - claude-haiku-4-5
 
 apps:
   my-app:
     allowed_models:
-      - claude-sonnet-4-5
+      - claude-sonnet-4-6
       - claude-haiku-4-5
     budget:
       usd_per_day: 2.00

@@ -1,0 +1,10 @@
+{
+  "verified_at": "2026-11-07T00:00:00Z",
+  "sources": ["https://platform.claude.com/docs/en/about-claude/pricing", "https://developers.openai.com/api/docs/pricing"],
+  "models": {
+    "claude-sonnet-4-6": {"format":"anthropic","price":{"Input":3000000,"Output":15000000,"CacheWrite":3750000,"CacheRead":300000},"cache_write_1h":6000000},
+    "claude-haiku-4-5": {"format":"anthropic","price":{"Input":1000000,"Output":5000000,"CacheWrite":1250000,"CacheRead":100000},"cache_write_1h":2000000},
+    "claude-haiku-5-5": {"format":"anthropic","price":{"Input":100000,"Output":500000,"CacheWrite":125000,"CacheRead":10000},"cache_write_1h":200000,"threshold":100000,"high_price":{"Input":500000,"Output":2500000,"CacheWrite":625000,"CacheRead":50000},"high_cache_write_1h":1000000},
+    "gpt-5.3-codex": {"format":"openai","price":{"Input":1750000,"Output":14000000,"CacheWrite":0,"CacheRead":175000}}
+  }
+}

@@ -110,3 +110,5 @@ func (s *Snapshot) Telemetry() Telemetry { return s.cfg.Telemetry }
 // generated from typed values, never from the source file, and cannot be loaded
 // back as input.
 func (s *Snapshot) EffectiveYAML() string { return s.publicYAML }
+
+func (s *Snapshot) Storage() Storage { return s.cfg.Storage }

@@ -90,6 +90,7 @@ type Config struct {
 	Cache     Cache
 	Alerts    Alerts
 	Telemetry Telemetry
+	Storage   Storage
 }
 
 type Provider struct {
@@ -209,6 +210,8 @@ type Price struct {
 	CacheRead  Microusd
 }
 
+type Storage struct{ RetentionDays int64 }
+
 type Cache struct {
 	MaxBytes int64
 }
@@ -248,6 +251,7 @@ type Telemetry struct {
 func defaultConfig() Config {
 	return Config{
 		DataDir:   "./data",
+		Storage:   Storage{RetentionDays: 30},
 		FailMode:  FailClosed,
 		Providers: map[string]Provider{},
 		Apps:      map[string]App{},

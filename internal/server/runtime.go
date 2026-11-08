@@ -88,12 +88,20 @@ func (rt *Runtime) Run(ctx context.Context) error {
 
 	failed := make(chan struct{})
 	var failOnce sync.Once
+	var errorsMu sync.Mutex
+	var workerErrors []error
 	fail := func() { failOnce.Do(func() { close(failed) }) }
 
 	var supervised sync.WaitGroup
 	for _, worker := range rt.options.Workers {
 		supervised.Go(func() {
-			if err := worker(workers); err != nil || workers.Err() == nil {
+			err := worker(workers)
+			if err != nil {
+				errorsMu.Lock()
+				workerErrors = append(workerErrors, err)
+				errorsMu.Unlock()
+			}
+			if err != nil || workers.Err() == nil {
 				fail()
 			}
 		})
@@ -126,7 +134,9 @@ func (rt *Runtime) Run(ctx context.Context) error {
 	serving.Wait()
 	cancelWorkers()
 	supervised.Wait()
-	return outcome
+	errorsMu.Lock()
+	defer errorsMu.Unlock()
+	return errors.Join(append(workerErrors, outcome)...)
 }
 
 func newServer(operations context.Context, inFlight *tracker, handler http.Handler) *http.Server {

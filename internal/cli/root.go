@@ -49,5 +49,6 @@ func newRootCommand(out streams) *cobra.Command {
 	root.AddCommand(newFakeProviderCommand(out))
 	root.AddCommand(newKeysCommand(out))
 	root.AddCommand(newServeCommand(out))
+	root.AddCommand(newPricingCommand(out), newUsageCommand(out))
 	return root
 }

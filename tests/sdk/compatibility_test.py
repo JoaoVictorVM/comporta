@@ -97,6 +97,8 @@ providers:
     base_url: http://127.0.0.1:{self.fake_port}/v1
     api_key: ${{COMPORTA_SDK_PROVIDER_KEY}}
     models: [fake-gpt]
+pricing:
+  fake-claude: {{input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}}
 apps:
   sdk-tests:
     allowed_models: [fake-claude, fake-gpt]

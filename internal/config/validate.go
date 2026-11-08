@@ -261,13 +261,20 @@ func validateDowngrade(app *App, path string, cfg *Config, owners map[string]str
 	if app.OnLimit != OnLimitDowngrade {
 		return
 	}
-	if _, overridden := cfg.Pricing[app.DowngradeTo]; overridden || cfg.Providers[owner].Local {
+	if _, overridden := cfg.Pricing[app.DowngradeTo]; overridden || (cfg.Providers[owner].Local && cfg.Providers[owner].APIFormat == FormatOpenAI) {
 		return
+	}
+	priced := false
+	if opts.Catalog != nil {
+		priced = opts.Catalog.HasPrice(app.DowngradeTo)
+		if catalog, ok := opts.Catalog.(interface{ HasProviderPrice(string, Provider) bool }); ok {
+			priced = catalog.HasProviderPrice(app.DowngradeTo, cfg.Providers[owner])
+		}
 	}
 	switch {
 	case opts.Catalog == nil:
 		d.reportAt(CodeInvalidReference, targetPath, "price of model "+target+" cannot be verified; add a pricing override")
-	case !opts.Catalog.HasPrice(app.DowngradeTo):
+	case !priced:
 		d.reportAt(CodeInvalidReference, targetPath, "model "+target+" has no known price")
 	}
 }

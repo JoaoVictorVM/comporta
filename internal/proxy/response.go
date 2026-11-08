@@ -176,6 +176,7 @@ func (c *call) serveNormal(response *http.Response) {
 
 	copyResponseHeaders(c.w.Header(), response.Header)
 	c.w.Header().Set("Content-Type", response.Header.Get("Content-Type"))
+	c.w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	c.w.prepareWrite(c.writeLimit)
 	c.w.WriteHeader(response.StatusCode)
 	c.attempt.markClientByte(response.StatusCode)

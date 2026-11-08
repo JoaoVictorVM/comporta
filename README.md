@@ -127,7 +127,7 @@ The proxy listens on `127.0.0.1:8080` and the admin listener on `127.0.0.1:8081`
 
 Every other path or method returns 404 `endpoint not allowed by Comporta`, without forwarding anything, so an app cannot use your provider key for files, batches or admin APIs. The admin listener has only `GET /healthz`, which answers `{"status":"ok"}` and says nothing about providers.
 
-**What reaches the provider:** the body exactly as received, byte for byte, including unknown fields, with two changes. End-user fields are replaced by a pseudonym, as [End users](#end-users) describes. On OpenAI-format streaming, `stream_options.include_usage` is set to `true` so that usage can be measured, and if the client did not ask for it, the extra usage chunk is removed before delivery. Only `content-type`, `anthropic-version` and `anthropic-beta` are forwarded; every other client header is dropped, and the app key is replaced by the provider key. The destination comes only from the configuration. Redirects are never followed, proxy environment variables are ignored, and a remote provider name that resolves to a private, loopback or link-local address is refused. A base URL may end in `/v1` or not; the same path results.
+**What reaches the provider:** the body exactly as received, byte for byte, including unknown fields, with documented patches. End-user fields are replaced by a pseudonym, as [End users](#end-users) describes. On OpenAI-format streaming, `stream_options.include_usage` is set to `true` so that usage can be measured, and if the client did not ask for it, the extra usage chunk is removed before delivery. Generation output is capped by the app's `max_tokens`: a higher value is reduced and an absent OpenAI limit is inserted. An existing `max_completion_tokens` field keeps its name. This cap makes the admission quote bounded before the remaining policy features are available. Only `content-type`, `anthropic-version` and `anthropic-beta` are forwarded; every other client header is dropped, and the app key is replaced by the provider key. The destination comes only from the configuration. Redirects are never followed, proxy environment variables are ignored, and a remote provider name that resolves to a private, loopback or link-local address is refused. A base URL may end in `/v1` or not; the same path results.
 
 **Errors** use the format of the route and carry a `comporta_code`. Provider error messages are never passed on, because they can echo prompts: status and category are preserved and the message is rebuilt. Inside a stream already started, the failure is an error event followed by closing the stream, so a truncated stream never looks like a success.
 
@@ -138,6 +138,8 @@ Every other path or method returns 404 `endpoint not allowed by Comporta`, witho
 | `invalid_request` | 400 | Invalid JSON, types, duplicate keys or query |
 | `user_required`, `user_invalid`, `user_email_not_allowed`, `user_document_not_allowed` | 400 | End-user identifier missing or refused, see [End users](#end-users) |
 | `model_unknown`, `provider_format_mismatch` | 400 | Model not declared, or declared in another API format |
+| `price_unknown`, `pricing_overflow` | 400 | No effective price, or cost outside the supported integer range |
+| `usage_storage_unavailable` | 503 | No accounting capacity, or durable admission could not be confirmed; provider is not called |
 | `unsupported_media_type` | 415 | Body is not uncompressed JSON |
 | `request_too_large` | 413 | Body over `max_body_bytes` |
 | `provider_unreachable`, `provider_redirect`, `invalid_upstream_response` | 502 | Provider could not be used |
@@ -155,9 +157,39 @@ Every other path or method returns 404 `endpoint not allowed by Comporta`, witho
 
 ### Usage and privacy
 
-Each provider call produces one internal result with counters, timing, categories and the user's pseudonym, never content, raw user identifiers or raw errors. It is not stored anywhere yet. A counter the provider did not report stays unknown instead of becoming zero, and tokens are never estimated. When a client disconnects, the provider call is canceled within 1 s and only what was already observed is recorded, so the usage of an interrupted stream can be lower than what the provider bills.
+Each provider call produces a private SQLite record with counters, timing, categories and the user's app-scoped pseudonym, never content, raw user identifiers, request digests or raw errors. A counter the provider did not report stays unknown. Observed counters are preserved even when the final cost must use a conservative estimate. `count_tokens` has its own operation and advisory counter, with zero generation cost and zero consumption tokens. Listing models is free and creates no consumption.
 
-Prompts and responses stay in memory for the duration of the request and are not logged, and no option enables logging them. A privacy test sends marked prompts and identifiers through the gateway, including error paths, and fails if a marker appears in logs, answers built by the gateway, results or generated files. It covers those destinations today; [`tests/privacy/coverage.json`](tests/privacy/coverage.json) lists the ones that do not exist yet (database, metrics, traces and alert payloads), which join the test when they are built.
+Prompts and responses stay in memory for the duration of the request and are not logged, and no option enables logging them. A privacy test sends marked prompts and identifiers through the gateway, including error paths, and fails if a marker appears in logs, answers built by the gateway, results, database artifacts or generated files. It requires nonempty persisted usage, aggregates and events and scans the DB/WAL before and after recovery. [`tests/privacy/coverage.json`](tests/privacy/coverage.json) tracks these channels and the future metrics, traces and alert consumers.
+
+### Prices and estimated cost
+
+Money is represented as integer microdollars. Token rates are integer microdollars per million tokens. The exact products of input, output, cache write and cache read are added before rounding up once per attempt. OpenAI cached input is excluded from regular input; reasoning tokens already included in output are not charged again. Anthropic cache writes preserve their 5-minute and 1-hour breakdown. If only the write total is known, the highest applicable write rate is used. Reviewed long-context tiers apply to the entire request, including cached input when selecting the tier.
+
+`pricing` YAML entries replace a model's whole embedded entry, including tiers. Only exact reviewed model IDs are recognized. An OpenAI-compatible local/private provider with no override and no embedded entry is treated as free; a private address alone does not make an Anthropic-format provider free. Configure an explicit override for a paid local proxy. An unpriced generation returns 400 `no price defined for model "x"; add it under pricing in comporta.yaml` before forwarding.
+
+```sh
+comporta pricing check
+comporta usage --app my-app --since 7d --config comporta.yaml
+```
+
+The price catalog is dated and never refreshed over the network at runtime. `pricing check` warns when its age exceeds 60 days; update the binary or supply YAML overrides. All monetary output is **estimated cost**, not an invoice. Taxes, negotiated discounts, regional modifiers and extra paid tools are not represented by the four token dimensions.
+
+Admission estimates input as `ceil(max(original_body_bytes, effective_body_bytes)/3) + 1600*image_count`. This heuristic is tested against the synthetic fixture corpus, not a universal tokenizer guarantee. The quote freezes rates, source, catalog date, configuration generation, output cap and the app's timezone. Its input-only price is distinct from its conservative reservation, which includes capped output and the highest applicable input/cache/tier rates. Real usage above the quote is retained and marked, never truncated. Partial or missing usage settles at the greater of known cost and the frozen conservative quote.
+
+### Durable usage and retention
+
+`data_dir/usage.sqlite` uses SQLite without CGO, versioned transactional migrations, WAL and `synchronous=FULL`. An exclusive `usage.lock` protects the directory from another service or offline reset. DB/WAL/SHM and the directory must be private. Use a local filesystem with working locks and sync; network volumes and replicas sharing this store are unsupported.
+
+Every attempt is admitted durably before contacting the provider. There are 50,000 pending slots, including active attempts and completions awaiting commit. A full queue or failed admission write returns 503 without forwarding. Completed results are journaled and materialized in batches of at most 1,000, every two seconds or when a batch fills. Records, app/user daily totals, completion events and journal removal share one transaction. Failed writes retain the batch and its slots, with bounded retry and sanitized diagnostics. These slots reserve accounting capacity, not budget money.
+
+After a crash, a completed journal entry preserves its exact reported result. An admission without a durable result produces a conservative recovered record, without repeating the provider call. This can account for an attempt that crashed before sending; it cannot reconstruct provider usage that never reached durable storage. Shutdown drains handlers, flushes and checkpoints with a ten-second accounting deadline; failure returns an error and leaves the journal recoverable. These guarantees rely on the filesystem honoring sync and locks and do not cover physical disk loss.
+
+```yaml
+storage:
+  retention_days: 30  # 1 through 365; reload affects future maintenance
+```
+
+Hourly maintenance removes expired request/event/configuration details in batches, preserves pending journal entries, and never re-adds their totals. Daily aggregates are retained indefinitely, with the original civil day and timezone. `usage` reads the database without migrating it, selects app totals once, includes today and the previous six civil days for `--since 7d`, and reports an exact six-decimal USD total. Finalizations may take two seconds to appear. Removed apps remain queryable using their historical timezones. Internal typed events have a durable history and a bounded live bus; slow consumers must resynchronize after overflow. Budgets, administrative APIs, policies, the panel, alerts and telemetry remain separate consumers.
 
 ### End users
 
@@ -191,9 +223,9 @@ The ID is read from `X-Comporta-User`, then `metadata.user_id`, then `user`. The
 
 **Back it up together with the data directory, and keep it private.** Anyone with the key and a list of candidate IDs can recognize pseudonyms. Replacing or losing the key breaks the continuity of per-user history, because the same user gets a new pseudonym, and there is no migration. To rotate it, stop the service and plan for that break. App keys are independent, so rotating them changes nothing here.
 
-When the key is missing, Comporta only creates one if it can prove that nothing depends on the old one: the directory must hold nothing besides `keys.json`, `keys.lock`, `hmac.lock` and its own temporary files. Anything else stops the service with `hmac.key not found but usage data exists; restore the key or start with --reset-user-history`, even an unrelated file, because it cannot tell. Restore the key, or point `data_dir` at a new directory and move the app keys there.
+When the key is missing, Comporta inspects logical SQLite history, including WAL, pending admissions, per-user aggregates and limit state, before creating a database or migrating it. Unknown files, unsupported schemas and unreadable history fail closed. Existing user history stops startup with `hmac.key not found but usage data exists; restore the key or start with --reset-user-history`. Restore the key from the same backup as the database whenever possible.
 
-`--reset-user-history` exists for that recovery, but Comporta does not store usage yet, so it has nothing it could safely reset: with other files present it refuses with `user history reset requires usage storage support; restore hmac.key or use a new data directory`. It never deletes files, and with a valid key in place it changes nothing. When usage storage arrives, a reset will remove what links data to users and keep each app's spending, so it cannot reopen a budget.
+With the service stopped, `serve --reset-user-history` authorizes logical unlinking after a lost key. Pending attempts are recovered first; a transaction removes identifiable details and user totals/state while preserving app totals and app budget state. The reset is idempotent across a crash before publishing the new key. It does not transfer old users into anonymous or change app keys. A valid existing HMAC key is never replaced. Unknown history is still refused. Logical unlinking is not forensic erasure of old database pages, backups or media.
 
 ## Fake provider
 
@@ -205,6 +237,8 @@ providers:
     api_format: anthropic
     base_url: http://127.0.0.1:9090
     models: [fake-claude]
+pricing:
+  fake-claude: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}
 ```
 
 ## Container
@@ -219,8 +253,10 @@ docker compose up -d
 curl http://127.0.0.1:8081/healthz
 ```
 
-App keys and `hmac.key` live in the volume and survive recreating the container, so back up the volume as a whole. `COMPORTA_CONFIG` selects another configuration file, which is mounted read-only. The image has no shell or curl, so check it from the host. Reaching the service from another machine means publishing the proxy port elsewhere and adding its name to `allowed_hosts`; never publish the admin port that way.
+App keys, `hmac.key` and SQLite DB/WAL/SHM live in the volume and survive recreating the container. Stop the service before copying a backup, or use a consistent SQLite backup that includes WAL, and keep the matching identity key. Allow time for the accounting flush before stopping the container. `COMPORTA_CONFIG` selects another configuration file, which is mounted read-only. The image has no shell or curl, so check it from the host. Reaching the service from another machine means publishing the proxy port elsewhere and adding its name to `allowed_hosts`; never publish the admin port that way.
 
 ## Development
 
 The repository uses [Task](https://taskfile.dev). `task --list` shows the available tasks, and `task check` runs formatting, static checks, tests, example validation and the vulnerability and secret scanners. The race detector needs a C toolchain: `task test-race`. `task test-privacy` runs the privacy test, `task test-sdk` runs the official Python SDKs at the versions pinned in `tests/sdk/requirements.txt`, and `task test-container` builds the image and verifies its restrictions; none of them needs provider credentials. A test that adds a prompt builds it with `internal/testkit`, or the marked `prompt` helper in the SDK suite, and new destinations for data go in `tests/privacy/coverage.json` in the same change.
+
+`go test ./tests/integration -run '^$' -bench '^BenchmarkHTTPMetering$' -benchtime 500x` compares real HTTP and streaming latency with and without durable accounting and reports p95/TTFB. Sync latency depends on the deployment filesystem, so use low-latency local storage and measure there. This diagnostic does not certify the sustained 200 requests/second, five-minute load target.
