@@ -235,8 +235,8 @@ func TestRetryDoesNotDoubleBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	failed := m.Settle(h, limits.Usage{Cost: 49, Tokens: 30, Complete: true}, func(storage.Settlement) (int64, error) { return 0, storage.ErrUnavailable })
-	if failed == nil || !m.Degraded() {
-		t.Fatal("failed settlement not reported")
+	if failed == nil || m.Degraded() {
+		t.Fatal("failed settlement not reported, or degraded before its retry")
 	}
 	// The usage batch flushes the record on its own path; it must not settle.
 	if err = s.Commit(ctx, []storage.Record{completed(r)}); err != nil {

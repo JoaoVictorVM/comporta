@@ -607,8 +607,9 @@ func (m *Manager) end(h *Handle, transition string, u Usage, persist func(storag
 	}
 	seq, err := persist(st)
 	if err != nil {
+		// The obligation stays reserved, which is conservative. Limit state only
+		// becomes degraded if the worker's retry fails as well.
 		m.retry = append(m.retry, pendingSettlement{h, st})
-		m.markDegraded(civil, "settlement")
 		return err
 	}
 	m.applySettlement(h, st, seq)

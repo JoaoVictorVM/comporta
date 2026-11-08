@@ -78,9 +78,12 @@ func TestFiveHundredConcurrentBudgetOneHundredRuns(t *testing.T) {
 					errs[i] = err
 					return
 				}
-				_, _ = io.Copy(io.Discard, response.Body)
+				body, _ := io.ReadAll(response.Body)
 				response.Body.Close()
 				statuses[i] = response.StatusCode
+				if response.StatusCode != 200 && response.StatusCode != 429 {
+					errs[i] = fmt.Errorf("%s", body)
+				}
 			})
 		}
 		close(gate)

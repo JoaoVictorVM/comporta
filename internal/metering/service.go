@@ -339,7 +339,13 @@ func (s *Service) finish(ctx context.Context, r storage.Record, handle *limits.H
 	if handle == nil {
 		return s.store.Complete(ctx, r)
 	}
-	persist := func(st storage.Settlement) (int64, error) { return s.limitStore.CompleteSettled(ctx, r, st) }
+	// The deadline covers the write only: waiting for the coordinator behind a
+	// burst of admissions is not a storage failure.
+	persist := func(st storage.Settlement) (int64, error) {
+		write, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		return s.limitStore.CompleteSettled(write, r, st)
+	}
 	if result.NotSent {
 		return s.limits.Release(handle, limits.ReleaseNotSent, persist)
 	}
