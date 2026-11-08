@@ -57,6 +57,7 @@ func TestFiveHundredConcurrentBudgetOneHundredRuns(t *testing.T) {
 	key := gw.createKey("bot").Key.Reveal()
 	client := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: clients, DialContext: patientDial}, Timeout: 60 * time.Second}
 	n := rounds(t)
+	finished := 0
 	worst := int64(-1 << 62)
 	started := time.Now()
 	for round := range n {
@@ -94,6 +95,10 @@ func TestFiveHundredConcurrentBudgetOneHundredRuns(t *testing.T) {
 				t.Fatalf("round %d: unexpected status %d: %v", round, status, errs[slicesIndex(statuses, status)])
 			}
 		}
+		// Each admitted call finishes its accounting right after its answer is
+		// written, so wait for every result before comparing balances.
+		finished += admitted
+		gw.results.waitCount(t, finished)
 		subject := gw.userSubject(user)
 		view := gw.limitView(subject, "apps.bot.per_user.budget.usd_per_day")
 		if view.Reserved != 0 {
@@ -175,16 +180,19 @@ func slicesIndex(values []int, want int) int {
 	return 0
 }
 
-// patientDial retries refused connections. 500 simultaneous dials overflow the
-// listen backlog of some systems, Windows among them; the refusal is the
-// operating system's, before the gateway sees the request.
+// patientDial retries failed dials for up to a minute. 500 simultaneous dials
+// overflow the listen backlog of some systems, Windows among them, and tens of
+// thousands of one-request connections can exhaust ephemeral ports while they
+// wait in TIME_WAIT; both are the operating system's, before the gateway sees
+// the request.
 func patientDial(ctx context.Context, network, address string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	deadline := time.Now().Add(time.Minute)
 	for attempt := 0; ; attempt++ {
 		conn, err := dialer.DialContext(ctx, network, address)
-		if err == nil || attempt >= 200 || ctx.Err() != nil {
+		if err == nil || time.Now().After(deadline) || ctx.Err() != nil {
 			return conn, err
 		}
-		time.Sleep(time.Duration(5+attempt%20) * time.Millisecond)
+		time.Sleep(time.Duration(5+attempt%50) * time.Millisecond)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/events"
 	"github.com/JoaoVictorVM/comporta/internal/fakeprovider"
@@ -171,7 +172,12 @@ func TestUserConcurrencyAboveLimitReturns429(t *testing.T) {
 		wg.Go(func() { gw.callUser(key, user) })
 	}
 	for range 4 {
-		<-entered
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			close(release)
+			t.Fatal("the calls never reached the provider")
+		}
 	}
 	response, body := gw.callAs("/v1/chat/completions", key, user, testkit.OpenAIBody())
 	decoded := decodeLimitError(t, body)

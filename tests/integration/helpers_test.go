@@ -191,7 +191,11 @@ func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gat
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "comporta.yaml")
-	text := configText(upstream.URL, freePort(t), freePort(t), extraListeners)
+	proxyPort, adminPort := freePort(t), freePort(t)
+	for adminPort == proxyPort {
+		adminPort = freePort(t)
+	}
+	text := configText(upstream.URL, proxyPort, adminPort, extraListeners)
 	if metered {
 		text = strings.Replace(text, "apps:\n", "pricing:\n  fake-claude: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}\n  fake-gpt: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}\napps:\n", 1)
 	}
