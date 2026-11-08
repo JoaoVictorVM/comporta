@@ -72,7 +72,7 @@ func openReader(ctx context.Context, dir string, owned bool) (*Store, error) {
 	if filepath.VolumeName(path) != "" {
 		uriPath = "/" + uriPath
 	}
-	u := url.URL{Scheme: "file", Path: uriPath, RawQuery: "mode=ro&_pragma=query_only(ON)&_pragma=busy_timeout(1000)"}
+	u := url.URL{Scheme: "file", Path: uriPath, RawQuery: "mode=ro&_pragma=query_only(ON)&_pragma=busy_timeout(1000)&_pragma=foreign_keys(ON)&_pragma=synchronous(FULL)"}
 	if immutable {
 		u.RawQuery += "&immutable=1"
 	}

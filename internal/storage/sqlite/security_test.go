@@ -65,6 +65,22 @@ func TestWALAndFullSyncEveryConnection(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT sqlite_version()`).Scan(&version); err != nil || version != "3.54.1" {
 		t.Fatalf("unexpected pinned SQLite: %s %v", version, err)
 	}
+	for range 4 {
+		conn, err := s.readDB.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		for _, p := range []struct {
+			query string
+			want  int
+		}{{"PRAGMA synchronous", 2}, {"PRAGMA foreign_keys", 1}, {"PRAGMA busy_timeout", 1000}, {"PRAGMA query_only", 1}} {
+			var n int
+			if err = conn.QueryRowContext(ctx, p.query).Scan(&n); err != nil || n != p.want {
+				t.Fatalf("reader pragma %s: %d %v", p.query, n, err)
+			}
+		}
+	}
 }
 
 func TestPrivateDatabaseArtifacts(t *testing.T) {
