@@ -24,6 +24,9 @@ type Rejection struct {
 	Code    Code
 	Class   ErrorClass
 	Message string
+	// RetryAfter is in whole seconds and only set when an honest value exists.
+	RetryAfter int64
+	Limit      *LimitDetail
 }
 
 func (r *Rejection) failure() Failure {
@@ -300,12 +303,13 @@ func (o *operation) serve(r *http.Request) {
 		}
 	}
 	if o.handler.accounting != nil {
-		complete, rejection := o.handler.accounting.Admit(r.Context(), o.snapshot, envelope, providerName, provider)
+		admission, rejection := o.handler.accounting.Admit(r.Context(), o.snapshot, envelope, providerName, provider)
 		if rejection != nil {
-			WriteFailure(o.w, o.format, rejection.failure())
+			writeRejection(o.w, o.format, rejection)
 			return
 		}
-		o.completion = complete
+		o.completion = admission.Complete
+		applyBudgetHeaders(o.w.Header(), admission.Budget)
 	}
 	o.send(r, envelope, providerName, provider, effective, listeners)
 }

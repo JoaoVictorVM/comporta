@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 )
@@ -32,6 +34,13 @@ const (
 	CodeUserInvalid             Code = "user_invalid"
 	CodeUserEmailNotAllowed     Code = "user_email_not_allowed"
 	CodeUserDocumentNotAllowed  Code = "user_document_not_allowed"
+	CodeRateLimited             Code = "rate_limited"
+	CodeConcurrencyExceeded     Code = "concurrency_exceeded"
+	CodeBudgetExceeded          Code = "budget_exceeded"
+	CodeBudgetReserved          Code = "budget_reserved"
+	CodeHardCapExceeded         Code = "hard_cap_exceeded"
+	CodeLimitsUnavailable       Code = "limits_unavailable"
+	CodeUsageStorageUnavailable Code = "usage_storage_unavailable"
 )
 
 // ErrorClass groups failures for internal decisions, such as a later fallback.
@@ -129,10 +138,26 @@ type errorBody struct {
 	Type         string `json:"type"`
 	Message      string `json:"message"`
 	ComportaCode Code   `json:"comporta_code"`
+	LimitName    string `json:"limit_name,omitempty"`
+	Scope        string `json:"scope,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	RenewsAt     string `json:"renews_at,omitempty"`
 }
 
 func errorPayload(format auth.Format, failure Failure) []byte {
+	return detailedPayload(format, failure, nil)
+}
+
+// detailedPayload adds optional limit fields. Errors without them keep the
+// exact payload they always had.
+func detailedPayload(format auth.Format, failure Failure, detail *LimitDetail) []byte {
 	body := errorBody{Type: errorType(format, failure.Status), Message: failure.Message, ComportaCode: failure.Code}
+	if detail != nil {
+		body.LimitName, body.Scope, body.Reason = detail.LimitName, detail.Scope, detail.Reason
+		if detail.RenewsAt != nil {
+			body.RenewsAt = detail.RenewsAt.UTC().Format(time.RFC3339)
+		}
+	}
 	var payload any = struct {
 		Error errorBody `json:"error"`
 	}{body}
@@ -152,10 +177,22 @@ func errorPayload(format auth.Format, failure Failure) []byte {
 // WriteFailure answers with the failure in the given format. It must only be used
 // before the response is committed.
 func WriteFailure(w http.ResponseWriter, format auth.Format, failure Failure) {
-	data := errorPayload(format, failure)
+	writePayload(w, failure.Status, errorPayload(format, failure))
+}
+
+// writeRejection answers a refusal from a pipeline stage, with Retry-After and
+// limit fields when the stage provided them.
+func writeRejection(w http.ResponseWriter, format auth.Format, rejection *Rejection) {
+	if rejection.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.FormatInt(rejection.RetryAfter, 10))
+	}
+	writePayload(w, rejection.Status, detailedPayload(format, rejection.failure(), rejection.Limit))
+}
+
+func writePayload(w http.ResponseWriter, status int, data []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(failure.Status)
+	w.WriteHeader(status)
 	_, _ = w.Write(data)
 }
 

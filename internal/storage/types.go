@@ -29,6 +29,11 @@ type Record struct {
 	UpstreamTTFB, ClientTTFB                                                                      *int64
 	Day, Timezone                                                                                 string
 	Quote                                                                                         Quote
+	// LimitsDegraded marks an attempt admitted under fail_open while limit state
+	// was unverifiable. BlockReason tells a block by spent budget from a block by
+	// pending reservations. Absent in older records, they read as false and empty.
+	LimitsDegraded bool   `json:",omitempty"`
+	BlockReason    string `json:",omitempty"`
 }
 
 type Quote struct {

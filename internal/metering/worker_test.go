@@ -35,7 +35,8 @@ func TestCommitFailureKeepsBatchAndSlots(t *testing.T) {
 	wrapped.fail.Store(true)
 	s.store = wrapped
 	p, _ := snapshot.Provider("test")
-	complete, rejection := s.Admit(context.Background(), snapshot, e, "test", p)
+	admission, rejection := s.Admit(context.Background(), snapshot, e, "test", p)
+	complete := admission.Complete
 	if rejection != nil {
 		t.Fatal(rejection)
 	}
@@ -71,7 +72,8 @@ func (t *controlledTimer) Stop()                 {}
 func TestBatchEveryTwoSecondsAndRetryBackoff(t *testing.T) {
 	s, store, snapshot, e := setup(t)
 	p, _ := snapshot.Provider("test")
-	complete, reject := s.Admit(context.Background(), snapshot, e, "test", p)
+	admission, reject := s.Admit(context.Background(), snapshot, e, "test", p)
+	complete := admission.Complete
 	if reject != nil {
 		t.Fatal(reject)
 	}
@@ -199,7 +201,7 @@ func TestConcurrentAdmissionCannotOverbookAndDrainLosesNothing(t *testing.T) {
 					t.Error("admission rejected before capacity")
 					return
 				}
-				handles[i] = handle
+				handles[i] = handle.Complete
 			}
 		})
 	}

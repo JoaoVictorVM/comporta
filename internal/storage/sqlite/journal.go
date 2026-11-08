@@ -3,7 +3,9 @@ package sqlite
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"github.com/JoaoVictorVM/comporta/internal/config"
@@ -36,6 +38,16 @@ func validate(r storage.Record) error {
 		return storage.ErrInvalid
 	}
 	if r.RequestCount < 0 || r.RequestCount > 1 {
+		return storage.ErrInvalid
+	}
+	switch r.BlockReason {
+	case "", "spent", "reservation":
+	default:
+		return storage.ErrInvalid
+	}
+	// Attempt 0 is a request refused locally before any attempt: it is terminal,
+	// costs nothing and never counts as a request in the generation totals.
+	if r.AttemptIndex == 0 && (r.Outcome != "blocked" || r.RequestCount != 0 || r.Cost != 0 || r.ReservedCost != 0 || r.FinishedAt.IsZero()) {
 		return storage.ErrInvalid
 	}
 	if !r.FinishedAt.IsZero() && r.FinishedAt.Before(r.StartedAt) {
@@ -229,7 +241,7 @@ func (s *Store) Commit(ctx context.Context, records []storage.Record) error {
 			return err
 		}
 		if inserted {
-			notifications = append(notifications, completionEvent(r))
+			notifications = append(notifications, eventFor(r))
 		}
 	}
 	var pendingCount int
@@ -260,6 +272,9 @@ func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, inserted *b
 	if !errors.Is(err, sql.ErrNoRows) {
 		return databaseError(err)
 	}
+	if r.AttemptIndex == 0 {
+		return commitBlocked(ctx, tx, r, string(data), string(quote), inserted)
+	}
 	var metadata string
 	var exact sql.NullString
 	if err = tx.QueryRowContext(ctx, `SELECT metadata_json,result_json FROM metering_journal WHERE request_id=? AND attempt_index=?`, r.RequestID, r.AttemptIndex).Scan(&metadata, &exact); err != nil {
@@ -283,10 +298,8 @@ func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, inserted *b
 			return storage.ErrConflict
 		}
 	}
-	args := []any{r.RequestID, r.AttemptIndex, r.StartedAt.UnixMicro(), r.FinishedAt.UnixMicro(), r.AppName, r.UserHash, r.Anonymous, r.Operation, r.Provider, r.ModelRequested, r.ModelUsed, r.UpstreamStatus, r.DownstreamStatus, r.Outcome, r.ErrorClass, r.ErrorCode, r.Input, r.Output, r.CacheWrite, r.CacheRead, r.RawInputTotal, r.CountedInput, r.CacheWrite5m, r.CacheWrite1h, r.Cost, r.ReservedCost, r.UsageMissing, r.Recovered, r.EstimateExceeded, r.RequestCount, r.LatencyUS, r.UpstreamTTFB, r.ClientTTFB, r.Day, r.Timezone, string(quote), string(data)}
-	_, err = tx.ExecContext(ctx, `INSERT INTO requests VALUES(`+strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+`)`, args...)
-	if err != nil {
-		return databaseError(err)
+	if err = insertRequest(ctx, tx, r, string(data), string(quote)); err != nil {
+		return err
 	}
 	for _, scope := range []string{"app", "user"} {
 		subject := ""
@@ -312,6 +325,44 @@ func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, inserted *b
 	}
 	*inserted = true
 	return nil
+}
+
+const requestColumns = `request_id,attempt_index,started_at,finished_at,app_name,user_hash,anonymous,operation,provider,model_requested,model_used,upstream_status,downstream_status,outcome,error_class,error_code,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,raw_input_total,counted_input_tokens,cache_write_5m_tokens,cache_write_1h_tokens,cost_microusd,reserved_cost_microusd,usage_missing,recovered,estimate_exceeded,request_count,latency_us,upstream_ttfb_us,client_ttfb_us,usage_day,timezone,price_quote_json,record_json`
+
+func insertRequest(ctx context.Context, tx *sql.Tx, r storage.Record, data, quote string) error {
+	args := []any{r.RequestID, r.AttemptIndex, r.StartedAt.UnixMicro(), r.FinishedAt.UnixMicro(), r.AppName, r.UserHash, r.Anonymous, r.Operation, r.Provider, r.ModelRequested, r.ModelUsed, r.UpstreamStatus, r.DownstreamStatus, r.Outcome, r.ErrorClass, r.ErrorCode, r.Input, r.Output, r.CacheWrite, r.CacheRead, r.RawInputTotal, r.CountedInput, r.CacheWrite5m, r.CacheWrite1h, r.Cost, r.ReservedCost, r.UsageMissing, r.Recovered, r.EstimateExceeded, r.RequestCount, r.LatencyUS, r.UpstreamTTFB, r.ClientTTFB, r.Day, r.Timezone, quote, data}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO requests(`+requestColumns+`) VALUES(`+strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+`)`, args...); err != nil {
+		return databaseError(err)
+	}
+	return nil
+}
+
+// commitBlocked stores a local refusal. It has no journal, no reservation and
+// no daily aggregate: it is history and an event, never consumption.
+func commitBlocked(ctx context.Context, tx *sql.Tx, r storage.Record, data, quote string, inserted *bool) error {
+	if err := insertRequest(ctx, tx, r, data, quote); err != nil {
+		return err
+	}
+	event := blockedEvent(r)
+	payload, _ := json.Marshal(event.Payload)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO events(event_id,type,occurred_at,request_id,attempt_index,app_name,payload_json) VALUES(?,'blocked',?,?,0,?,?)`, event.ID, r.FinishedAt.UnixMicro(), r.RequestID, r.AppName, string(payload)); err != nil {
+		return databaseError(err)
+	}
+	*inserted = true
+	return nil
+}
+
+func blockedEvent(r storage.Record) events.Event {
+	id := sha256.Sum256([]byte("blocked:" + r.RequestID))
+	return events.Event{ID: hex.EncodeToString(id[:16]), Type: events.Blocked, At: r.FinishedAt, RequestID: r.RequestID, App: r.AppName,
+		Payload: events.Payload{Outcome: r.Outcome, ErrorClass: r.ErrorClass, ErrorCode: r.ErrorCode, Reason: r.BlockReason}}
+}
+
+func eventFor(r storage.Record) events.Event {
+	if r.AttemptIndex == 0 {
+		return blockedEvent(r)
+	}
+	return completionEvent(r)
 }
 
 func completionEvent(r storage.Record) events.Event {

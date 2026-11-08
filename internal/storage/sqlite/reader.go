@@ -85,7 +85,7 @@ func openReader(ctx context.Context, dir string, owned bool) (*Store, error) {
 		db.Close()
 		return fail(storage.ErrUnavailable)
 	}
-	if err = checkSchema(ctx, db); err != nil {
+	if _, err = checkSchema(ctx, db); err != nil {
 		db.Close()
 		return fail(err)
 	}

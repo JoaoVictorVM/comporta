@@ -66,7 +66,8 @@ func TestOverrideProducesExactPricedRecord(t *testing.T) {
 	s, store, snapshot, e := setup(t)
 	ctx := context.Background()
 	provider, _ := snapshot.Provider("test")
-	complete, reject := s.Admit(ctx, snapshot, e, "test", provider)
+	admission, reject := s.Admit(ctx, snapshot, e, "test", provider)
+	complete := admission.Complete
 	if reject != nil {
 		t.Fatal(reject)
 	}
@@ -92,7 +93,8 @@ func TestOverrideProducesExactPricedRecord(t *testing.T) {
 func TestMissingUsageUsesFrozenConservativeQuote(t *testing.T) {
 	s, store, snapshot, e := setup(t)
 	p, _ := snapshot.Provider("test")
-	complete, reject := s.Admit(context.Background(), snapshot, e, "test", p)
+	admission, reject := s.Admit(context.Background(), snapshot, e, "test", p)
+	complete := admission.Complete
 	if reject != nil {
 		t.Fatal(reject)
 	}
@@ -133,7 +135,8 @@ func TestCountTokensNeverCreatesGenerationSpend(t *testing.T) {
 	p, _ := snapshot.Provider("test")
 	e.Operation = proxy.OperationCountTokens
 	e.ModelEffective = "unknown"
-	complete, reject := s.Admit(context.Background(), snapshot, e, "test", p)
+	admission, reject := s.Admit(context.Background(), snapshot, e, "test", p)
+	complete := admission.Complete
 	if reject != nil {
 		t.Fatal(reject)
 	}

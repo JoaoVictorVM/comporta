@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func testStore(t *testing.T) *Store {
+func testStore(t testing.TB) *Store {
 	t.Helper()
 	s, err := Open(context.Background(), filepath.Join(t.TempDir(), "private"))
 	if err != nil {

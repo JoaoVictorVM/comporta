@@ -11,6 +11,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/keys"
+	"github.com/JoaoVictorVM/comporta/internal/limits"
 	"github.com/JoaoVictorVM/comporta/internal/metering"
 	"github.com/JoaoVictorVM/comporta/internal/pricing"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
@@ -72,7 +73,17 @@ func newServeCommand(out streams) *cobra.Command {
 			}
 			configEvents.Publisher = store
 			accounting := metering.New(store, catalog, logger, func() int64 { return manager.Capture().Storage().RetentionDays })
-			if err := runGateway(command.Context(), logger, manager, keyManager, identity, accounting, configEvents.Run); err != nil {
+			// Limits recover after the usage journal and before the listeners, from
+			// the checkpoint, the ledger and the reservations a crash left open.
+			coordinator := limits.New(limits.Options{Store: store, Logger: logger, Publisher: store})
+			if err := coordinator.Recover(command.Context(), manager.Capture()); err != nil {
+				logger.Error("limit state recovery failed; listeners not opened")
+				return errReported
+			}
+			if err := accounting.UseLimits(coordinator, store, manager); err != nil {
+				return err
+			}
+			if err := runGateway(command.Context(), logger, manager, keyManager, identity, accounting, configEvents.Run, coordinator.Run); err != nil {
 				return err
 			}
 			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -94,7 +105,7 @@ func newServeCommand(out streams) *cobra.Command {
 	return command
 }
 
-func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service, accounting *metering.Service, configWorker server.Worker) error {
+func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service, accounting *metering.Service, configWorker, limitsWorker server.Worker) error {
 	guard := auth.NewGuard(nil, logger)
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), guard)
 	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Identity: identity, Logger: logger, Accounting: accounting})
@@ -103,7 +114,7 @@ func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manage
 		Source:  manager,
 		Proxy:   server.ProxySurface(manager, handler),
 		Admin:   server.AdminSurface(manager),
-		Workers: []server.Worker{manager.Run, keyManager.Run, accounting.Run, configWorker},
+		Workers: []server.Worker{manager.Run, keyManager.Run, accounting.Run, configWorker, limitsWorker},
 		Logger:  logger,
 	})
 	if err != nil {

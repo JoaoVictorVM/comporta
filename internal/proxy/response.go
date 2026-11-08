@@ -47,6 +47,10 @@ func copyResponseHeaders(dst, src http.Header) {
 
 func forwardableResponseHeader(name string) bool {
 	lower := strings.ToLower(name)
+	// The gateway's own headers are authoritative; an upstream copy is dropped.
+	if strings.HasPrefix(lower, "x-comporta-") {
+		return false
+	}
 	switch lower {
 	case "request-id", "x-request-id":
 		return true
