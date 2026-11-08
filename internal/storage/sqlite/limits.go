@@ -146,25 +146,37 @@ func itemsJSON(items []storage.LimitItem) string {
 func loadItems(ctx context.Context, q interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }, requestID string, attempt int) ([]storage.LimitItem, error) {
-	rows, err := q.QueryContext(ctx, `SELECT scope,subject,anonymous,dimension,window_start,window_end,timezone,reserved,settled FROM limit_reservation_items WHERE request_id=? AND attempt_index=? ORDER BY item_index`, requestID, attempt)
+	items, _, err := loadIndexedItems(ctx, q, requestID, attempt)
+	return items, err
+}
+
+// loadIndexedItems also returns each item's stored index, which can have gaps
+// after a user's items were unlinked.
+func loadIndexedItems(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, requestID string, attempt int) ([]storage.LimitItem, []int, error) {
+	rows, err := q.QueryContext(ctx, `SELECT item_index,scope,subject,anonymous,dimension,window_start,window_end,timezone,reserved,settled FROM limit_reservation_items WHERE request_id=? AND attempt_index=? ORDER BY item_index`, requestID, attempt)
 	if err != nil {
-		return nil, databaseError(err)
+		return nil, nil, databaseError(err)
 	}
 	defer rows.Close()
 	var items []storage.LimitItem
+	var indices []int
 	for rows.Next() {
 		var item storage.LimitItem
+		var index int
 		var settled sql.NullInt64
-		if err = rows.Scan(&item.Scope, &item.Subject, &item.Anonymous, &item.Dimension, &item.WindowStart, &item.WindowEnd, &item.Timezone, &item.Reserved, &settled); err != nil {
-			return nil, databaseError(err)
+		if err = rows.Scan(&index, &item.Scope, &item.Subject, &item.Anonymous, &item.Dimension, &item.WindowStart, &item.WindowEnd, &item.Timezone, &item.Reserved, &settled); err != nil {
+			return nil, nil, databaseError(err)
 		}
 		if settled.Valid {
 			value := settled.Int64
 			item.Settled = &value
 		}
 		items = append(items, item)
+		indices = append(indices, index)
 	}
-	return items, rows.Err()
+	return items, indices, rows.Err()
 }
 
 func insertReservation(ctx context.Context, tx *sql.Tx, r storage.Reservation) (int64, error) {
@@ -321,7 +333,7 @@ func settleTx(ctx context.Context, tx *sql.Tx, st storage.Settlement) (int64, er
 		}
 		return seq, nil
 	}
-	items, err := loadItems(ctx, tx, st.RequestID, st.AttemptIndex)
+	items, indices, err := loadIndexedItems(ctx, tx, st.RequestID, st.AttemptIndex)
 	if err != nil {
 		return 0, err
 	}
@@ -330,7 +342,7 @@ func settleTx(ctx context.Context, tx *sql.Tx, st storage.Settlement) (int64, er
 	}
 	payload := ledgerPayload{AppName: app, Deltas: []storage.LimitDelta{}}
 	for i, item := range items {
-		if _, err = tx.ExecContext(ctx, `UPDATE limit_reservation_items SET settled=? WHERE request_id=? AND attempt_index=? AND item_index=?`, st.Settled[i], st.RequestID, st.AttemptIndex, i); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE limit_reservation_items SET settled=? WHERE request_id=? AND attempt_index=? AND item_index=?`, st.Settled[i], st.RequestID, st.AttemptIndex, indices[i]); err != nil {
 			return 0, databaseError(err)
 		}
 		payload.Deltas = append(payload.Deltas, deltaFor(item, st.Settled[i], -item.Reserved))

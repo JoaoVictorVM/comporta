@@ -163,6 +163,8 @@ type gatewayOptions struct {
 	edit           func(string) string
 	wrap           func(*sqlite.Store) storage.LimitStore
 	upstream       func(http.Handler) http.Handler
+	// prepare runs on the data directory before the usage store opens.
+	prepare func(dataDir string)
 }
 
 func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gatewayOptions) *gateway {
@@ -222,6 +224,9 @@ func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gat
 	var accountant proxy.Accounting
 	workers := []server.Worker{manager.Run, keyManager.Run}
 	if metered {
+		if options.prepare != nil {
+			options.prepare(manager.Capture().DataDir())
+		}
 		usage, err = sqlite.Open(context.Background(), manager.Capture().DataDir())
 		if err != nil {
 			t.Fatal(err)

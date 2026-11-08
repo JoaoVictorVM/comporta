@@ -87,13 +87,20 @@ func (s *Store) Inspect(ctx context.Context) (useridentity.HistoryState, error) 
 			return useridentity.HistoryEmpty, nil
 		}
 	}
-	if _, err := checkSchema(ctx, s.db); err != nil {
+	version, err := checkSchema(ctx, s.db)
+	if err != nil {
 		return useridentity.HistoryPresent, err
 	}
 	if err := s.inspectRuntime(ctx); err != nil {
 		return useridentity.HistoryPresent, err
 	}
-	for _, query := range []string{`SELECT count(*) FROM requests WHERE user_hash IS NOT NULL`, `SELECT count(*) FROM usage_daily WHERE scope='user'`, `SELECT count(*) FROM metering_journal`, `SELECT count(*) FROM budget_state WHERE scope='user'`, `SELECT count(*) FROM events WHERE user_hash IS NOT NULL`} {
+	queries := []string{`SELECT count(*) FROM requests WHERE user_hash IS NOT NULL`, `SELECT count(*) FROM usage_daily WHERE scope='user'`, `SELECT count(*) FROM metering_journal`, `SELECT count(*) FROM budget_state WHERE scope='user'`, `SELECT count(*) FROM events WHERE user_hash IS NOT NULL`}
+	// A database of the previous release has no limit tables yet; it is inspected
+	// as it is, before any migration.
+	if version >= 2 {
+		queries = append(queries, userLimitQueries...)
+	}
+	for _, query := range queries {
 		var n int
 		if err = s.db.QueryRowContext(ctx, query).Scan(&n); err != nil {
 			return useridentity.HistoryPresent, storage.ErrUnavailable
@@ -151,6 +158,9 @@ func (s *Store) Reset(ctx context.Context) error {
 		if _, err = tx.ExecContext(ctx, q); err != nil {
 			return storage.ErrUnavailable
 		}
+	}
+	if err = unlinkLimitSubjects(ctx, tx, "", "", false); err != nil {
+		return err
 	}
 	state.State = "complete"
 	completed, _ := json.Marshal(state)

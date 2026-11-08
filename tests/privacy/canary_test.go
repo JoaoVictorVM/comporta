@@ -23,12 +23,18 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/config"
+	"github.com/JoaoVictorVM/comporta/internal/events"
+	"github.com/JoaoVictorVM/comporta/internal/fakeprovider"
 	"github.com/JoaoVictorVM/comporta/internal/keys"
+	"github.com/JoaoVictorVM/comporta/internal/limits"
+	"github.com/JoaoVictorVM/comporta/internal/metering"
+	"github.com/JoaoVictorVM/comporta/internal/pricing"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
 	"github.com/JoaoVictorVM/comporta/internal/storage/sqlite"
@@ -118,14 +124,15 @@ func buildBinary(t *testing.T) string {
 // liveGateway is the real binary serving against the real fake provider, with the
 // output of both captured in files.
 type liveGateway struct {
-	stopOnce  sync.Once
-	t         *testing.T
-	dir       string
-	proxyPort int
-	key       string
-	strictKey string
-	processes []*exec.Cmd
-	logs      []string
+	stopOnce   sync.Once
+	t          *testing.T
+	dir        string
+	proxyPort  int
+	key        string
+	strictKey  string
+	limitedKey string
+	processes  []*exec.Cmd
+	logs       []string
 }
 
 func (g *liveGateway) start(args ...string) *exec.Cmd {
@@ -190,6 +197,11 @@ pricing:
 apps:
   bot:
     allowed_models: [fake-claude, fake-gpt]
+  limited:
+    allowed_models: [fake-claude]
+    budget: {usd_per_day: 1.00}
+    per_user:
+      limits: {requests_per_minute: 1}
   strict:
     allowed_models: [fake-claude, fake-gpt]
     require_user: true
@@ -202,6 +214,7 @@ listeners:
 	}
 	gateway.key = gateway.createKey(config, "bot")
 	gateway.strictKey = gateway.createKey(config, "strict")
+	gateway.limitedKey = gateway.createKey(config, "limited")
 	gateway.start("fake-provider", "--port", fmt.Sprint(fakePort), "--scenario", scenario)
 	waitForPort(t, fakePort)
 	gateway.start("serve", "--config", config)
@@ -464,6 +477,7 @@ type pipeline struct {
 	results  *collector
 	identity *useridentity.Service
 	dir      string
+	keys     map[string]string
 }
 
 type collector struct {
@@ -496,6 +510,15 @@ func (w lockedWriter) Write(data []byte) (int, error) {
 
 func startPipeline(t *testing.T, upstreamURL, listeners string, hooks proxy.Hooks) *pipeline {
 	t.Helper()
+	return startPipelineWith(t, upstreamURL, listeners, hooks, "", nil)
+}
+
+// accountingFactory builds the accounting of a pipeline once its configuration,
+// data directory and captured logger exist.
+type accountingFactory func(manager *config.Manager, dataDir string, logger *slog.Logger) proxy.Accounting
+
+func startPipelineWith(t *testing.T, upstreamURL, listeners string, hooks proxy.Hooks, apps string, accounting accountingFactory, keyApps ...string) *pipeline {
+	t.Helper()
 	t.Setenv(providerKeyEnv, "synthetic-provider-key")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "comporta.yaml")
@@ -516,7 +539,7 @@ pricing:
 apps:
   bot:
     allowed_models: [fake-gpt, fake-claude]
-%s`, upstreamURL, providerKeyEnv, upstreamURL, providerKeyEnv, listeners)
+%s%s`, upstreamURL, providerKeyEnv, upstreamURL, providerKeyEnv, apps, listeners)
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -529,6 +552,14 @@ apps:
 	if err != nil {
 		t.Fatal(err)
 	}
+	extra := map[string]string{}
+	for _, app := range keyApps {
+		key, err := keys.NewStore(dataDir).Create(context.Background(), app)
+		if err != nil {
+			t.Fatal(err)
+		}
+		extra[app] = key.Key.Reveal()
+	}
 	keyManager, err := keys.NewManager(keys.ManagerOptions{Dir: dataDir})
 	if err != nil {
 		t.Fatal(err)
@@ -540,10 +571,14 @@ apps:
 		t.Fatal(err)
 	}
 	results := &collector{}
+	var accountant proxy.Accounting
+	if accounting != nil {
+		accountant = accounting(manager, dataDir, logger)
+	}
 	handler := proxy.NewHandler(proxy.Options{
 		Auth:  auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), auth.NewGuard(nil, logger)),
 		Sink:  results,
-		Hooks: hooks, Identity: identity, Logger: logger,
+		Hooks: hooks, Identity: identity, Logger: logger, Accounting: accountant,
 	})
 	t.Cleanup(handler.Close)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -558,7 +593,7 @@ apps:
 	t.Cleanup(server.Close)
 	return &pipeline{
 		server: server, key: created.Key.Reveal(), logs: logs, logMu: logMu,
-		results: results, identity: identity, dir: dataDir,
+		results: results, identity: identity, dir: dataDir, keys: extra,
 	}
 }
 
@@ -811,6 +846,151 @@ func TestCanaryKeyFileFailure(t *testing.T) {
 }
 
 // promptLiteral finds literal prompts, in Go or Python spelling.
+func TestLimitsLedgerAndErrorsContainNoRawIdentityOrContent(t *testing.T) {
+	run.markCase("process/limits")
+	g := startLive(t, "success", "")
+	defer g.stop()
+	run.markConstructor("AnthropicBody")
+	run.markConstructor("AnthropicStreamBody")
+	if status := g.send("limits-admitted", "/v1/messages", g.limitedKey, testkit.UserMarker(), testkit.AnthropicBody()); status != http.StatusOK {
+		t.Fatalf("status %d", status)
+	}
+	if status := g.send("limits-refused", "/v1/messages", g.limitedKey, testkit.UserMarker(), testkit.AnthropicStreamBody()); status != http.StatusTooManyRequests {
+		t.Fatalf("positive control: the per-user limit did not refuse, status %d", status)
+	}
+	reader, err := sqlite.OpenReader(context.Background(), filepath.Join(g.dir, "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := false
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline) && !blocked; time.Sleep(50 * time.Millisecond) {
+		page, err := reader.Records(context.Background(), storage.RecordFilter{AppName: "limited", Limit: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range page.Records {
+			blocked = blocked || (r.Outcome == "blocked" && r.AttemptIndex == 0)
+		}
+	}
+	reader.Close()
+	if !blocked {
+		t.Fatal("positive control: the refusal was not recorded")
+	}
+	g.stop()
+	path := filepath.Join(g.dir, "data", "usage.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, query := range []string{`SELECT count(*) FROM limit_rate_events`, `SELECT count(*) FROM limit_checkpoints`, `SELECT count(*) FROM events WHERE type='blocked'`} {
+		var n int
+		if err = db.QueryRow(query).Scan(&n); err != nil || n == 0 {
+			t.Fatal("positive control: limit state missing from the database")
+		}
+	}
+}
+
+// brokenLimitCheckpoints fails the limit snapshot alone while it is set.
+type brokenLimitCheckpoints struct {
+	*sqlite.Store
+	broken atomic.Bool
+}
+
+func (b *brokenLimitCheckpoints) SaveCheckpoint(ctx context.Context, cp storage.LimitCheckpoint) error {
+	if b.broken.Load() {
+		return storage.ErrUnavailable
+	}
+	return b.Store.SaveCheckpoint(ctx, cp)
+}
+
+func TestLimitFailuresAndRecoveryPreservePrivacy(t *testing.T) {
+	upstream := httptest.NewServer(fakeprovider.New(fakeprovider.Options{}))
+	defer upstream.Close()
+	var store *sqlite.Store
+	var coordinator *limits.Manager
+	var accounting *metering.Service
+	broken := &brokenLimitCheckpoints{}
+	apps := "    fail_open_marker: unused\n"
+	apps = "  open:\n    allowed_models: [fake-claude]\n    fail_mode: fail_open\n    budget: {usd_per_day: 1.00}\n"
+	p := startPipelineWith(t, upstream.URL, "", proxy.Hooks{}, apps, func(manager *config.Manager, dataDir string, logger *slog.Logger) proxy.Accounting {
+		var err error
+		store, err = sqlite.Open(context.Background(), dataDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		catalog, err := pricing.Embedded()
+		if err != nil {
+			t.Fatal(err)
+		}
+		broken.Store = store
+		coordinator = limits.New(limits.Options{Store: broken, Logger: logger, Publisher: store})
+		if err = coordinator.Recover(context.Background(), manager.Capture()); err != nil {
+			t.Fatal(err)
+		}
+		accounting = metering.New(store, catalog, logger, func() int64 { return 30 })
+		if err = accounting.UseLimits(coordinator, store, manager); err != nil {
+			t.Fatal(err)
+		}
+		return accounting
+	}, "open")
+	t.Cleanup(func() { store.Close() })
+	openKey := p.keys["open"]
+	broken.broken.Store(true)
+	if err := coordinator.Tick(context.Background()); err == nil {
+		t.Fatal("positive control: the injected failure was not seen")
+	}
+	run.markConstructor("AnthropicBody")
+	status, closed := p.post(t, "/v1/messages", testkit.AnthropicBody())
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("fail_closed answer %d %s", status, closed)
+	}
+	request := newCall(t, context.Background(), p.server.URL+"/v1/messages", openKey, testkit.UserMarker(), testkit.AnthropicBody())
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	open, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("fail_open answer %d", response.StatusCode)
+	}
+	broken.broken.Store(false)
+	if err := coordinator.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := accounting.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.ReadEvents(context.Background(), events.Filter{Types: []events.Type{events.LimitStateUnavailable, events.LimitStateRecovered}, Limit: 100})
+	if err != nil || len(page.Events) < 3 {
+		t.Fatal("positive control: degradation events missing")
+	}
+	for _, e := range page.Events {
+		serialized, _ := json.Marshal(e)
+		run.scanner.Scan("database", "limits-degradation", serialized)
+	}
+	p.logMu.Lock()
+	if !strings.Contains(p.logs.String(), "limit state unavailable") {
+		p.logMu.Unlock()
+		t.Fatal("positive control: no degradation warning logged")
+	}
+	p.logMu.Unlock()
+	if err := store.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	run.scanner.Scan("errors", "limits-degradation", open)
+	p.scanAll(t, "limits-degradation", closed)
+	for _, name := range []string{"usage.sqlite", "usage.sqlite-wal"} {
+		if _, err := os.Stat(filepath.Join(p.dir, name)); err == nil {
+			run.scanner.ScanFile("database", filepath.Join(p.dir, name))
+		}
+	}
+}
+
 var promptLiteral = regexp.MustCompile(`"role"\s*:`)
 
 func TestCanaryInventoryMatchesTheRepository(t *testing.T) {

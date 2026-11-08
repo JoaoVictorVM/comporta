@@ -9,7 +9,10 @@
     "tests/integration/config_proxy_test.go",
     "tests/integration/proxy_metering_test.go",
     "tests/integration/metering_bench_test.go",
-    "tests/privacy/canary_test.go"
+    "tests/privacy/canary_test.go",
+    "tests/integration/proxy_limits_test.go",
+    "tests/integration/limits_failmode_test.go",
+    "tests/integration/limits_bootstrap_test.go"
   ],
   "parser_only_go_files": [
     {
@@ -29,6 +32,7 @@
     "process/invalid-identity",
     "process/missing-user",
     "process/invalid-request",
+    "process/limits",
     "pipeline/provider-receives-prompt",
     "pipeline/upstream-error-echo",
     "pipeline/stream-error-echo",
@@ -36,6 +40,7 @@
     "pipeline/sink-failure",
     "pipeline/timeout",
     "pipeline/client-disconnect",
+    "pipeline/limits-degradation",
     "startup/keyfile-failure"
   ],
   "channels": [
@@ -43,7 +48,7 @@
     {"name": "errors", "status": "covered", "description": "JSON and SSE answers the gateway builds, reconstructed from provider failures"},
     {"name": "results", "status": "covered", "description": "Every attempt result published, as JSON and through fmt"},
     {"name": "files", "status": "covered", "description": "Files generated under the data directory, including temporaries and keys"},
-    {"name": "database", "status": "covered", "description": "Records, WAL, aggregates and events, examined after checkpoint and close"},
+    {"name": "database", "status": "covered", "description": "Records, WAL, aggregates, events, limit reservations, ledger, rate events and checkpoints, examined after checkpoint and close"},
     {"name": "metrics", "status": "unavailable", "required_by": "telemetry", "description": "Local collector: names, labels and values"},
     {"name": "traces", "status": "unavailable", "required_by": "telemetry", "description": "Local collector: span attributes"},
     {"name": "alerts", "status": "unavailable", "required_by": "alerts", "description": "Local webhook receiver: actual payloads"}
@@ -57,6 +62,7 @@
   "consumer_contract": [
     "Records store AttemptResult.UserHash.Hex() with AppName and Anonymous, and never add a raw user column",
     "Per-user limits, loop state and cache key on the pair of app and hash, plus the anonymous flag",
+    "Limit refusals, budget headers and degradation events carry configuration paths and categories, never a user hash or identifier",
     "Search and deletion call LookupHash for each app in history, including removed apps, and pick anonymous explicitly",
     "A storage-backed HistoryGuard replaces the filesystem guard before the database is created, and its reset keeps spending totals",
     "Each channel above moves to covered when it exists, in the same change, and the suite then requires it"

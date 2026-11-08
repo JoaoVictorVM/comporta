@@ -111,6 +111,13 @@ func TestCrashRecoveryDoesNotDoubleCharge(t *testing.T) {
 // 100 each: admitted, completed in the journal only, settled with the result,
 // or admitted and covered by a checkpoint.
 func limitsCrashHelper(t *testing.T, s *Store, mode string) {
+	if mode == "limits-reset" {
+		limitHistory(t, s)
+		if err := s.Reset(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	m := limitManager(t, s)
 	n := 1
 	if mode == "limits-admitted-many" {
