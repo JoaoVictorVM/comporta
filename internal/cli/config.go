@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/JoaoVictorVM/comporta/internal/config"
+	"github.com/JoaoVictorVM/comporta/internal/pricing"
 )
 
 func newConfigCommand(out streams) *cobra.Command {
@@ -67,7 +68,12 @@ func runValidate(streams streams, path string, resolveSecrets bool) error {
 	if err != nil {
 		return errors.New("configuration path cannot be resolved")
 	}
+	catalog, err := pricing.Embedded()
+	if err != nil {
+		return err
+	}
 	opts := config.Options{
+		Catalog:        catalog,
 		ResolveSecrets: resolveSecrets,
 		SystemTimezone: config.DetectSystemTimezone(),
 	}

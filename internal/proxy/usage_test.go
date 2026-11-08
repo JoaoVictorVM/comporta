@@ -7,6 +7,33 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 )
 
+func TestCacheWriteTTLBreakdown(t *testing.T) {
+	var u Usage
+	if err := u.mergeAnthropic([]byte(`{"input_tokens":10,"output_tokens":3,"cache_creation_input_tokens":4,"cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":2}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !u.CacheWrite5m.Known || u.CacheWrite5m.Value != 2 || !u.CacheWrite1h.Known || u.CacheWrite1h.Value != 2 || u.CacheWrite.Value != 4 {
+		t.Fatal("TTL breakdown lost")
+	}
+	before := u
+	if err := u.mergeAnthropic([]byte(`{"cache_creation_input_tokens":4,"cache_creation":{"ephemeral_5m_input_tokens":5,"ephemeral_1h_input_tokens":2}}`)); err == nil {
+		t.Fatal("invalid subtotal accepted")
+	}
+	if u != before {
+		t.Fatal("invalid usage changed known counters")
+	}
+}
+
+func TestReasoningNotChargedTwice(t *testing.T) {
+	var u Usage
+	if err := u.mergeOpenAI([]byte(`{"prompt_tokens":10,"completion_tokens":8,"completion_tokens_details":{"reasoning_tokens":5},"prompt_tokens_details":{"cached_tokens":3}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if u.Input.Value != 7 || u.CacheRead.Value != 3 || u.Output.Value != 8 {
+		t.Fatal("usage dimensions counted twice")
+	}
+}
+
 func TestAnthropicCumulativeUsageNotSummed(t *testing.T) {
 	var usage Usage
 	for _, raw := range []string{

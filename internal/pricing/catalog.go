@@ -4,6 +4,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"github.com/JoaoVictorVM/comporta/internal/storage"
+	"math"
 	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/config"
@@ -72,6 +74,14 @@ type Quote struct {
 	version     time.Time
 }
 
+func (q Quote) Frozen() storage.Quote {
+	return storage.Quote{EstimateMethod: "bytes/3 rounded up plus 1600 per image; fixture-validated heuristic", Price: q.price, HighPrice: q.high, Write1h: q.write1h, HighWrite1h: q.highWrite1h, Threshold: q.threshold, Source: q.source, Version: q.version}
+}
+
+func (q Quote) CacheWriteEstimated(total int64, five, hour *int64) bool {
+	return total > 0 && (five == nil || hour == nil) && (q.write1h != q.price.CacheWrite || (q.threshold > 0 && q.highWrite1h != q.high.CacheWrite))
+}
+
 func (c *Catalog) Resolve(snapshot *config.Snapshot, provider config.Provider, model string) (Quote, error) {
 	if p, ok := snapshot.Price(model); ok {
 		return Quote{price: p, write1h: p.CacheWrite, source: "override"}, nil
@@ -90,6 +100,26 @@ func (q Quote) Price(inputTotal int64) config.Price {
 		return q.high
 	}
 	return q.price
+}
+
+func (q Quote) Cost(t Tokens, write5m, write1h *int64) (config.Microusd, error) {
+	if t.Input < 0 || t.CacheWrite < 0 || t.CacheRead < 0 || t.Input > math.MaxInt64-t.CacheWrite || t.Input+t.CacheWrite > math.MaxInt64-t.CacheRead {
+		return 0, ErrOverflow
+	}
+	total := t.Input + t.CacheWrite + t.CacheRead
+	p := q.Price(total)
+	hour := q.write1h
+	if q.threshold > 0 && total > q.threshold {
+		hour = q.highWrite1h
+	}
+	if write5m == nil || write1h == nil {
+		p.CacheWrite = max(p.CacheWrite, hour)
+		return Cost(t, p)
+	}
+	if *write5m < 0 || *write1h < 0 || *write5m > t.CacheWrite || *write1h != t.CacheWrite-*write5m {
+		return 0, ErrInvalidUsage
+	}
+	return costTerms([]int64{t.Input, t.Output, *write5m, *write1h, t.CacheRead}, []config.Microusd{p.Input, p.Output, p.CacheWrite, hour, p.CacheRead})
 }
 
 func (q Quote) ConservativePrice() config.Price {

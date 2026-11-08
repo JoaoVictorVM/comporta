@@ -261,7 +261,7 @@ func validateDowngrade(app *App, path string, cfg *Config, owners map[string]str
 	if app.OnLimit != OnLimitDowngrade {
 		return
 	}
-	if _, overridden := cfg.Pricing[app.DowngradeTo]; overridden || cfg.Providers[owner].Local {
+	if _, overridden := cfg.Pricing[app.DowngradeTo]; overridden || (cfg.Providers[owner].Local && cfg.Providers[owner].APIFormat == FormatOpenAI) {
 		return
 	}
 	switch {

@@ -88,6 +88,8 @@ func (c *Candidate) HasApp(name string) bool {
 	return ok
 }
 
+func (c *Candidate) App(name string) (App, bool) { app, ok := c.cfg.Apps[name]; return app.clone(), ok }
+
 // Load reads and validates the file at path. A failure is always an *Error.
 func Load(path string, opts Options) (*Candidate, error) {
 	abs, err := filepath.Abs(path)

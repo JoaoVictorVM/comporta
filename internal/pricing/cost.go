@@ -18,6 +18,10 @@ type Tokens struct {
 func Cost(tokens Tokens, price config.Price) (config.Microusd, error) {
 	counts := []int64{tokens.Input, tokens.Output, tokens.CacheWrite, tokens.CacheRead}
 	rates := []config.Microusd{price.Input, price.Output, price.CacheWrite, price.CacheRead}
+	return costTerms(counts, rates)
+}
+
+func costTerms(counts []int64, rates []config.Microusd) (config.Microusd, error) {
 	var sum, product big.Int
 	for i, count := range counts {
 		if count < 0 || rates[i] < 0 {
