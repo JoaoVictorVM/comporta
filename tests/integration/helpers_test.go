@@ -21,10 +21,12 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/fakeprovider"
 	"github.com/JoaoVictorVM/comporta/internal/keys"
+	"github.com/JoaoVictorVM/comporta/internal/limits"
 	"github.com/JoaoVictorVM/comporta/internal/metering"
 	"github.com/JoaoVictorVM/comporta/internal/pricing"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
 	"github.com/JoaoVictorVM/comporta/internal/server"
+	"github.com/JoaoVictorVM/comporta/internal/storage"
 	"github.com/JoaoVictorVM/comporta/internal/storage/sqlite"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
@@ -82,6 +84,7 @@ func (c *resultCollector) waitCount(t testing.TB, want int) {
 type gateway struct {
 	usage      *sqlite.Store
 	accounting *metering.Service
+	limits     *limits.Manager
 	userHeader string
 	handler    *proxy.Handler
 	t          testing.TB
@@ -147,6 +150,24 @@ func startMeteredGateway(t testing.TB, fake fakeprovider.Options) *gateway {
 
 func startGatewayOptions(t testing.TB, fake fakeprovider.Options, extraListeners string, hooks proxy.Hooks, metered bool) *gateway {
 	t.Helper()
+	return startConfiguredGateway(t, fake, gatewayOptions{extraListeners: extraListeners, hooks: hooks, metered: metered})
+}
+
+// gatewayOptions adjusts a test gateway. edit changes the initial YAML; wrap
+// replaces the store the limit coordinator persists through, to inject
+// failures into limits alone while the usage journal stays healthy.
+type gatewayOptions struct {
+	extraListeners string
+	hooks          proxy.Hooks
+	metered        bool
+	edit           func(string) string
+	wrap           func(*sqlite.Store) storage.LimitStore
+	upstream       func(http.Handler) http.Handler
+}
+
+func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gatewayOptions) *gateway {
+	t.Helper()
+	extraListeners, hooks, metered := options.extraListeners, options.hooks, options.metered
 	t.Setenv("COMPORTA_INTEGRATION_KEY", providerSecret)
 	requests := make(chan fakeprovider.Request, 16)
 	previous := fake.OnRequest
@@ -159,7 +180,11 @@ func startGatewayOptions(t testing.TB, fake fakeprovider.Options, extraListeners
 			previous(request)
 		}
 	}
-	upstream := httptest.NewServer(fakeprovider.New(fake))
+	provider := fakeprovider.New(fake)
+	if options.upstream != nil {
+		provider = options.upstream(provider)
+	}
+	upstream := httptest.NewServer(provider)
 	t.Cleanup(upstream.Close)
 
 	dir := t.TempDir()
@@ -167,6 +192,9 @@ func startGatewayOptions(t testing.TB, fake fakeprovider.Options, extraListeners
 	text := configText(upstream.URL, freePort(t), freePort(t), extraListeners)
 	if metered {
 		text = strings.Replace(text, "apps:\n", "pricing:\n  fake-claude: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}\n  fake-gpt: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}\napps:\n", 1)
+	}
+	if options.edit != nil {
+		text = options.edit(text)
 	}
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
@@ -190,6 +218,7 @@ func startGatewayOptions(t testing.TB, fake fakeprovider.Options, extraListeners
 	results := &resultCollector{}
 	var usage *sqlite.Store
 	var accounting *metering.Service
+	var coordinator *limits.Manager
 	var accountant proxy.Accounting
 	workers := []server.Worker{manager.Run, keyManager.Run}
 	if metered {
@@ -202,8 +231,19 @@ func startGatewayOptions(t testing.TB, fake fakeprovider.Options, extraListeners
 			t.Fatal(err)
 		}
 		accounting = metering.New(usage, catalog, slog.New(slog.DiscardHandler), func() int64 { return manager.Capture().Storage().RetentionDays })
+		var limitStore storage.LimitStore = usage
+		if options.wrap != nil {
+			limitStore = options.wrap(usage)
+		}
+		coordinator = limits.New(limits.Options{Store: limitStore, Publisher: usage, Logger: slog.New(slog.DiscardHandler)})
+		if err = coordinator.Recover(context.Background(), manager.Capture()); err != nil {
+			t.Fatal(err)
+		}
+		if err = accounting.UseLimits(coordinator, limitStore, manager); err != nil {
+			t.Fatal(err)
+		}
 		accountant = accounting
-		workers = append(workers, accounting.Run)
+		workers = append(workers, accounting.Run, coordinator.Run)
 	}
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), auth.NewGuard(nil, nil))
 	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results, Identity: identity, Hooks: hooks, Accounting: accountant})
@@ -232,7 +272,7 @@ func startGatewayOptions(t testing.TB, fake fakeprovider.Options, extraListeners
 		}
 	})
 	return &gateway{
-		usage: usage, accounting: accounting,
+		usage: usage, accounting: accounting, limits: coordinator,
 		handler: handler, t: t, path: path, dir: dir, config: manager, store: store, keyManager: keyManager,
 		runtime: runtime, identity: identity, results: results, upstream: upstream, requests: requests, baseYAML: text,
 	}
