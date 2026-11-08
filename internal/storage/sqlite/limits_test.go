@@ -37,7 +37,7 @@ func limitRequest(r storage.Record) limits.Request {
 	return limits.Request{RequestID: r.RequestID, AttemptIndex: r.AttemptIndex, Subject: limits.Subject{App: r.AppName, Hash: r.UserHash}, Operation: limits.OperationGeneration, EstimatedTokens: 100, ReservedCost: r.ReservedCost}
 }
 
-func limitManager(t *testing.T, store storage.LimitStore) *limits.Manager {
+func limitManager(t testing.TB, store storage.LimitStore) *limits.Manager {
 	t.Helper()
 	m := limits.New(limits.Options{Store: store})
 	if err := m.Recover(context.Background(), nil); err != nil {

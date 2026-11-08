@@ -2,9 +2,9 @@
 
 Open-source LLM gateway, in development.
 
-**Current state:** this repository delivers the configuration runtime, the app key lifecycle and the request proxy. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
+**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering and per-app and per-user limits and budgets. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
 
-**Not implemented yet:** limits, budgets, policies (including `max_tokens` caps and `allowed_models` enforcement on calls), metering and persistence, end-user identity handling, fallback, cache, loop guard, sensitive data detection, alerts, telemetry and the admin panel. Their settings are validated and made available **without taking effect**, so do not rely on them as protection. Usage is measured per request but not stored yet.
+**Not implemented yet:** policies (including `max_tokens` caps and `allowed_models` enforcement on calls), fallback, cache, loop guard, sensitive data detection, alerts, telemetry and the admin panel. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
 
 ## Commands
 
@@ -139,6 +139,8 @@ Every other path or method returns 404 `endpoint not allowed by Comporta`, witho
 | `user_required`, `user_invalid`, `user_email_not_allowed`, `user_document_not_allowed` | 400 | End-user identifier missing or refused, see [End users](#end-users) |
 | `model_unknown`, `provider_format_mismatch` | 400 | Model not declared, or declared in another API format |
 | `price_unknown`, `pricing_overflow` | 400 | No effective price, or cost outside the supported integer range |
+| `rate_limited`, `concurrency_exceeded`, `budget_exceeded`, `budget_reserved`, `hard_cap_exceeded` | 429 | A limit or budget, see [Limits and budgets](#limits-and-budgets) |
+| `limits_unavailable` | 503 | Limit state cannot be verified under `fail_closed` |
 | `usage_storage_unavailable` | 503 | No accounting capacity, or durable admission could not be confirmed; provider is not called |
 | `unsupported_media_type` | 415 | Body is not uncompressed JSON |
 | `request_too_large` | 413 | Body over `max_body_bytes` |
@@ -189,7 +191,63 @@ storage:
   retention_days: 30  # 1 through 365; reload affects future maintenance
 ```
 
-Hourly maintenance removes expired request/event/configuration details in batches, preserves pending journal entries, and never re-adds their totals. Daily aggregates are retained indefinitely, with the original civil day and timezone. `usage` reads the database without migrating it, selects app totals once, includes today and the previous six civil days for `--since 7d`, and reports an exact six-decimal USD total. Finalizations may take two seconds to appear. Removed apps remain queryable using their historical timezones. Internal typed events have a durable history and a bounded live bus; slow consumers must resynchronize after overflow. Budgets, administrative APIs, policies, the panel, alerts and telemetry remain separate consumers.
+Hourly maintenance removes expired request/event/configuration details in batches, preserves pending journal entries, and never re-adds their totals. Daily aggregates are retained indefinitely, with the original civil day and timezone. `usage` reads the database without migrating it, selects app totals once, includes today and the previous six civil days for `--since 7d`, and reports an exact six-decimal USD total. Finalizations may take two seconds to appear. Removed apps remain queryable using their historical timezones. Internal typed events have a durable history and a bounded live bus; slow consumers must resynchronize after overflow. Administrative APIs, policies, the panel, alerts and telemetry remain separate consumers.
+
+### Limits and budgets
+
+Per-minute limits, concurrency limits and calendar budgets apply to every app and, identically, to each of its end users. The anonymous bucket of an app is separate from identified users and from every other app.
+
+```yaml
+apps:
+  bot-discord:
+    timezone: America/Sao_Paulo   # defaults to the root timezone
+    fail_mode: fail_closed        # or fail_open; defaults to the root fail_mode
+    limits: {requests_per_minute: 600, tokens_per_minute: 200000, max_concurrent: 20}
+    budget: {usd_per_day: 2.00, usd_per_month: 40.00, tokens_per_day: 2000000}
+    hard_cap: {usd_per_day: 2.40}
+    per_user:
+      limits: {requests_per_minute: 10, max_concurrent: 4}
+      budget: {usd_per_day: 0.20}
+```
+
+- **Sliding windows:** `requests_per_minute` and `tokens_per_minute` count admissions in the last 60 seconds of monotonic time, so with a limit of 60 the 61st call within any 60 second span is refused, across civil minute boundaries. A call exactly 60 seconds later no longer competes. Refused calls consume nothing.
+- **Concurrency:** `max_concurrent` defaults to 20 per app and 4 per user and lasts until the attempt ends, including the whole stream.
+- **Budgets:** daily budgets renew at 00:00 and monthly budgets on day 1 in the timezone of the app, using calendar rules (days of 23 or 25 hours, month ends, leap days), never fixed durations. Token budgets and `tokens_per_minute` count the four disjoint usage dimensions: input, output, cache write and cache read.
+- **Reserve and settle:** before forwarding, the worst case (the cost of the frozen quote, and estimated input plus capped output in tokens) is reserved against every applicable dimension of the app and the user, atomically: one refusal changes nothing. After the response the reservation is replaced by the real cost. A cancellation or error settles what was consumed; when usage is incomplete, each dimension is charged the greater of what was observed and what was reserved. An attempt that was never sent releases its money and tokens but still counts as a request.
+- **`count_tokens`** counts toward requests per minute and concurrency only. `GET /v1/models` counts toward nothing.
+- **Order:** limits are evaluated as request rate, token rate, concurrency, hard caps, then budgets, app before user, and within budgets USD per day, USD per month, tokens per day, tokens per month. The first exceeded limit names the refusal. Hard caps use the same balances as budgets with their own ceilings.
+- **Policies:** this release always blocks. An `on_limit` of `downgrade` or `warn` is accepted by the configuration and logged as not implemented yet; it does not downgrade or warn.
+
+Refusals use the error envelope of each SDK, with HTTP 429 and `rate_limit_error`, plus `limit_name` (the configuration path), `scope` (`app` or `user`), `reason` and, when known, `renews_at` (UTC, RFC 3339):
+
+| `comporta_code` | Cause |
+|---|---|
+| `rate_limited` | Request or token rate. `Retry-After` gives whole seconds when the release time is known; tokens still held by calls in flight have no known release time, so no promise is made |
+| `concurrency_exceeded` | `too many concurrent requests for this user (limit 4)`, or the app variant; no `Retry-After` |
+| `budget_exceeded` | Spent budget: the call does not fit even without other reservations, `reason: spent` |
+| `budget_reserved` | The call would fit once calls in flight settle, `reason: reservation`, recorded apart from spent-budget blocks |
+| `hard_cap_exceeded` | A hard cap, with `reason` spent or reservation |
+| `limits_unavailable` | 503, `limits cannot be verified; request rejected (fail_closed)` |
+
+```text
+daily budget of $2.00 for app bot-discord would be exceeded (spent $1.97, reserved $0.00); renews at 00:00 America/Sao_Paulo (in 3h12m)
+```
+
+Every refusal before an attempt is stored as a blocked record with attempt 0, zero cost and its reason, plus a `blocked` event; it never enters the daily totals.
+
+**Headers:** admitted calls carry `x-comporta-budget-remaining` (USD with six decimals, or tokens), `x-comporta-budget-reset` (Unix seconds), `x-comporta-budget-unit` (`usd` or `tokens`) and `x-comporta-budget-limit` (the configuration path, which tells a hard cap from a budget) for the applicable budget with the smallest fraction left after the reservation, compared exactly. They are sent with the status line, before the first stream event, and describe the moment of admission, not the balance when a stream ends. They are absent without an applicable budget or while limit state is degraded. Provider headers with the `x-comporta-` prefix are dropped.
+
+**Durability:** the reservation is written in the same transaction as the usage journal entry, and the settlement in the same transaction as the result, before anything is forwarded or released in memory. Counters live in memory, a checkpoint is written every 5 seconds and at shutdown, and the ledger after the last checkpoint is replayed at startup. After a crash, reservations of calls in flight are settled from their recorded result or, without one, at their reserved value, and nothing is sent again. Recovery happens before the listeners open and can be repeated after another crash. On the first start over an existing usage database, budgets are seeded once from the daily totals, counting a day only partly inside the current window in full; token history that cannot be proven blocks that token budget until its next boundary instead of reading as zero.
+
+**Clock and reload:** a wall clock that moves back more than 5 seconds logs a warning, at most one every 30 seconds; windows keep monotonic time and a closed budget window is never reopened, including after a restart with an earlier clock. A new ceiling applies to new admissions and keeps what was spent and reserved; removing a limit and adding it back keeps the history. A call that started under an older configuration generation than one the coordinator already applied is admitted again under the current one. A new timezone takes effect when the active windows of the configured budgets end, and the window then in force starts with the spending of the old windows it overlaps; the limit state reports the active and pending timezone.
+
+**Fail modes:** with `fail_closed`, the default, a call is refused with 503 when limit state cannot be read or written, for example when a checkpoint or a settlement fails. With `fail_open` the call proceeds, its record is marked degraded, limits are still evaluated from memory, and a `limit_state_unavailable` event (severity warning, per app) and a log warning are emitted; `limit_state_recovered` follows once state is persisted again. `fail_open` never bypasses the usage journal: if usage cannot be admitted durably the call gets 503 `usage_storage_unavailable`. Arithmetic overflow and integrity failures never fail open. Delivery of these events to Slack or webhooks belongs to the alerts feature.
+
+**Guarantee and its limits:** admissions are serialized with their reservations, so when real usage stays within the reservation, concurrent calls cannot overrun a budget. A test fires 500 simultaneous calls at one budget in 100 consecutive rounds against SQLite and the fake provider and checks that spend never exceeds the budget by more than the largest single reservation; on the reference Windows machine every round stayed within the budget. When a provider reports more usage than estimated, the real cost is charged and the budget then refuses new calls, but several calls in flight that all exceed their estimate can together exceed the budget by more than one reservation; a test demonstrates this case. `fail_open` also suspends the guarantee while degraded. Token estimation is a heuristic, not a tokenizer.
+
+**Measured cost:** admission and settlement reuse the two synchronous `synchronous=FULL` commits that metering already made, now carrying the reservation. On the reference Windows machine, sequential non-streaming calls through the fake provider measured a p95 of 6.7 ms against 2.0 ms without metering and limits, and streaming time to first byte a p95 of 3.6 ms against 2.6 ms. The coordinator alone takes about 27 µs per reserve and settle. The sustained load target of 200 requests per second for 5 minutes was not measured in this release.
+
+**For later features:** policies, the panel, alerts, telemetry, fallback, cache and multiple instances consume typed decisions, a consistent state per app and user (used, reserved, limit, renewal, degradation, active and pending timezone) and a reservation handle with reserve, settle and release. A per-user deletion of limit state exists at the storage level; no administrative endpoint or command exposes it yet.
 
 ### End users
 

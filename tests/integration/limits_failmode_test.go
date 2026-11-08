@@ -2,6 +2,8 @@ package integration
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -166,7 +168,7 @@ func TestUserConcurrencyAboveLimitReturns429(t *testing.T) {
 	user := testkit.UserMarker()
 	var wg sync.WaitGroup
 	for range 4 {
-		wg.Go(func() { gw.callAs("/v1/chat/completions", key, user, testkit.OpenAIBody()) })
+		wg.Go(func() { gw.callUser(key, user) })
 	}
 	for range 4 {
 		<-entered
@@ -182,4 +184,20 @@ func TestUserConcurrencyAboveLimitReturns429(t *testing.T) {
 	if response, _ := gw.callAs("/v1/chat/completions", key, user, testkit.OpenAIBody()); response.StatusCode != 200 {
 		t.Fatal("finished calls did not free their slots")
 	}
+}
+
+// callUser is safe to call from several goroutines: unlike callAs, it shares no
+// state on the gateway.
+func (g *gateway) callUser(key, user string) int {
+	request, _ := http.NewRequest(http.MethodPost, g.proxyURL("/v1/chat/completions"), strings.NewReader(testkit.OpenAIBody()))
+	request.Header.Set("Authorization", "Bearer "+key)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Comporta-User", user)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return 0
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	response.Body.Close()
+	return response.StatusCode
 }
