@@ -53,7 +53,9 @@ pricing:
 apps:
   my-app: {allowed_models: [fake-gpt]}
 `
-	if err := os.WriteFile(config, []byte(text), 0600); err != nil {
+	// This bind-mounted fixture has no secret values and must be readable by
+	// container UID 65532, which differs from the host runner's owner.
+	if err := os.WriteFile(config, []byte(text), 0644); err != nil {
 		t.Fatal(err)
 	}
 	overrideText := `services:
