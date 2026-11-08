@@ -15,6 +15,7 @@ const sinkTimeout = time.Second
 // only: no content, no raw user identifier, no raw error. UserHash is what later stages
 // key per-user data by, always together with AppName and Anonymous.
 type AttemptResult struct {
+	NotSent            bool
 	RequestID          string
 	AttemptIndex       int
 	AppName            string
@@ -56,6 +57,7 @@ func (discardSink) Publish(context.Context, AttemptResult) error { return nil }
 
 // attempt owns the result of one upstream attempt.
 type attempt struct {
+	complete  func(AttemptResult)
 	result    AttemptResult
 	admission time.Time
 	began     time.Time
@@ -126,6 +128,9 @@ func (a *attempt) finish() {
 	a.once.Do(func() {
 		a.result.Latency = a.now().Sub(a.began)
 		result := a.result
+		if a.complete != nil {
+			a.complete(result)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), sinkTimeout)
 		defer cancel()
 		done := make(chan struct{})

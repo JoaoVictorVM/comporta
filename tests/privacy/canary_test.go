@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,8 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/keys"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
+	"github.com/JoaoVictorVM/comporta/internal/storage"
+	"github.com/JoaoVictorVM/comporta/internal/storage/sqlite"
 	"github.com/JoaoVictorVM/comporta/internal/testkit"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
@@ -181,6 +184,8 @@ providers:
     base_url: http://127.0.0.1:%[1]d/v1
     api_key: ${%[2]s}
     models: [fake-gpt]
+pricing:
+  fake-claude: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}
 apps:
   bot:
     allowed_models: [fake-claude, fake-gpt]
@@ -260,6 +265,14 @@ func (g *liveGateway) send(name, path, key, user, body string) int {
 // stop ends the processes and scans all they left: outputs and generated files.
 func (g *liveGateway) stop() {
 	g.t.Helper()
+	for _, name := range []string{"usage.sqlite", "usage.sqlite-wal", "usage.sqlite-shm"} {
+		path := filepath.Join(g.dir, "data", name)
+		if _, err := os.Stat(path); err == nil {
+			run.scanner.ScanFile("database", path)
+		} else if name == "usage.sqlite" {
+			g.t.Error("required SQLite artifact missing")
+		}
+	}
 	for _, process := range g.processes {
 		_ = process.Process.Kill()
 	}
@@ -270,6 +283,65 @@ func (g *liveGateway) stop() {
 		run.scanner.ScanFile("logs", path)
 	}
 	run.scanner.ScanDir("files", filepath.Join(g.dir, "data"))
+}
+
+func TestSQLiteJournalAndEventsContainNoContentOrRawID(t *testing.T) {
+	run.markCase("process/database-recovery")
+	g := startLive(t, "success", "")
+	defer g.stop()
+	run.markConstructor("AnthropicBody")
+	if status := g.send("database-recovery", "/v1/messages", g.key, testkit.UserMarker(), testkit.AnthropicBody()); status != 200 {
+		t.Fatalf("status %d", status)
+	}
+	reader, err := sqlite.OpenReader(context.Background(), filepath.Join(g.dir, "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		rows, err := reader.Daily(context.Background(), storage.Filter{AppName: "bot"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	rows, err := reader.Daily(context.Background(), storage.Filter{AppName: "bot"})
+	reader.Close()
+	if err != nil || len(rows) != 1 || rows[0].Requests != 1 {
+		t.Fatal("positive control: persisted usage missing")
+	}
+	g.stop()
+	store, err := sqlite.Open(context.Background(), filepath.Join(g.dir, "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Recover(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(g.dir, "data", "usage.sqlite")
+	run.scanner.ScanFile("database", path)
+	// SQL projections are checked in addition to bytes, including nonempty aggregates
+	// and events, so a scan of an empty file cannot satisfy this channel.
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, table := range []string{"requests", "usage_daily", "events"} {
+		var n int
+		if err = db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&n); err != nil || n == 0 {
+			t.Fatal("positive control: required table empty")
+		}
+	}
 }
 
 type routeCall struct {
@@ -434,6 +506,8 @@ providers:
     base_url: %s
     api_key: ${%s}
     models: [fake-claude]
+pricing:
+  fake-claude: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}
 apps:
   bot:
     allowed_models: [fake-gpt, fake-claude]

@@ -63,6 +63,7 @@ func (h Hooks) streamEvent(ctx context.Context, envelope *Envelope, raw []byte) 
 
 // Options configures a Handler.
 type Options struct {
+	Accounting Accounting
 	Auth       *auth.HTTP
 	Transports *TransportPool
 	Sink       ResultSink
@@ -77,6 +78,7 @@ type Options struct {
 
 // Handler serves the fixed routes.
 type Handler struct {
+	accounting Accounting
 	auth       *auth.HTTP
 	transports *TransportPool
 	sink       ResultSink
@@ -89,7 +91,8 @@ type Handler struct {
 // NewHandler returns a Handler.
 func NewHandler(options Options) *Handler {
 	handler := &Handler{
-		auth: options.Auth, transports: options.Transports, sink: options.Sink,
+		accounting: options.Accounting,
+		auth:       options.Auth, transports: options.Transports, sink: options.Sink,
 		hooks: options.Hooks, identity: options.Identity, logger: options.Logger, now: options.Now,
 	}
 	if handler.transports == nil {
@@ -179,15 +182,16 @@ func (h *Handler) ServeRoute(w http.ResponseWriter, r *http.Request, route Route
 
 // operation is one authenticated conversation request.
 type operation struct {
-	handler   *Handler
-	w         *trackedWriter
-	raw       http.ResponseWriter
-	format    auth.Format
-	route     Route
-	snapshot  *config.Snapshot
-	admission time.Time
-	attempt   *attempt
-	stream    bool
+	completion func(AttemptResult)
+	handler    *Handler
+	w          *trackedWriter
+	raw        http.ResponseWriter
+	format     auth.Format
+	route      Route
+	snapshot   *config.Snapshot
+	admission  time.Time
+	attempt    *attempt
+	stream     bool
 }
 
 // finish publishes the attempt and keeps a panic to this request. It is the one
@@ -273,6 +277,13 @@ func (o *operation) serve(r *http.Request) {
 		return
 	}
 
+	if o.handler.accounting != nil {
+		app, _ := o.snapshot.App(envelope.AppName)
+		if err := request.capOutput(app.MaxTokens); err != nil {
+			WriteFailure(o.w, o.format, internalFailure())
+			return
+		}
+	}
 	effective := request.effectiveBody()
 	if hooks.BeforeSend != nil {
 		content.Body = effective
@@ -280,6 +291,14 @@ func (o *operation) serve(r *http.Request) {
 			WriteFailure(o.w, o.format, rejection.failure())
 			return
 		}
+	}
+	if o.handler.accounting != nil {
+		complete, rejection := o.handler.accounting.Admit(r.Context(), o.snapshot, envelope, providerName, provider)
+		if rejection != nil {
+			WriteFailure(o.w, o.format, rejection.failure())
+			return
+		}
+		o.completion = complete
 	}
 	o.send(r, envelope, providerName, provider, effective, listeners)
 }
@@ -342,6 +361,8 @@ func (o *operation) resolveProvider(model string) (string, config.Provider, *Fai
 func (o *operation) send(r *http.Request, envelope *Envelope, name string, provider config.Provider, body []byte, listeners config.Listeners) {
 	handler := o.handler
 	o.attempt = newAttempt(envelope, name, o.admission, handler.now, handler.sink, handler.logger)
+	o.attempt.complete = o.completion
+	o.attempt.result.NotSent = true
 
 	ctx := r.Context()
 	var cancelDeadline context.CancelFunc = func() {}
@@ -377,6 +398,7 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 	transport, release := handler.transports.acquire(o.snapshot, name, provider)
 	defer release()
 
+	o.attempt.result.NotSent = false
 	response, err := transport.RoundTrip(request)
 	if err != nil {
 		if r.Context().Err() != nil {

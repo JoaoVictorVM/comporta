@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,8 +21,11 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/fakeprovider"
 	"github.com/JoaoVictorVM/comporta/internal/keys"
+	"github.com/JoaoVictorVM/comporta/internal/metering"
+	"github.com/JoaoVictorVM/comporta/internal/pricing"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
 	"github.com/JoaoVictorVM/comporta/internal/server"
+	"github.com/JoaoVictorVM/comporta/internal/storage/sqlite"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
@@ -39,7 +43,7 @@ func (c *resultCollector) Publish(_ context.Context, result proxy.AttemptResult)
 	return nil
 }
 
-func (c *resultCollector) last(t *testing.T) proxy.AttemptResult {
+func (c *resultCollector) last(t testing.TB) proxy.AttemptResult {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -61,9 +65,11 @@ func (c *resultCollector) last(t *testing.T) proxy.AttemptResult {
 
 // gateway is a complete service: managers, both listeners, a fake upstream.
 type gateway struct {
+	usage      *sqlite.Store
+	accounting *metering.Service
 	userHeader string
 	handler    *proxy.Handler
-	t          *testing.T
+	t          testing.TB
 	path       string
 	dir        string
 	config     *config.Manager
@@ -77,7 +83,7 @@ type gateway struct {
 	baseYAML   string
 }
 
-func freePort(t *testing.T) int {
+func freePort(t testing.TB) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -111,12 +117,20 @@ listeners:
 %[4]s`, upstreamURL, proxyPort, adminPort, extraListeners)
 }
 
-func startGateway(t *testing.T, fake fakeprovider.Options, extraListeners string) *gateway {
+func startGateway(t testing.TB, fake fakeprovider.Options, extraListeners string) *gateway {
 	t.Helper()
 	return startGatewayWithHooks(t, fake, extraListeners, proxy.Hooks{})
 }
 
-func startGatewayWithHooks(t *testing.T, fake fakeprovider.Options, extraListeners string, hooks proxy.Hooks) *gateway {
+func startGatewayWithHooks(t testing.TB, fake fakeprovider.Options, extraListeners string, hooks proxy.Hooks) *gateway {
+	return startGatewayOptions(t, fake, extraListeners, hooks, false)
+}
+
+func startMeteredGateway(t testing.TB, fake fakeprovider.Options) *gateway {
+	return startGatewayOptions(t, fake, "", proxy.Hooks{}, true)
+}
+
+func startGatewayOptions(t testing.TB, fake fakeprovider.Options, extraListeners string, hooks proxy.Hooks, metered bool) *gateway {
 	t.Helper()
 	t.Setenv("COMPORTA_INTEGRATION_KEY", providerSecret)
 	requests := make(chan fakeprovider.Request, 16)
@@ -136,6 +150,9 @@ func startGatewayWithHooks(t *testing.T, fake fakeprovider.Options, extraListene
 	dir := t.TempDir()
 	path := filepath.Join(dir, "comporta.yaml")
 	text := configText(upstream.URL, freePort(t), freePort(t), extraListeners)
+	if metered {
+		text = strings.Replace(text, "apps:\n", "pricing:\n  fake-claude: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}\n  fake-gpt: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}\napps:\n", 1)
+	}
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -156,13 +173,30 @@ func startGatewayWithHooks(t *testing.T, fake fakeprovider.Options, extraListene
 		t.Fatal(err)
 	}
 	results := &resultCollector{}
+	var usage *sqlite.Store
+	var accounting *metering.Service
+	var accountant proxy.Accounting
+	workers := []server.Worker{manager.Run, keyManager.Run}
+	if metered {
+		usage, err = sqlite.Open(context.Background(), manager.Capture().DataDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		catalog, err := pricing.Embedded()
+		if err != nil {
+			t.Fatal(err)
+		}
+		accounting = metering.New(usage, catalog, slog.New(slog.DiscardHandler), func() int64 { return manager.Capture().Storage().RetentionDays })
+		accountant = accounting
+		workers = append(workers, accounting.Run)
+	}
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), auth.NewGuard(nil, nil))
-	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results, Identity: identity, Hooks: hooks})
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results, Identity: identity, Hooks: hooks, Accounting: accountant})
 	runtime, err := server.Open(context.Background(), server.Options{
 		Source:  manager,
 		Proxy:   server.ProxySurface(manager, handler),
 		Admin:   server.AdminSurface(manager),
-		Workers: []server.Worker{manager.Run, keyManager.Run},
+		Workers: workers,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -178,8 +212,12 @@ func startGatewayWithHooks(t *testing.T, fake fakeprovider.Options, extraListene
 			t.Error("the gateway did not stop")
 		}
 		handler.Close()
+		if usage != nil {
+			usage.Close()
+		}
 	})
 	return &gateway{
+		usage: usage, accounting: accounting,
 		handler: handler, t: t, path: path, dir: dir, config: manager, store: store, keyManager: keyManager,
 		runtime: runtime, identity: identity, results: results, upstream: upstream, requests: requests, baseYAML: text,
 	}
