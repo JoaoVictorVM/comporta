@@ -63,6 +63,21 @@ func (c *resultCollector) last(t testing.TB) proxy.AttemptResult {
 	return proxy.AttemptResult{}
 }
 
+func (c *resultCollector) waitCount(t testing.TB, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		count := len(c.results)
+		c.mu.Unlock()
+		if count >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("attempt completion barrier not reached")
+}
+
 // gateway is a complete service: managers, both listeners, a fake upstream.
 type gateway struct {
 	usage      *sqlite.Store

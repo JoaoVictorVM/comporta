@@ -21,6 +21,10 @@ func TestPublishAfterCommitOnly(t *testing.T) {
 	if err := s.Publish(ctx, e); err != nil {
 		t.Fatal(err)
 	}
+	page, err := s.ReadEvents(ctx, events.Filter{App: "bot", Types: []events.Type{events.Paused}, Limit: 1})
+	if err != nil || len(page.Events) != 1 || page.Events[0].ID != e.ID {
+		t.Fatal("durable event query missing")
+	}
 	select {
 	case got := <-sub.Events:
 		if got.ID != e.ID {

@@ -11,5 +11,8 @@ func databaseError(err error) error {
 	if errors.As(err, &failure) && failure.Code()&255 == 13 {
 		return storage.ErrFull
 	}
+	if failure != nil && failure.Code()&255 == 19 {
+		return storage.ErrInvalid
+	}
 	return storage.ErrUnavailable
 }

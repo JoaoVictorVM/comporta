@@ -75,18 +75,6 @@ func Prepare(ctx context.Context, dir string) (*Store, error) {
 		}
 		file.Close()
 	}
-	path := filepath.Join(dir, "usage.sqlite")
-	if _, err = os.Lstat(path); err == nil {
-		reader, err := OpenReader(ctx, dir)
-		if err != nil {
-			s.Close()
-			return nil, err
-		}
-		s.db = reader.db
-	} else if !errors.Is(err, os.ErrNotExist) {
-		s.Close()
-		return nil, storage.ErrUnavailable
-	}
 	return s, nil
 }
 
@@ -145,7 +133,7 @@ func (s *Store) Initialize(ctx context.Context) error {
 		s.Close()
 		return err
 	}
-	reader, err := OpenReader(ctx, s.dir)
+	reader, err := openReader(ctx, s.dir, true)
 	if err != nil {
 		return err
 	}

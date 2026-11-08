@@ -13,7 +13,7 @@ RUN mkdir -p /out/data && chmod 0700 /out/data
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /out/comporta /comporta
-COPY --from=build --chown=65532:65532 /out/data /data
+COPY --from=build --chown=65532:65532 --chmod=0700 /out/data /data
 USER 65532:65532
 EXPOSE 8080 8081
 ENTRYPOINT ["/comporta"]

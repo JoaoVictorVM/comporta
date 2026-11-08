@@ -76,6 +76,9 @@ func TestExactModelAliasesOnly(t *testing.T) {
 	if !c.HasPrice("claude-haiku-5-5") || c.HasPrice("claude-haiku-5-5-invented") {
 		t.Fatal("model matching")
 	}
+	if c.HasProviderPrice("claude-haiku-5-5", config.Provider{APIFormat: config.FormatOpenAI}) {
+		t.Fatal("catalog validation ignored provider format")
+	}
 }
 
 func TestLongContextTierBoundaries(t *testing.T) {

@@ -5,6 +5,7 @@ package integration
 import (
 	"archive/tar"
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,113 @@ func repoRoot(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return root
+}
+
+func TestContainerUsageSurvivesRestartAndCrash(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "comporta.yaml")
+	override := filepath.Join(dir, "compose.override.yaml")
+	text := `data_dir: /data
+timezone: UTC
+listeners:
+  proxy: {bind: 0.0.0.0}
+  admin: {bind: 0.0.0.0}
+providers:
+  fake:
+    api_format: openai
+    base_url: http://127.0.0.1:9090/v1
+    models: [fake-gpt]
+pricing:
+  fake-gpt: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}
+apps:
+  my-app: {allowed_models: [fake-gpt]}
+`
+	if err := os.WriteFile(config, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	overrideText := `services:
+  fake:
+    image: comporta:local
+    network_mode: service:comporta
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["fake-provider", "--port", "9090"]
+`
+	if err := os.WriteFile(override, []byte(overrideText), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("COMPORTA_CONFIG", config)
+	t.Setenv("COMPOSE_FILE", filepath.Join(repoRoot(t), "compose.yaml")+string(os.PathListSeparator)+override)
+	key := startProvisioned(t)
+	var status int
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		request, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:8080/v1/chat/completions", strings.NewReader(testkit.OpenAIBody()))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+key)
+		response, err := http.DefaultClient.Do(request)
+		if err == nil {
+			status = response.StatusCode
+			io.Copy(io.Discard, response.Body)
+			response.Body.Close()
+			if status == 200 {
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if status != 200 {
+		t.Fatal("fake provider did not answer through container")
+	}
+	compose(t, "kill", "-s", "SIGKILL", "comporta")
+	compose(t, "up", "-d", "comporta")
+	waitForHealth(t)
+	first := compose(t, "exec", "-T", "comporta", "/comporta", "usage", "--app", "my-app", "--config", "/etc/comporta/comporta.yaml")
+	if !strings.Contains(first, "estimated_cost_usd") || strings.Contains(first, "total - 0 0 0.000000") {
+		t.Fatal("crash recovery did not preserve usage")
+	}
+	compose(t, "restart", "comporta")
+	waitForHealth(t)
+	second := compose(t, "exec", "-T", "comporta", "/comporta", "usage", "--app", "my-app", "--config", "/etc/comporta/comporta.yaml")
+	totals := func(s string) string {
+		for _, line := range strings.Split(s, "\n") {
+			if strings.HasPrefix(line, "total ") {
+				return line
+			}
+		}
+		return ""
+	}
+	if totals(first) == "" || totals(first) != totals(second) {
+		t.Fatal("restart changed totals")
+	}
+	for _, name := range []string{"usage.sqlite", "usage.sqlite-wal", "usage.sqlite-shm"} {
+		reader := tar.NewReader(bytes.NewReader(copyFromContainer(t, "/data/"+name)))
+		header, err := reader.Next()
+		if err != nil || header.Mode&0077 != 0 || header.Uid != 65532 {
+			t.Fatal("SQLite artifact not private")
+		}
+	}
+	// A copied, checkpointed snapshot also verifies that the history is queryable
+	// outside the container without relying solely on CLI text.
+	compose(t, "stop", "comporta")
+	containerID := strings.TrimSpace(compose(t, "ps", "-aq", "comporta"))
+	output := filepath.Join(t.TempDir(), "usage.sqlite")
+	if data, err := exec.Command("docker", "cp", containerID+":/data/usage.sqlite", output).CombinedOutput(); err != nil {
+		t.Fatalf("copy database: %v %s", err, data)
+	}
+	// The source owner differs from the host user; the CLI already exercised the
+	// private volume. Use the driver's read-only connection for this snapshot.
+	db, err := sql.Open("sqlite", output+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var requests int64
+	if err = db.QueryRow(`SELECT sum(requests) FROM usage_daily WHERE scope='app' AND app_name='my-app'`).Scan(&requests); err != nil || requests < 1 {
+		t.Fatal("copied database has no app totals")
+	}
 }
 
 func compose(t *testing.T, args ...string) string {

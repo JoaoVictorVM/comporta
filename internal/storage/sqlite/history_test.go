@@ -88,3 +88,56 @@ func TestReadOnlyQueryCreatesNothing(t *testing.T) {
 		t.Fatal("read-only query created files")
 	}
 }
+
+func TestFutureSchemaCannotProveEmptyHistory(t *testing.T) {
+	s := testStore(t)
+	if _, err := s.db.Exec(`UPDATE schema_migrations SET version=99`); err != nil {
+		t.Fatal(err)
+	}
+	state, err := s.Inspect(context.Background())
+	if err == nil || state != useridentity.HistoryPresent {
+		t.Fatal("future schema proved empty")
+	}
+	if reader, err := OpenReader(context.Background(), s.dir); err == nil {
+		reader.Close()
+		t.Fatal("future schema read as supported")
+	}
+}
+
+func TestReadOnlyClosedDatabaseCreatesNothing(t *testing.T) {
+	s := testStore(t)
+	dir := s.dir
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := OpenReader(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if _, err = reader.Apps(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadDir(dir)
+	if err != nil || len(before) != len(after) {
+		t.Fatal("read-only query created SQLite artifacts")
+	}
+}
+
+func TestUnknownRuntimeStateRefusesIdentityReset(t *testing.T) {
+	s := testStore(t)
+	if _, err := s.db.Exec(`INSERT INTO runtime_state VALUES('unknown','user','{"version":2}',0)`); err != nil {
+		t.Fatal(err)
+	}
+	state, err := s.Inspect(context.Background())
+	if err == nil || state != useridentity.HistoryPresent {
+		t.Fatal("unknown runtime state proved empty")
+	}
+	if err = s.Reset(context.Background()); err == nil {
+		t.Fatal("unknown runtime state reset without an owner")
+	}
+}

@@ -46,10 +46,13 @@ func (s *ConfigEvents) Run(ctx context.Context) error {
 	var pending *events.Event
 	var lastWarning time.Time
 	for {
+		if ctx.Err() != nil {
+			return s.drain(pending)
+		}
 		if pending == nil {
 			select {
 			case <-ctx.Done():
-				return s.drain()
+				return s.drain(nil)
 			case e := <-s.queue:
 				pending = &e
 			}
@@ -69,21 +72,20 @@ func (s *ConfigEvents) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			tick.Stop()
-			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			err := s.Publisher.Publish(shutdown, *pending)
-			cancel()
-			if err != nil {
-				return err
-			}
-			return s.drain()
+			return s.drain(pending)
 		case <-tick.C:
 		}
 	}
 }
 
-func (s *ConfigEvents) drain() error {
+func (s *ConfigEvents) drain(pending *events.Event) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if pending != nil {
+		if err := s.Publisher.Publish(ctx, *pending); err != nil {
+			return err
+		}
+	}
 	for {
 		select {
 		case e := <-s.queue:

@@ -8,9 +8,51 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/events"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
+	"io"
 	"os"
+	"strings"
 	"time"
 )
+
+type resetState struct {
+	Version     int    `json:"version"`
+	OperationID string `json:"operation_id"`
+	State       string `json:"state"`
+}
+
+func decodeReset(data string, state *resetState) error {
+	d := json.NewDecoder(strings.NewReader(data))
+	d.DisallowUnknownFields()
+	if d.Decode(state) != nil || d.Decode(new(any)) != io.EOF || state.Version != 1 || !hexID.MatchString(state.OperationID) || state.State != "complete" {
+		return storage.ErrInvalid
+	}
+	return nil
+}
+
+func (s *Store) inspectRuntime(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT namespace,key,value_json FROM runtime_state`)
+	if err != nil {
+		return storage.ErrUnavailable
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var namespace, key, data string
+		if err = rows.Scan(&namespace, &key, &data); err != nil {
+			return storage.ErrUnavailable
+		}
+		if namespace != "identity" || key != "reset" {
+			return storage.ErrInvalid
+		}
+		var state resetState
+		if err = decodeReset(data, &state); err != nil {
+			return err
+		}
+	}
+	if rows.Err() != nil {
+		return storage.ErrUnavailable
+	}
+	return nil
+}
 
 func (s *Store) Inspect(ctx context.Context) (useridentity.HistoryState, error) {
 	entries, err := os.ReadDir(s.dir)
@@ -24,12 +66,32 @@ func (s *Store) Inspect(ctx context.Context) (useridentity.HistoryState, error) 
 		}
 	}
 	if s.db == nil {
+		found := false
 		for _, e := range entries {
-			if e.Name() == "usage.sqlite-wal" || e.Name() == "usage.sqlite-shm" {
-				return useridentity.HistoryPresent, storage.ErrUnavailable
+			if e.Name() == "usage.sqlite" {
+				found = true
 			}
 		}
-		return useridentity.HistoryEmpty, nil
+		if found {
+			reader, err := openReader(ctx, s.dir, true)
+			if err != nil {
+				return useridentity.HistoryPresent, err
+			}
+			s.db = reader.db
+		} else {
+			for _, e := range entries {
+				if e.Name() == "usage.sqlite-wal" || e.Name() == "usage.sqlite-shm" {
+					return useridentity.HistoryPresent, storage.ErrUnavailable
+				}
+			}
+			return useridentity.HistoryEmpty, nil
+		}
+	}
+	if err := checkSchema(ctx, s.db); err != nil {
+		return useridentity.HistoryPresent, err
+	}
+	if err := s.inspectRuntime(ctx); err != nil {
+		return useridentity.HistoryPresent, err
 	}
 	for _, query := range []string{`SELECT count(*) FROM requests WHERE user_hash IS NOT NULL`, `SELECT count(*) FROM usage_daily WHERE scope='user'`, `SELECT count(*) FROM metering_journal`, `SELECT count(*) FROM budget_state WHERE scope='user'`, `SELECT count(*) FROM events WHERE user_hash IS NOT NULL`} {
 		var n int
@@ -57,6 +119,9 @@ func (s *Store) Reset(ctx context.Context) error {
 	if err := s.Initialize(ctx); err != nil {
 		return err
 	}
+	if err := s.inspectRuntime(ctx); err != nil {
+		return err
+	}
 	if err := s.Recover(ctx, time.Now()); err != nil {
 		return err
 	}
@@ -67,15 +132,11 @@ func (s *Store) Reset(ctx context.Context) error {
 		return storage.ErrUnavailable
 	}
 	defer tx.Rollback()
-	state := struct {
-		Version     int    `json:"version"`
-		OperationID string `json:"operation_id"`
-		State       string `json:"state"`
-	}{Version: 1, OperationID: events.New(events.Paused, time.Now()).ID, State: "intent"}
+	state := resetState{Version: 1, OperationID: events.New(events.Paused, time.Now()).ID, State: "intent"}
 	var prior string
 	err = tx.QueryRowContext(ctx, `SELECT value_json FROM runtime_state WHERE namespace='identity' AND key='reset'`).Scan(&prior)
 	if err == nil {
-		if json.Unmarshal([]byte(prior), &state) != nil || state.Version != 1 || !hexID.MatchString(state.OperationID) || state.State != "complete" {
+		if decodeReset(prior, &state) != nil {
 			return storage.ErrInvalid
 		}
 		state.State = "intent"

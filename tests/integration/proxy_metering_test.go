@@ -129,7 +129,7 @@ func TestMeteringPinsPricesAcrossReload(t *testing.T) {
 	if response, _ := gw.call("/v1/chat/completions", key, testkit.OpenAIBody()); response.StatusCode != 200 {
 		t.Fatal(response.StatusCode)
 	}
-	gw.results.last(t)
+	gw.results.waitCount(t, 2)
 	if err := gw.accounting.Flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}

@@ -15,6 +15,28 @@ var schema string
 
 var errSchema = errors.New("incompatible database version or migration checksum")
 
+func checkSchema(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `SELECT version,checksum FROM schema_migrations ORDER BY version`)
+	if err != nil {
+		return errSchema
+	}
+	defer rows.Close()
+	count := 0
+	expected := fmt.Sprintf("%x", sha256.Sum256([]byte(schema)))
+	for rows.Next() {
+		var version int
+		var checksum string
+		if err = rows.Scan(&version, &checksum); err != nil || version != 1 || checksum != expected {
+			return errSchema
+		}
+		count++
+	}
+	if rows.Err() != nil || count != 1 {
+		return errSchema
+	}
+	return nil
+}
+
 type migration struct {
 	version int
 	sql     string

@@ -165,6 +165,11 @@ func (s *Service) complete(r storage.Record, q pricing.Quote, result proxy.Attem
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := s.store.Complete(ctx, r); err != nil {
+		if errors.Is(err, storage.ErrInvalid) || errors.Is(err, storage.ErrConflict) {
+			s.mu.Lock()
+			s.unhealthy = true
+			s.mu.Unlock()
+		}
 		s.warnStorage(err)
 	}
 	s.mu.Lock()

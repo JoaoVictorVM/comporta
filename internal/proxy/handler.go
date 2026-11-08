@@ -204,6 +204,13 @@ func (o *operation) finish() {
 	if value != nil && !abort {
 		abort = o.answerPanic()
 	}
+	// Admission is already durable. Release a buffered JSON answer before the
+	// completion write, whose failure remains recoverable from that journal.
+	if value == nil && o.handler.accounting != nil && !o.stream && o.w.committed && o.attempt != nil {
+		if err := o.w.flush(); err != nil {
+			o.attempt.clientGone()
+		}
+	}
 	if o.attempt != nil {
 		o.attempt.finish()
 	}

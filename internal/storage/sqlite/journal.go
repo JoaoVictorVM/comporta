@@ -121,10 +121,25 @@ func (s *Store) Complete(ctx context.Context, r storage.Record) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return databaseError(err)
+	}
+	defer tx.Rollback()
+	if err = completeOne(ctx, tx, r); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return databaseError(err)
+	}
+	return nil
+}
+
+func completeOne(ctx context.Context, tx *sql.Tx, r storage.Record) error {
 	data, _ := json.Marshal(r)
 	var prior sql.NullString
 	var metadata string
-	if err := s.db.QueryRowContext(ctx, `SELECT metadata_json,result_json FROM metering_journal WHERE request_id=? AND attempt_index=?`, r.RequestID, r.AttemptIndex).Scan(&metadata, &prior); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT metadata_json,result_json FROM metering_journal WHERE request_id=? AND attempt_index=?`, r.RequestID, r.AttemptIndex).Scan(&metadata, &prior); err != nil {
 		return databaseError(err)
 	}
 	var admission storage.Record
@@ -140,7 +155,7 @@ func (s *Store) Complete(ctx context.Context, r storage.Record) error {
 		}
 		return storage.ErrConflict
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE metering_journal SET state='completed',result_json=? WHERE request_id=? AND attempt_index=?`, string(data), r.RequestID, r.AttemptIndex)
+	_, err := tx.ExecContext(ctx, `UPDATE metering_journal SET state='completed',result_json=? WHERE request_id=? AND attempt_index=?`, string(data), r.RequestID, r.AttemptIndex)
 	if err != nil {
 		return databaseError(err)
 	}
@@ -214,13 +229,17 @@ func (s *Store) Commit(ctx context.Context, records []storage.Record) error {
 			return err
 		}
 		if inserted {
-			notifications = append(notifications, events.Completion(r.RequestID, r.AttemptIndex, r.FinishedAt, r.AppName, r.Outcome, r.Cost, r.UsageMissing))
+			notifications = append(notifications, completionEvent(r))
 		}
+	}
+	var pendingCount int
+	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM metering_journal`).Scan(&pendingCount); err != nil {
+		return databaseError(err)
 	}
 	if err = tx.Commit(); err != nil {
 		return databaseError(err)
 	}
-	s.journalCount -= len(notifications)
+	s.journalCount = pendingCount
 	for _, e := range notifications {
 		s.Bus.Notify(e)
 	}
@@ -281,7 +300,7 @@ func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, inserted *b
 			return databaseError(err)
 		}
 	}
-	event := events.Completion(r.RequestID, r.AttemptIndex, r.FinishedAt, r.AppName, r.Outcome, r.Cost, r.UsageMissing)
+	event := completionEvent(r)
 	payload, _ := json.Marshal(event.Payload)
 	_, err = tx.ExecContext(ctx, `INSERT INTO events(event_id,type,occurred_at,request_id,attempt_index,app_name,payload_json) VALUES(?,'request_completed',?,?,?,?,?)`, event.ID, r.FinishedAt.UnixMicro(), r.RequestID, r.AttemptIndex, r.AppName, string(payload))
 	if err != nil {
@@ -293,6 +312,13 @@ func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, inserted *b
 	}
 	*inserted = true
 	return nil
+}
+
+func completionEvent(r storage.Record) events.Event {
+	e := events.Completion(r.RequestID, r.AttemptIndex, r.FinishedAt, r.AppName, r.Outcome, r.Cost, r.UsageMissing)
+	e.Payload.ErrorClass = r.ErrorClass
+	e.Payload.ErrorCode = r.ErrorCode
+	return e
 }
 
 func value(p *int64) int64 {
@@ -307,6 +333,7 @@ func (s *Store) Recover(ctx context.Context, now time.Time) error {
 	if err != nil {
 		return err
 	}
+	batch := make([]storage.Record, 0, 1000)
 	for _, p := range pending {
 		r := p.Admission
 		if p.Result != nil {
@@ -323,9 +350,16 @@ func (s *Store) Recover(ctx context.Context, now time.Time) error {
 			r.Outcome = "ok"
 			r.RequestCount = 1
 		}
-		if err = s.Commit(ctx, []storage.Record{r}); err != nil {
-			return err
+		batch = append(batch, r)
+		if len(batch) == 1000 {
+			if err = s.Commit(ctx, batch); err != nil {
+				return err
+			}
+			batch = batch[:0]
 		}
+	}
+	if len(batch) > 0 {
+		return s.Commit(ctx, batch)
 	}
 	return nil
 }

@@ -56,7 +56,14 @@ func Embedded() (*Catalog, error) {
 }
 
 func (c *Catalog) HasPrice(model string) bool { _, ok := c.models[model]; return ok }
-func (c *Catalog) VerifiedAt() time.Time      { return c.verified }
+
+func (c *Catalog) HasProviderPrice(model string, provider config.Provider) bool {
+	if e, ok := c.models[model]; ok && e.Format == provider.APIFormat {
+		return true
+	}
+	return provider.Local && provider.APIFormat == config.FormatOpenAI
+}
+func (c *Catalog) VerifiedAt() time.Time { return c.verified }
 func (c *Catalog) Check(now time.Time) (bool, error) {
 	if now.Before(c.verified) {
 		return false, errors.New("price catalog date is in the future")

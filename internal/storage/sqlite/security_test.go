@@ -2,11 +2,44 @@ package sqlite
 
 import (
 	"context"
+	"errors"
+	"math"
 	"path/filepath"
 	"testing"
 
 	"github.com/JoaoVictorVM/comporta/internal/storage"
 )
+
+func TestAggregateOverflowRollsBackWithoutWrapping(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	r := fixture()
+	r.Cost = math.MaxInt64
+	r.ReservedCost = math.MaxInt64
+	if err := s.Admit(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Commit(ctx, []storage.Record{r}); err != nil {
+		t.Fatal(err)
+	}
+	r.RequestID = "22222222222222222222222222222222"
+	r.Cost = 1
+	r.ReservedCost = 1
+	if err := s.Admit(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Commit(ctx, []storage.Record{r}); !errors.Is(err, storage.ErrInvalid) {
+		t.Fatalf("overflow classification: %v", err)
+	}
+	rows, err := s.Daily(ctx, storage.Filter{AppName: "bot"})
+	if err != nil || len(rows) != 1 || rows[0].Cost != math.MaxInt64 || rows[0].Requests != 1 {
+		t.Fatal("overflow changed totals")
+	}
+	pending, err := s.Pending(ctx)
+	if err != nil || len(pending) != 1 {
+		t.Fatal("overflow lost admission")
+	}
+}
 
 func TestWALAndFullSyncEveryConnection(t *testing.T) {
 	s := testStore(t)

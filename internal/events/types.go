@@ -28,6 +28,8 @@ const (
 )
 
 type Payload struct {
+	ErrorClass   string              `json:"error_class,omitempty"`
+	ErrorCode    string              `json:"error_code,omitempty"`
 	Outcome      string              `json:"outcome,omitempty"`
 	AttemptIndex int                 `json:"attempt_index,omitempty"`
 	Cost         config.Microusd     `json:"cost_microusd,omitempty"`
@@ -82,6 +84,16 @@ func (e Event) Validate() error {
 			return errors.New("invalid event outcome")
 		}
 	}
+	switch e.Payload.ErrorClass {
+	case "", "invalid_request", "authentication", "rate_limit", "overload", "upstream_5xx", "connection", "timeout", "protocol", "client_cancel", "internal":
+	default:
+		return errors.New("invalid event error class")
+	}
+	switch e.Payload.ErrorCode {
+	case "", "provider_unreachable", "provider_timeout", "provider_redirect", "invalid_upstream_response", "provider_rate_limited", "provider_overloaded", "provider_error", "internal_error", "client_disconnected", "price_unknown", "pricing_overflow", "usage_storage_unavailable":
+	default:
+		return errors.New("invalid event error code")
+	}
 	if e.Type == ConfigChanged || e.Type == ConfigReloadFailed {
 		switch e.Payload.Result {
 		case config.ResultInitial, config.ResultApplied, config.ResultUnchanged, config.ResultRejected:
@@ -94,6 +106,33 @@ func (e Event) Validate() error {
 
 type Publisher interface {
 	Publish(context.Context, Event) error
+}
+
+type Cursor struct {
+	At time.Time
+	ID string
+}
+type Filter struct {
+	App         string
+	Types       []Type
+	From, Until time.Time
+	After       *Cursor
+	Limit       int
+}
+type Page struct {
+	Events []Event
+	Next   *Cursor
+}
+type Reader interface {
+	ReadEvents(context.Context, Filter) (Page, error)
+}
+
+func ValidType(kind Type) bool {
+	switch kind {
+	case RequestCompleted, Blocked, Cached, Fallback, Downgraded, LoopCut, ConfigChanged, ConfigReloadFailed, Paused, SensitiveDataDetected:
+		return true
+	}
+	return false
 }
 
 func (e Event) Clone() Event {

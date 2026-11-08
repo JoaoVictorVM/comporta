@@ -2,6 +2,7 @@ package metering
 
 import (
 	"context"
+	"errors"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
 	"time"
 )
@@ -36,6 +37,11 @@ func (s *Service) Flush(ctx context.Context) error {
 			return nil
 		}
 		if err := s.store.Commit(ctx, batch); err != nil {
+			if errors.Is(err, storage.ErrInvalid) || errors.Is(err, storage.ErrConflict) {
+				s.mu.Lock()
+				s.unhealthy = true
+				s.mu.Unlock()
+			}
 			return err
 		}
 		s.mu.Lock()
