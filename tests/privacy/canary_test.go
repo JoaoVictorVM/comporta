@@ -118,6 +118,7 @@ func buildBinary(t *testing.T) string {
 // liveGateway is the real binary serving against the real fake provider, with the
 // output of both captured in files.
 type liveGateway struct {
+	stopOnce  sync.Once
 	t         *testing.T
 	dir       string
 	proxyPort int
@@ -265,24 +266,28 @@ func (g *liveGateway) send(name, path, key, user, body string) int {
 // stop ends the processes and scans all they left: outputs and generated files.
 func (g *liveGateway) stop() {
 	g.t.Helper()
-	for _, name := range []string{"usage.sqlite", "usage.sqlite-wal", "usage.sqlite-shm"} {
-		path := filepath.Join(g.dir, "data", name)
-		if _, err := os.Stat(path); err == nil {
-			run.scanner.ScanFile("database", path)
-		} else if name == "usage.sqlite" {
-			g.t.Error("required SQLite artifact missing")
+	g.stopOnce.Do(func() {
+		for _, process := range g.processes {
+			_ = process.Process.Kill()
 		}
-	}
-	for _, process := range g.processes {
-		_ = process.Process.Kill()
-	}
-	for _, process := range g.processes {
-		_ = process.Wait()
-	}
-	for _, path := range g.logs {
-		run.scanner.ScanFile("logs", path)
-	}
-	run.scanner.ScanDir("files", filepath.Join(g.dir, "data"))
+		for _, process := range g.processes {
+			_ = process.Wait()
+		}
+		// Windows byte-range locks can prevent scanning a live SHM. Killing the
+		// processes releases those locks without checkpointing away the WAL evidence.
+		for _, name := range []string{"usage.sqlite", "usage.sqlite-wal", "usage.sqlite-shm"} {
+			path := filepath.Join(g.dir, "data", name)
+			if _, err := os.Stat(path); err == nil {
+				run.scanner.ScanFile("database", path)
+			} else {
+				g.t.Error("required SQLite artifact missing")
+			}
+		}
+		for _, path := range g.logs {
+			run.scanner.ScanFile("logs", path)
+		}
+		run.scanner.ScanDir("files", filepath.Join(g.dir, "data"))
+	})
 }
 
 func TestSQLiteJournalAndEventsContainNoContentOrRawID(t *testing.T) {
