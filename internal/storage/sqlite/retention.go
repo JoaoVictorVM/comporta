@@ -31,6 +31,9 @@ func (s *Store) Retain(ctx context.Context, cutoff time.Time) error {
 }
 
 func (s *Store) Daily(ctx context.Context, f storage.Filter) ([]storage.Daily, error) {
+	if f.AppName == "" || (f.UserHash != "" && !hexID.MatchString(f.UserHash)) {
+		return nil, storage.ErrInvalid
+	}
 	scope, subject := "app", ""
 	anonymous := false
 	if f.UserHash != "" {

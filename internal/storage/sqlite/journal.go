@@ -123,8 +123,16 @@ func (s *Store) Complete(ctx context.Context, r storage.Record) error {
 	defer s.mu.Unlock()
 	data, _ := json.Marshal(r)
 	var prior sql.NullString
-	if err := s.db.QueryRowContext(ctx, `SELECT result_json FROM metering_journal WHERE request_id=? AND attempt_index=?`, r.RequestID, r.AttemptIndex).Scan(&prior); err != nil {
+	var metadata string
+	if err := s.db.QueryRowContext(ctx, `SELECT metadata_json,result_json FROM metering_journal WHERE request_id=? AND attempt_index=?`, r.RequestID, r.AttemptIndex).Scan(&metadata, &prior); err != nil {
 		return databaseError(err)
+	}
+	var admission storage.Record
+	if err := decodeRecord(metadata, &admission); err != nil {
+		return err
+	}
+	if !sameAdmission(admission, r) {
+		return storage.ErrConflict
 	}
 	if prior.Valid {
 		if prior.String == string(data) {
@@ -140,7 +148,7 @@ func (s *Store) Complete(ctx context.Context, r storage.Record) error {
 }
 
 func (s *Store) Pending(ctx context.Context) ([]storage.Pending, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT metadata_json,result_json FROM metering_journal ORDER BY admitted_at,request_id,attempt_index`)
+	rows, err := s.db.QueryContext(ctx, `SELECT request_id,attempt_index,metadata_json,quote_json,result_json FROM metering_journal ORDER BY admitted_at,request_id,attempt_index`)
 	if err != nil {
 		return nil, storage.ErrUnavailable
 	}
@@ -148,9 +156,11 @@ func (s *Store) Pending(ctx context.Context) ([]storage.Pending, error) {
 	var out []storage.Pending
 	for rows.Next() {
 		var data string
+		var requestID, quote string
+		var index int
 		var result sql.NullString
 		var p storage.Pending
-		if err = rows.Scan(&data, &result); err != nil {
+		if err = rows.Scan(&requestID, &index, &data, &quote, &result); err != nil {
 			return nil, storage.ErrUnavailable
 		}
 		if err = decodeRecord(data, &p.Admission); err != nil {
@@ -158,6 +168,10 @@ func (s *Store) Pending(ctx context.Context) ([]storage.Pending, error) {
 		}
 		if err = validate(p.Admission); err != nil {
 			return nil, err
+		}
+		expectedQuote, _ := json.Marshal(p.Admission.Quote)
+		if p.Admission.RequestID != requestID || p.Admission.AttemptIndex != index || quote != string(expectedQuote) {
+			return nil, storage.ErrInvalid
 		}
 		if result.Valid {
 			p.Result = new(storage.Record)
@@ -167,10 +181,19 @@ func (s *Store) Pending(ctx context.Context) ([]storage.Pending, error) {
 			if err = validate(*p.Result); err != nil {
 				return nil, err
 			}
+			if p.Result.RequestID != requestID || p.Result.AttemptIndex != index || !sameAdmission(p.Admission, *p.Result) {
+				return nil, storage.ErrConflict
+			}
 		}
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+func sameAdmission(a, b storage.Record) bool {
+	qa, _ := json.Marshal(a.Quote)
+	qb, _ := json.Marshal(b.Quote)
+	return a.RequestID == b.RequestID && a.AttemptIndex == b.AttemptIndex && a.AppName == b.AppName && a.UserHash == b.UserHash && a.Anonymous == b.Anonymous && a.Operation == b.Operation && a.Provider == b.Provider && a.ModelRequested == b.ModelRequested && a.ModelUsed == b.ModelUsed && a.StartedAt.Equal(b.StartedAt) && a.Day == b.Day && a.Timezone == b.Timezone && a.ReservedCost == b.ReservedCost && string(qa) == string(qb)
 }
 
 func (s *Store) Commit(ctx context.Context, records []storage.Record) error {
@@ -218,9 +241,28 @@ func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, inserted *b
 	if !errors.Is(err, sql.ErrNoRows) {
 		return databaseError(err)
 	}
-	var admitted int
-	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM metering_journal WHERE request_id=? AND attempt_index=?`, r.RequestID, r.AttemptIndex).Scan(&admitted); err != nil || admitted != 1 {
+	var metadata string
+	var exact sql.NullString
+	if err = tx.QueryRowContext(ctx, `SELECT metadata_json,result_json FROM metering_journal WHERE request_id=? AND attempt_index=?`, r.RequestID, r.AttemptIndex).Scan(&metadata, &exact); err != nil {
 		return storage.ErrConflict
+	}
+	var admission storage.Record
+	if err = decodeRecord(metadata, &admission); err != nil {
+		return err
+	}
+	if !sameAdmission(admission, r) {
+		return storage.ErrConflict
+	}
+	if exact.Valid {
+		var expected storage.Record
+		if err = decodeRecord(exact.String, &expected); err != nil {
+			return err
+		}
+		expected.Recovered = r.Recovered
+		canonical, _ := json.Marshal(expected)
+		if string(canonical) != string(data) {
+			return storage.ErrConflict
+		}
 	}
 	args := []any{r.RequestID, r.AttemptIndex, r.StartedAt.UnixMicro(), r.FinishedAt.UnixMicro(), r.AppName, r.UserHash, r.Anonymous, r.Operation, r.Provider, r.ModelRequested, r.ModelUsed, r.UpstreamStatus, r.DownstreamStatus, r.Outcome, r.ErrorClass, r.ErrorCode, r.Input, r.Output, r.CacheWrite, r.CacheRead, r.RawInputTotal, r.CountedInput, r.CacheWrite5m, r.CacheWrite1h, r.Cost, r.ReservedCost, r.UsageMissing, r.Recovered, r.EstimateExceeded, r.RequestCount, r.LatencyUS, r.UpstreamTTFB, r.ClientTTFB, r.Day, r.Timezone, string(quote), string(data)}
 	_, err = tx.ExecContext(ctx, `INSERT INTO requests VALUES(`+strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+`)`, args...)
