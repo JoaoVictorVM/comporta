@@ -25,6 +25,8 @@ const (
 	ConfigReloadFailed    Type = "config_reload_failed"
 	Paused                Type = "paused"
 	SensitiveDataDetected Type = "sensitive_data_detected"
+	LimitStateUnavailable Type = "limit_state_unavailable"
+	LimitStateRecovered   Type = "limit_state_recovered"
 )
 
 type Payload struct {
@@ -39,6 +41,13 @@ type Payload struct {
 	Generation   int64               `json:"generation,omitempty"`
 	Result       config.ReloadResult `json:"result,omitempty"`
 	Changes      []config.Change     `json:"changes,omitempty"`
+	// Limit fields carry categories and configuration paths only: never a user
+	// hash, so alerts built from them cannot single out an end user.
+	Severity        string `json:"severity,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	LimitName       string `json:"limit_name,omitempty"`
+	Scope           string `json:"scope,omitempty"`
+	DegradedSeconds int64  `json:"degraded_seconds,omitempty"`
 }
 
 var eventID = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -65,9 +74,12 @@ func New(kind Type, at time.Time) Event {
 }
 func (e Event) Validate() error {
 	switch e.Type {
-	case RequestCompleted, Blocked, Cached, Fallback, Downgraded, LoopCut, ConfigChanged, ConfigReloadFailed, Paused, SensitiveDataDetected:
+	case RequestCompleted, Blocked, Cached, Fallback, Downgraded, LoopCut, ConfigChanged, ConfigReloadFailed, Paused, SensitiveDataDetected, LimitStateUnavailable, LimitStateRecovered:
 	default:
 		return errors.New("invalid event type")
+	}
+	if err := e.validateLimitFields(); err != nil {
+		return err
 	}
 	if !eventID.MatchString(e.ID) || (e.RequestID != "" && !eventID.MatchString(e.RequestID)) || (e.App != "" && !appName.MatchString(e.App)) || e.At.IsZero() || e.Payload.Count < 0 || e.Payload.Cost < 0 || e.Payload.AttemptIndex < 0 {
 		return errors.New("invalid event")
@@ -90,7 +102,8 @@ func (e Event) Validate() error {
 		return errors.New("invalid event error class")
 	}
 	switch e.Payload.ErrorCode {
-	case "", "provider_unreachable", "provider_timeout", "provider_redirect", "invalid_upstream_response", "provider_rate_limited", "provider_overloaded", "provider_error", "internal_error", "client_disconnected", "price_unknown", "pricing_overflow", "usage_storage_unavailable":
+	case "", "provider_unreachable", "provider_timeout", "provider_redirect", "invalid_upstream_response", "provider_rate_limited", "provider_overloaded", "provider_error", "internal_error", "client_disconnected", "price_unknown", "pricing_overflow", "usage_storage_unavailable",
+		"rate_limited", "concurrency_exceeded", "budget_exceeded", "budget_reserved", "hard_cap_exceeded", "limits_unavailable":
 	default:
 		return errors.New("invalid event error code")
 	}
@@ -127,9 +140,33 @@ type Reader interface {
 	ReadEvents(context.Context, Filter) (Page, error)
 }
 
+var limitName = regexp.MustCompile(`^apps\.[a-z0-9-]{1,40}\.(per_user\.)?(limits|budget|hard_cap)\.[a-z_]{1,32}$`)
+
+func (e Event) validateLimitFields() error {
+	switch e.Payload.Severity {
+	case "", "info", "warning":
+	default:
+		return errors.New("invalid event severity")
+	}
+	switch e.Payload.Reason {
+	case "", "spent", "reservation", "checkpoint", "settlement", "integrity":
+	default:
+		return errors.New("invalid event reason")
+	}
+	switch e.Payload.Scope {
+	case "", "app", "user":
+	default:
+		return errors.New("invalid event scope")
+	}
+	if (e.Payload.LimitName != "" && !limitName.MatchString(e.Payload.LimitName)) || e.Payload.DegradedSeconds < 0 {
+		return errors.New("invalid limit event payload")
+	}
+	return nil
+}
+
 func ValidType(kind Type) bool {
 	switch kind {
-	case RequestCompleted, Blocked, Cached, Fallback, Downgraded, LoopCut, ConfigChanged, ConfigReloadFailed, Paused, SensitiveDataDetected:
+	case RequestCompleted, Blocked, Cached, Fallback, Downgraded, LoopCut, ConfigChanged, ConfigReloadFailed, Paused, SensitiveDataDetected, LimitStateUnavailable, LimitStateRecovered:
 		return true
 	}
 	return false
