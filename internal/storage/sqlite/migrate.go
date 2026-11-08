@@ -7,34 +7,47 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
 //go:embed migrations/0001_usage.sql
 var schema string
 
+//go:embed migrations/0002_limits.sql
+var limitsSchema string
+
 var errSchema = errors.New("incompatible database version or migration checksum")
 
-func checkSchema(ctx context.Context, db *sql.DB) error {
+// migrations is the ordered registry. Applied files are never edited: a new
+// change is a new version.
+func migrations() []migration {
+	return []migration{{1, schema}, {2, limitsSchema}}
+}
+
+// checkSchema accepts any intact prefix of the known migrations, so a database
+// of an earlier release can be inspected read-only before it is migrated. It
+// returns the applied version; a future version or a changed checksum fails.
+func checkSchema(ctx context.Context, db *sql.DB) (int, error) {
 	rows, err := db.QueryContext(ctx, `SELECT version,checksum FROM schema_migrations ORDER BY version`)
 	if err != nil {
-		return errSchema
+		return 0, errSchema
 	}
 	defer rows.Close()
-	count := 0
-	expected := fmt.Sprintf("%x", sha256.Sum256([]byte(schema)))
+	known := migrations()
+	applied := 0
 	for rows.Next() {
 		var version int
 		var checksum string
-		if err = rows.Scan(&version, &checksum); err != nil || version != 1 || checksum != expected {
-			return errSchema
+		if err = rows.Scan(&version, &checksum); err != nil || version != applied+1 || version > len(known) || checksum != fmt.Sprintf("%x", sha256.Sum256([]byte(known[version-1].sql))) {
+			return 0, errSchema
 		}
-		count++
+		applied = version
 	}
-	if rows.Err() != nil || count != 1 {
-		return errSchema
+	if rows.Err() != nil || applied == 0 {
+		return 0, errSchema
 	}
-	return nil
+	return applied, nil
 }
 
 type migration struct {
@@ -42,12 +55,23 @@ type migration struct {
 	sql     string
 }
 
+// migrateTarget limits the applied versions; tests use it to build a database
+// of an earlier release. Zero applies every known migration.
+var migrateTarget = 0
+
 func migrate(ctx context.Context, db *sql.DB) error {
-	err := migrateSet(ctx, db, []migration{{1, schema}})
+	set := migrations()
+	if migrateTarget > 0 {
+		set = set[:migrateTarget]
+	}
+	err := migrateSet(ctx, db, set)
 	if err == nil || errors.Is(err, errSchema) {
 		return err
 	}
-	return errors.New("migration 0001 failed: database unavailable; database left unchanged")
+	if strings.HasPrefix(err.Error(), "migration ") {
+		return err
+	}
+	return errors.New("migration failed: database unavailable; database left unchanged")
 }
 
 func migrateSet(ctx context.Context, db *sql.DB, migrations []migration) error {

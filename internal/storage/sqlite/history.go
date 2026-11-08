@@ -87,7 +87,7 @@ func (s *Store) Inspect(ctx context.Context) (useridentity.HistoryState, error) 
 			return useridentity.HistoryEmpty, nil
 		}
 	}
-	if err := checkSchema(ctx, s.db); err != nil {
+	if _, err := checkSchema(ctx, s.db); err != nil {
 		return useridentity.HistoryPresent, err
 	}
 	if err := s.inspectRuntime(ctx); err != nil {

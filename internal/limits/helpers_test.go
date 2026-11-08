@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/config"
+	"github.com/JoaoVictorVM/comporta/internal/events"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
 )
 
@@ -171,6 +172,31 @@ func (s *memStore) set(f func(*memStore)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f(s)
+}
+
+type recordingPublisher struct {
+	mu     sync.Mutex
+	events []events.Event
+}
+
+func (p *recordingPublisher) Publish(_ context.Context, e events.Event) error {
+	if err := e.Validate(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.events = append(p.events, e)
+	return nil
+}
+
+func (p *recordingPublisher) types() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []string
+	for _, e := range p.events {
+		out = append(out, string(e.Type))
+	}
+	return out
 }
 
 type env struct {

@@ -91,7 +91,7 @@ func TestReadOnlyQueryCreatesNothing(t *testing.T) {
 
 func TestFutureSchemaCannotProveEmptyHistory(t *testing.T) {
 	s := testStore(t)
-	if _, err := s.db.Exec(`UPDATE schema_migrations SET version=99`); err != nil {
+	if _, err := s.db.Exec(`UPDATE schema_migrations SET version=99 WHERE version=(SELECT max(version) FROM schema_migrations)`); err != nil {
 		t.Fatal(err)
 	}
 	state, err := s.Inspect(context.Background())
