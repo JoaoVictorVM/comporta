@@ -100,7 +100,8 @@ func TestAdminOperationsNeverPersistRawIdentityOrToken(t *testing.T) {
 		t.Fatalf("an email ID: %d", status)
 	}
 	if status, data := g.adminCall("admin-forget", token, http.MethodPost, "/admin/v1/users/forget", map[string]string{"user_id": user}); status != http.StatusOK || !strings.Contains(string(data), `"requests":1`) {
-		t.Fatalf("positive control: forget %d %s", status, data)
+		logs, _ := os.ReadFile(serveStderr)
+		t.Fatalf("positive control: forget %d %s\ngateway log:\n%s", status, data, logs)
 	}
 	if status, _ := g.adminCall("admin-wrong-token", user, http.MethodGet, "/admin/v1/pause", nil); status != http.StatusUnauthorized {
 		t.Fatalf("a marker as token: %d", status)

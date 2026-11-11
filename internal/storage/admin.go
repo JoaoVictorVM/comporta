@@ -10,6 +10,13 @@ import (
 // a deletion would leave something behind. Nothing was changed.
 var ErrBusy = errors.New("subject has pending usage")
 
+// BusyError is ErrBusy with the kind of state still in transit. The reason is
+// a fixed category, safe to log: it never names the subject.
+type BusyError struct{ Reason string }
+
+func (e BusyError) Error() string        { return ErrBusy.Error() + ": " + e.Reason }
+func (e BusyError) Is(target error) bool { return target == ErrBusy }
+
 // AppPause is the persisted override of one app.
 type AppPause struct {
 	App       string

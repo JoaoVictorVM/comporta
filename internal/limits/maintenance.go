@@ -23,12 +23,12 @@ func (m *Manager) ForgetSubjects(subjects []storage.SubjectRef, persist func() e
 	defer m.mu.Unlock()
 	for _, h := range m.handles {
 		if selected[h.request.Subject] {
-			return 0, storage.ErrBusy
+			return 0, storage.BusyError{Reason: "open limit reservation"}
 		}
 	}
 	for _, pending := range m.retry {
 		if selected[pending.handle.request.Subject] {
-			return 0, storage.ErrBusy
+			return 0, storage.BusyError{Reason: "settlement awaiting retry"}
 		}
 	}
 	if err := persist(); err != nil {

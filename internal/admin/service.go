@@ -191,6 +191,7 @@ func (s *Service) Forget(ctx context.Context, id string) (ForgetResult, error) {
 		return hash.Hex(), nil
 	})
 	if err != nil {
+		s.logger.Warn("user deletion postponed", "reason", "another deletion in progress")
 		return ForgetResult{}, ErrUserBusy
 	}
 	defer barrier.End()
@@ -202,6 +203,7 @@ func (s *Service) Forget(ctx context.Context, id string) (ForgetResult, error) {
 		return ForgetResult{}, ErrDeletion
 	}
 	if err := barrier.Drain(prepare); err != nil {
+		s.logger.Warn("user deletion postponed", "reason", "requests still in flight")
 		return ForgetResult{}, ErrUserBusy
 	}
 	subjects := barrier.Subjects()
@@ -213,7 +215,7 @@ func (s *Service) Forget(ctx context.Context, id string) (ForgetResult, error) {
 	}
 	err = s.metering.Maintain(ctx, func(context.Context) error {
 		if s.metering.HasPending(subjects) {
-			return storage.ErrBusy
+			return storage.BusyError{Reason: "usage queue not drained"}
 		}
 		cleared, err := s.limits.ForgetSubjects(subjects, persist)
 		result.Cleared = cleared
@@ -223,6 +225,12 @@ func (s *Service) Forget(ctx context.Context, id string) (ForgetResult, error) {
 	case err == nil:
 		return result, nil
 	case errors.Is(err, storage.ErrBusy):
+		reason := "pending usage"
+		var busy storage.BusyError
+		if errors.As(err, &busy) {
+			reason = busy.Reason
+		}
+		s.logger.Warn("user deletion postponed", "reason", reason)
 		return ForgetResult{}, ErrUserBusy
 	}
 	s.logger.Error("user deletion failed; no records were removed")

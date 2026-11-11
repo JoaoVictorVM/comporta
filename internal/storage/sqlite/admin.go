@@ -364,7 +364,7 @@ func (s *Store) forgetOnce(ctx context.Context, subjects []storage.SubjectRef) (
 			return counts, wrap(err)
 		}
 		if reserved > 0 {
-			return counts, storage.ErrBusy
+			return counts, storage.BusyError{Reason: "reservation still reserved in storage"}
 		}
 		if err = forgetJournal(ctx, tx, subject, &counts.Journal); err != nil {
 			return counts, err
@@ -419,7 +419,7 @@ FROM metering_journal j WHERE json_extract(j.metadata_json,'$.AppName')=? AND js
 		}
 		if state != "completed" || !materialized {
 			rows.Close()
-			return storage.ErrBusy
+			return storage.BusyError{Reason: "usage journal entry not materialized"}
 		}
 		residue = append(residue, k)
 	}
