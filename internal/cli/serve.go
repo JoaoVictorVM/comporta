@@ -3,11 +3,14 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/JoaoVictorVM/comporta/internal/admin"
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/keys"
@@ -15,6 +18,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/metering"
 	"github.com/JoaoVictorVM/comporta/internal/pricing"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
+	"github.com/JoaoVictorVM/comporta/internal/runtimecontrol"
 	"github.com/JoaoVictorVM/comporta/internal/server"
 	"github.com/JoaoVictorVM/comporta/internal/storage/sqlite"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
@@ -72,6 +76,16 @@ func newServeCommand(out streams) *cobra.Command {
 				return err
 			}
 			configEvents.Publisher = store
+			// The token lock comes after the instance lock, the same order a reset
+			// uses, so neither can wait on the other.
+			credential, err := admin.OpenCredential(command.Context(), snapshot.DataDir(), store, func(token string) {
+				_, _ = fmt.Fprintf(out.stdout, "Admin token (shown only once; store it now): %s\n", token)
+			})
+			if err != nil {
+				logger.Error(adminStartupMessage(err))
+				return errReported
+			}
+			defer credential.Close()
 			accounting := metering.New(store, catalog, logger, func() int64 { return manager.Capture().Storage().RetentionDays })
 			// Limits recover after the usage journal and before the listeners, from
 			// the checkpoint, the ledger and the reservations a crash left open.
@@ -83,7 +97,21 @@ func newServeCommand(out streams) *cobra.Command {
 			if err := accounting.UseLimits(coordinator, store, manager); err != nil {
 				return err
 			}
-			if err := runGateway(command.Context(), logger, manager, keyManager, identity, accounting, configEvents.Run, coordinator.Run); err != nil {
+			// Pauses load before the listeners: a paused app never takes a request
+			// after a restart, and an unreadable state keeps the service down.
+			control := runtimecontrol.New(store)
+			if err := control.Load(command.Context()); err != nil {
+				logger.Error("pause state could not be loaded; listeners not opened")
+				return errReported
+			}
+			adminAPI := admin.NewHandler(admin.HandlerOptions{
+				Credential: credential, Logger: logger,
+				Service: admin.NewService(admin.ServiceOptions{
+					Control: control, Source: manager, Identity: identity, History: store,
+					Metering: accounting, Limits: coordinator, Usage: store, Logger: logger,
+				}),
+			})
+			if err := runGateway(command.Context(), logger, manager, keyManager, identity, accounting, control, adminAPI, configEvents.Run, coordinator.Run); err != nil {
 				return err
 			}
 			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -105,15 +133,15 @@ func newServeCommand(out streams) *cobra.Command {
 	return command
 }
 
-func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service, accounting *metering.Service, configWorker, limitsWorker server.Worker) error {
+func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service, accounting *metering.Service, gate proxy.Gate, adminAPI http.Handler, configWorker, limitsWorker server.Worker) error {
 	guard := auth.NewGuard(nil, logger)
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), guard)
-	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Identity: identity, Logger: logger, Accounting: accounting})
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Identity: identity, Logger: logger, Accounting: accounting, Gate: gate})
 	defer handler.Close()
 	gateway, err := server.Open(ctx, server.Options{
 		Source:  manager,
 		Proxy:   server.ProxySurface(manager, handler),
-		Admin:   server.AdminSurface(manager),
+		Admin:   server.AdminSurfaceWith(manager, adminAPI),
 		Workers: []server.Worker{manager.Run, keyManager.Run, accounting.Run, configWorker, limitsWorker},
 		Logger:  logger,
 	})
@@ -129,6 +157,16 @@ func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manage
 		return errReported
 	}
 	return nil
+}
+
+// adminStartupMessage keeps the operator instructions of credential failures and
+// hides everything else behind a fixed message.
+func adminStartupMessage(err error) string {
+	switch {
+	case errors.Is(err, admin.ErrTokenMissing), errors.Is(err, admin.ErrTokenInvalid), errors.Is(err, admin.ErrTokenInUse):
+		return err.Error()
+	}
+	return "admin credential unavailable; listeners not opened"
 }
 
 func logStartupFailure(logger *slog.Logger, err error) {

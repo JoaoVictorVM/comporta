@@ -74,6 +74,13 @@ apps:
 	t.Setenv("COMPORTA_CONFIG", config)
 	t.Setenv("COMPOSE_FILE", filepath.Join(repoRoot(t), "compose.yaml")+string(os.PathListSeparator)+override)
 	key := startProvisioned(t)
+	// usage asks the running gateway, so it needs the admin token the first
+	// start printed. It reaches exec through the environment, not argv.
+	token := regexp.MustCompile(`store it now\): ([0-9a-f]{64})`).FindStringSubmatch(compose(t, "logs", "--no-log-prefix", "comporta"))
+	if token == nil {
+		t.Fatal("the first start did not show the admin token")
+	}
+	t.Setenv("COMPORTA_ADMIN_TOKEN", token[1])
 	var status int
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
@@ -97,13 +104,13 @@ apps:
 	compose(t, "kill", "-s", "SIGKILL", "comporta")
 	compose(t, "up", "-d", "comporta")
 	waitForHealth(t)
-	first := compose(t, "exec", "-T", "comporta", "/comporta", "usage", "--app", "my-app", "--config", "/etc/comporta/comporta.yaml")
+	first := compose(t, "exec", "-T", "-e", "COMPORTA_ADMIN_TOKEN", "comporta", "/comporta", "usage", "--app", "my-app", "--config", "/etc/comporta/comporta.yaml")
 	if !strings.Contains(first, "estimated_cost_usd") || strings.Contains(first, "total - 0 0 0.000000") {
 		t.Fatal("crash recovery did not preserve usage")
 	}
 	compose(t, "restart", "comporta")
 	waitForHealth(t)
-	second := compose(t, "exec", "-T", "comporta", "/comporta", "usage", "--app", "my-app", "--config", "/etc/comporta/comporta.yaml")
+	second := compose(t, "exec", "-T", "-e", "COMPORTA_ADMIN_TOKEN", "comporta", "/comporta", "usage", "--app", "my-app", "--config", "/etc/comporta/comporta.yaml")
 	totals := func(s string) string {
 		for _, line := range strings.Split(s, "\n") {
 			if strings.HasPrefix(line, "total ") {

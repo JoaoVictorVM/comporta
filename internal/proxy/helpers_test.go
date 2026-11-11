@@ -59,6 +59,7 @@ type fixtureOptions struct {
 	hooks       Hooks
 	logs        io.Writer
 	requireUser bool
+	gate        Gate
 }
 
 func newFixture(t testing.TB, upstream string, options fixtureOptions) *fixture {
@@ -248,7 +249,7 @@ func newTestHandler(authHTTP *auth.HTTP, sink ResultSink, identity *useridentity
 	if options.logs != nil {
 		logger = slog.New(slog.NewJSONHandler(options.logs, nil))
 	}
-	return NewHandler(Options{Auth: authHTTP, Sink: sink, Hooks: options.hooks, Identity: identity, Logger: logger})
+	return NewHandler(Options{Auth: authHTTP, Sink: sink, Hooks: options.hooks, Identity: identity, Logger: logger, Gate: options.gate})
 }
 
 func startBenchUpstream(b *testing.B) string {

@@ -2,7 +2,7 @@
 
 Open-source LLM gateway, in development.
 
-**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering and per-app and per-user limits and budgets. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
+**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, and operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
 
 **Not implemented yet:** policies (including `max_tokens` caps and `allowed_models` enforcement on calls), fallback, cache, loop guard, sensitive data detection, alerts, telemetry and the admin panel. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
 
@@ -18,7 +18,14 @@ comporta keys revoke <key-id> [--config path]      # revokes a key
 comporta serve [--config path]                     # runs the proxy and admin listeners until interrupted
 comporta serve --reset-user-history                # recovery from a lost hmac.key, see End users
 comporta fake-provider [--port 9090] [--bind ip] [--scenario name]  # local imitation of both provider APIs
+comporta pause <app> | --all                       # stops new requests until resumed, see Operations
+comporta resume <app> | --all                      # restores traffic
+comporta users forget <user-id>                    # deletes every record of an end user
+comporta usage [--app a] [--user id | --anonymous] [--since 7d | --from d --through d] [--json]
+comporta admin reset-token                         # new admin token, gateway stopped
 ```
+
+`pause`, `resume`, `users forget` and `usage` talk to the running gateway through the admin API and need the admin token in `COMPORTA_ADMIN_TOKEN` or `--token`. See Operations.
 
 `config validate` exits 0 when the file is valid and 1 with a list of errors otherwise. Results go to stdout and diagnostics to stderr. The structural mode is meant for CI: it checks the format of secret references, but it does not prove that a secret exists or that a provider works.
 
@@ -171,7 +178,7 @@ Money is represented as integer microdollars. Token rates are integer microdolla
 
 ```sh
 comporta pricing check
-comporta usage --app my-app --since 7d --config comporta.yaml
+COMPORTA_ADMIN_TOKEN=... comporta usage --app my-app --since 7d --config comporta.yaml
 ```
 
 The price catalog is dated and never refreshed over the network at runtime. `pricing check` warns when its age exceeds 60 days; update the binary or supply YAML overrides. All monetary output is **estimated cost**, not an invoice. Taxes, negotiated discounts, regional modifiers and extra paid tools are not represented by the four token dimensions.
@@ -191,7 +198,7 @@ storage:
   retention_days: 30  # 1 through 365; reload affects future maintenance
 ```
 
-Hourly maintenance removes expired request/event/configuration details in batches, preserves pending journal entries, and never re-adds their totals. Daily aggregates are retained indefinitely, with the original civil day and timezone. `usage` reads the database without migrating it, selects app totals once, includes today and the previous six civil days for `--since 7d`, and reports an exact six-decimal USD total. Finalizations may take two seconds to appear. Removed apps remain queryable using their historical timezones. Internal typed events have a durable history and a bounded live bus; slow consumers must resynchronize after overflow. Administrative APIs, policies, the panel, alerts and telemetry remain separate consumers.
+Hourly maintenance removes expired request/event/configuration details in batches, preserves pending journal entries, and never re-adds their totals. Daily aggregates are retained indefinitely, with the original civil day and timezone. `usage` queries the running gateway (see Operations): app totals and user totals are never added together, `--since 7d` includes today and the previous six civil days, and totals are an exact six-decimal USD amount. Finalizations may take two seconds to appear. Removed apps remain queryable using their historical timezones. Internal typed events have a durable history and a bounded live bus; slow consumers must resynchronize after overflow. Administrative APIs, policies, the panel, alerts and telemetry remain separate consumers.
 
 ### Limits and budgets
 
@@ -247,7 +254,7 @@ Every refusal before an attempt is stored as a blocked record with attempt 0, ze
 
 **Measured cost:** admission and settlement reuse the two synchronous `synchronous=FULL` commits that metering already made, now carrying the reservation. On the reference Windows machine, sequential non-streaming calls through the fake provider measured a p95 of 6.7 ms against 2.0 ms without metering and limits, and streaming time to first byte a p95 of 3.6 ms against 2.6 ms. The coordinator alone takes about 27 µs per reserve and settle. The sustained load target of 200 requests per second for 5 minutes was not measured in this release.
 
-**For later features:** policies, the panel, alerts, telemetry, fallback, cache and multiple instances consume typed decisions, a consistent state per app and user (used, reserved, limit, renewal, degradation, active and pending timezone) and a reservation handle with reserve, settle and release. A per-user deletion of limit state exists at the storage level; no administrative endpoint or command exposes it yet.
+**For later features:** policies, the panel, alerts, telemetry, fallback, cache and multiple instances consume typed decisions, a consistent state per app and user (used, reserved, limit, renewal, degradation, active and pending timezone) and a reservation handle with reserve, settle and release. `comporta users forget` removes a user's limit state together with the user's records, see Operations.
 
 ### End users
 
@@ -284,6 +291,61 @@ The ID is read from `X-Comporta-User`, then `metadata.user_id`, then `user`. The
 When the key is missing, Comporta inspects logical SQLite history, including WAL, pending admissions, per-user aggregates and limit state, before creating a database or migrating it. Unknown files, unsupported schemas and unreadable history fail closed. Existing user history stops startup with `hmac.key not found but usage data exists; restore the key or start with --reset-user-history`. Restore the key from the same backup as the database whenever possible.
 
 With the service stopped, `serve --reset-user-history` authorizes logical unlinking after a lost key. Pending attempts are recovered first; a transaction removes identifiable details and user totals/state while preserving app totals and app budget state. The reset is idempotent across a crash before publishing the new key. It does not transfer old users into anonymous or change app keys. A valid existing HMAC key is never replaced. Unknown history is still refused. Logical unlinking is not forensic erasure of old database pages, backups or media.
+
+## Operations
+
+The admin API lives only on the admin listener (`127.0.0.1:8081` by default), under `/admin/v1`. It does not exist on the proxy port.
+
+### Admin token
+
+On the first start `serve` creates a 32-byte random token and prints it once on stdout: store it then. The data directory keeps only its SHA-256 in `admin-token.json`, with the same private permissions as the other files, and a restart never prints it again. While running, the gateway holds `admin-token.lock`.
+
+If the token is lost, stop the gateway and run `comporta admin reset-token --config comporta.yaml`: it prints a new token once and keeps pauses, usage and the user identity key. It refuses while the gateway runs. A token file that disappears or is corrupted after the first start stops the gateway at startup until a reset; it is never replaced silently.
+
+CLI commands send the token as `Authorization: Bearer`, from `--token` or `COMPORTA_ADMIN_TOKEN` (the flag wins). The destination is the admin listener of `--config` (a wildcard bind is reached on `127.0.0.1`) or `--admin-url`. Plain HTTP is accepted only for a loopback address; a remote gateway needs HTTPS with standard certificate validation. Redirects and proxy environment variables are ignored. A missing or wrong token answers 401 `invalid admin token`; the tenth failure from one address within 60 seconds blocks that address for 5 minutes, with 429 and `Retry-After`, even for a valid token.
+
+### Pause and resume
+
+```sh
+$ comporta pause bot-discord
+bot-discord paused at 03:12:44; resume with: comporta resume bot-discord
+```
+
+When the command returns, every new request of the app is refused with 503 `app bot-discord is paused by an operator` (`comporta_code: app_paused`), in the SDK error format and without contacting the provider. Requests already admitted, streams included, finish normally. `GET /v1/models` keeps answering. A pause consumes no budget.
+
+`pause --all` pauses every app, including apps added later by a reload. `resume --all` clears the global pause and every individual one. Resuming one app while the global pause is on says that the app remains paused. Pauses are stored in `runtime_state`, survive restarts and reloads, and are the one documented exception to "YAML is the source of truth". The pause of a removed app stays stored and can be cleared with `resume`. Each change writes a `paused` event with `paused: true` or `false`.
+
+### Deleting an end user
+
+```sh
+$ comporta users forget user_42
+deleted 16 rows; unlinked 4 rows kept for app totals; cleared 2 in-memory counters
+```
+
+The ID is pseudonymized for every app with any state, including apps removed from the YAML, and is never stored or logged by the gateway (it stays in your shell history). New requests of that user get 503 `user_maintenance` for the duration; requests already running are given up to 10 seconds to finish and reach accounting, otherwise the command fails with 409 and deletes nothing. Then one transaction deletes the user's request records, daily totals, events, user budgets and reservation items, and unlinks the user from reservations, rate events, the limit ledger and the checkpoint. App totals, app budgets and app rate limits do not change. A locked database is retried for 10 seconds; after that the answer is `deletion failed; no records were removed`. A user without records gets `no records found for this user ID` with exit code 0. `anonymous` names a user called anonymous, never the anonymous bucket.
+
+Deletion is logical: it does not overwrite old SQLite pages, backups or disks. It does not ban the user: new traffic creates new history. If the connection drops after the request was sent, the CLI reports an unknown outcome; the command is safe to repeat.
+
+### Usage
+
+`comporta usage` needs the running gateway and the token: it no longer reads the database directly. Without `--app` it covers every app, including removed ones. `--user` and `--anonymous` select only that user's rows and are mutually exclusive; without them the app totals are shown. `--since Nd` (default `7d`) counts civil days back from now in each app's timezone, or the historical timezone of a removed app. `--from` and `--through` select recorded day labels, inclusive. A period covers at most 366 days. `--json` prints the full result.
+
+### Admin API
+
+Requests and answers are JSON (at most 16 KiB, `Content-Type: application/json`, unknown fields rejected). Answers carry `Cache-Control: no-store`. Failures use `{"error":{"code":"...","message":"..."}}`.
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /admin/v1/session` | `{"token":"..."}` | 201 and an `HttpOnly`, `SameSite=Strict` session cookie for 12 hours |
+| `DELETE /admin/v1/session` | none | 204, session ended |
+| `GET /admin/v1/pause` | none | global state and the stored pauses |
+| `POST /admin/v1/pause`, `POST /admin/v1/resume` | `{"app":"x"}` or `{"all":true}` | effective state |
+| `POST /admin/v1/users/forget` | `{"user_id":"..."}` | row counts, without the ID |
+| `POST /admin/v1/usage/query` | `app`, `user_id` or `anonymous`, `since` or `from`+`through`, `limit`, `cursor` | rows, totals of the whole filter and `next_cursor` |
+
+Requests authenticated with the session cookie must send a matching `Origin` on every POST and DELETE. IDs never go in a URL. Counts and money in usage answers are decimal strings. Usage cursors are signed with a per-process key and stop working after a restart. Sessions live in memory and end on restart.
+
+These routes are what the future panel will use. Pauses and sessions are local to one gateway process: keeping them consistent across several instances belongs to multi-instance support, not delivered yet.
 
 ## Fake provider
 

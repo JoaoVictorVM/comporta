@@ -149,6 +149,10 @@ func (h *HTTP) verify(r *http.Request, format Format, generation *keys.Generatio
 	return h.authenticator.Authenticate(key, generation, snapshot)
 }
 
+// ConnectionAddress is the address the guards count, for surfaces outside this
+// package that share the same rule.
+func ConnectionAddress(r *http.Request) (netip.Addr, bool) { return connectionAddress(r) }
+
 // connectionAddress uses only the address of the connection. Forwarded headers are
 // ignored on purpose: without a trusted proxy, a client could send any value and
 // escape the block by changing it.

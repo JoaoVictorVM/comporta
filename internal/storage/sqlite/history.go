@@ -10,6 +10,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -29,6 +30,19 @@ func decodeReset(data string, state *resetState) error {
 	return nil
 }
 
+// directoryArtifact lists the files a data directory may hold. The admin token
+// holds no user data, so its file, lock and atomic temporaries are recognized by
+// exact name; anything else still counts as unknown history.
+func directoryArtifact(name string) bool {
+	switch name {
+	case "keys.json", "keys.lock", "hmac.key", "hmac.lock", "usage.lock", "usage.sqlite", "usage.sqlite-wal", "usage.sqlite-shm", "admin-token.json", "admin-token.lock":
+		return true
+	}
+	return adminTemporary.MatchString(name)
+}
+
+var adminTemporary = regexp.MustCompile(`^\.admin-token-[0-9a-f]{32}\.tmp$`)
+
 func (s *Store) inspectRuntime(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `SELECT namespace,key,value_json FROM runtime_state`)
 	if err != nil {
@@ -40,11 +54,14 @@ func (s *Store) inspectRuntime(ctx context.Context) error {
 		if err = rows.Scan(&namespace, &key, &data); err != nil {
 			return storage.ErrUnavailable
 		}
-		if namespace != "identity" || key != "reset" {
-			return storage.ErrInvalid
+		if namespace == "identity" && key == "reset" {
+			var state resetState
+			if err = decodeReset(data, &state); err != nil {
+				return err
+			}
+			continue
 		}
-		var state resetState
-		if err = decodeReset(data, &state); err != nil {
+		if err = validateRuntimeEntry(namespace, key, data); err != nil {
 			return err
 		}
 	}
@@ -59,9 +76,8 @@ func (s *Store) Inspect(ctx context.Context) (useridentity.HistoryState, error) 
 	if err != nil {
 		return useridentity.HistoryPresent, storage.ErrUnavailable
 	}
-	allowed := map[string]bool{"keys.json": true, "keys.lock": true, "hmac.key": true, "hmac.lock": true, "usage.lock": true, "usage.sqlite": true, "usage.sqlite-wal": true, "usage.sqlite-shm": true}
 	for _, e := range entries {
-		if !allowed[e.Name()] || !e.Type().IsRegular() {
+		if !directoryArtifact(e.Name()) || !e.Type().IsRegular() {
 			return useridentity.HistoryPresent, nil
 		}
 	}
@@ -117,9 +133,8 @@ func (s *Store) Reset(ctx context.Context) error {
 	if err != nil {
 		return storage.ErrUnavailable
 	}
-	allowed := map[string]bool{"keys.json": true, "keys.lock": true, "hmac.key": true, "hmac.lock": true, "usage.lock": true, "usage.sqlite": true, "usage.sqlite-wal": true, "usage.sqlite-shm": true}
 	for _, entry := range entries {
-		if !allowed[entry.Name()] || !entry.Type().IsRegular() {
+		if !directoryArtifact(entry.Name()) || !entry.Type().IsRegular() {
 			return useridentity.ErrResetUnsupported
 		}
 	}

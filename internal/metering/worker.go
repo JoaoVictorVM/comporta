@@ -22,6 +22,10 @@ func newSystemTimer(d time.Duration) timer  { return systemTimer{time.NewTimer(d
 func (s *Service) Flush(ctx context.Context) error {
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
+	return s.flushLocked(ctx)
+}
+
+func (s *Service) flushLocked(ctx context.Context) error {
 	for {
 		s.mu.Lock()
 		n := min(1000, len(s.pending))

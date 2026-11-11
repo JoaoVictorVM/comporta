@@ -17,7 +17,8 @@ func TestPublishAfterCommitOnly(t *testing.T) {
 	sub := s.Bus.Subscribe(ctx)
 	e := events.New(events.Paused, time.Now())
 	e.App = "bot"
-	e.Payload.Paused = true
+	paused, resumed := true, false
+	e.Payload.Paused, e.Payload.Scope = &paused, "app"
 	if err := s.Publish(ctx, e); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +42,7 @@ func TestPublishAfterCommitOnly(t *testing.T) {
 		t.Fatal("duplicate live event")
 	default:
 	}
-	e.Payload.Paused = false
+	e.Payload.Paused = &resumed
 	if err := s.Publish(ctx, e); err != storage.ErrConflict {
 		t.Fatal("incompatible retry accepted")
 	}

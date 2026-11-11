@@ -10,6 +10,8 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
 )
 
+const adminPrefix = "/admin/v1/"
+
 // SnapshotSource provides the active configuration.
 type SnapshotSource interface {
 	Capture() *config.Snapshot
@@ -38,11 +40,22 @@ func ProxySurface(source SnapshotSource, routes RouteHandler) http.Handler {
 	})
 }
 
-// AdminSurface is the handler of the admin listener, which currently holds only a
-// static health response.
+// AdminSurface is the handler of an admin listener without the admin API: only
+// the static health response.
 func AdminSurface(source SnapshotSource) http.Handler {
+	return AdminSurfaceWith(source, nil)
+}
+
+// AdminSurfaceWith is the handler of the admin listener. The admin API lives
+// only here, under its own prefix, behind the same Host checks as the proxy;
+// healthz stays public and carries no operational data.
+func AdminSurfaceWith(source SnapshotSource, api http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := admit(w, r, source); !ok {
+			return
+		}
+		if api != nil && strings.HasPrefix(r.RequestURI, adminPrefix) {
+			api.ServeHTTP(w, r)
 			return
 		}
 		if r.Method != http.MethodGet || r.RequestURI != "/healthz" {
