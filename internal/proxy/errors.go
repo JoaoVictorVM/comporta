@@ -2,12 +2,14 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/auth"
+	"github.com/JoaoVictorVM/comporta/internal/runtimecontrol"
 )
 
 // Code is the public comporta_code of a failure.
@@ -41,6 +43,8 @@ const (
 	CodeHardCapExceeded         Code = "hard_cap_exceeded"
 	CodeLimitsUnavailable       Code = "limits_unavailable"
 	CodeUsageStorageUnavailable Code = "usage_storage_unavailable"
+	CodeAppPaused               Code = "app_paused"
+	CodeUserMaintenance         Code = "user_maintenance"
 )
 
 // ErrorClass groups failures for internal decisions, such as a later fallback.
@@ -72,6 +76,18 @@ type Failure struct {
 
 func invalidRequest(message string) Failure {
 	return Failure{http.StatusBadRequest, CodeInvalidRequest, ClassInvalidRequest, message}
+}
+
+// gateFailure answers a refusal of the operator overrides. A pause has no known
+// renewal time, so no Retry-After is promised.
+func gateFailure(err error, app string) Failure {
+	switch {
+	case errors.Is(err, runtimecontrol.ErrPaused):
+		return Failure{http.StatusServiceUnavailable, CodeAppPaused, ClassInternal, fmt.Sprintf("app %s is paused by an operator", app)}
+	case errors.Is(err, runtimecontrol.ErrMaintenance):
+		return Failure{http.StatusServiceUnavailable, CodeUserMaintenance, ClassInternal, "this user's data is being changed by an operator; retry in a few seconds"}
+	}
+	return internalFailure()
 }
 
 func internalFailure() Failure {

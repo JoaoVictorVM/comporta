@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/JoaoVictorVM/comporta/internal/storage"
 )
 
 type fakeClock struct {
@@ -140,4 +142,8 @@ func errorCode(t *testing.T, recorder *httptest.ResponseRecorder) string {
 	}
 	rest := body[start+len(`"code":"`):]
 	return rest[:strings.IndexByte(rest, '"')]
+}
+
+func pauseChange(app string) storage.PauseChange {
+	return storage.PauseChange{App: app, Paused: true, At: time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)}
 }

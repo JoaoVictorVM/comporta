@@ -390,4 +390,97 @@ func (h *Handler) registerOperations() {
 	if h.service == nil {
 		return
 	}
+	h.routes[Prefix+"pause"] = route{access: accessAny, methods: map[string]handlerFunc{
+		http.MethodGet: h.getPause, http.MethodPost: h.pauseHandler(true),
+	}}
+	h.routes[Prefix+"resume"] = route{access: accessAny, methods: map[string]handlerFunc{
+		http.MethodPost: h.pauseHandler(false),
+	}}
+}
+
+type pauseRequest struct {
+	App *string `json:"app"`
+	All *bool   `json:"all"`
+}
+
+type pauseResponse struct {
+	App             string `json:"app,omitempty"`
+	All             bool   `json:"all,omitempty"`
+	GlobalPaused    bool   `json:"global_paused"`
+	AppPaused       *bool  `json:"app_paused,omitempty"`
+	EffectivePaused *bool  `json:"effective_paused,omitempty"`
+	Changed         bool   `json:"changed"`
+	UpdatedAt       string `json:"updated_at"`
+}
+
+type pauseEntry struct {
+	App       string `json:"app"`
+	Paused    bool   `json:"paused"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type pauseStateResponse struct {
+	GlobalPaused bool         `json:"global_paused"`
+	Apps         []pauseEntry `json:"apps"`
+}
+
+func timestamp(at time.Time) string { return at.UTC().Format(time.RFC3339) }
+
+func (h *Handler) getPause(w http.ResponseWriter, _ *http.Request, _ []byte) *apiError {
+	state := h.service.PauseState()
+	response := pauseStateResponse{GlobalPaused: state.Global, Apps: []pauseEntry{}}
+	for _, entry := range state.Apps {
+		response.Apps = append(response.Apps, pauseEntry{App: entry.App, Paused: entry.Paused, UpdatedAt: timestamp(entry.UpdatedAt)})
+	}
+	writeJSON(w, http.StatusOK, response)
+	return nil
+}
+
+func (h *Handler) pauseHandler(pause bool) handlerFunc {
+	return func(w http.ResponseWriter, r *http.Request, body []byte) *apiError {
+		var request pauseRequest
+		if failure := decodeStrict(body, &request); failure != nil {
+			return failure
+		}
+		var selector PauseSelector
+		switch {
+		case request.App != nil && request.All == nil:
+			selector.App = *request.App
+		case request.All != nil && request.App == nil && *request.All:
+			selector.All = true
+		default:
+			return invalid("send exactly one of app or all:true")
+		}
+		ctx, cancel := operationContext(r, 10*time.Second)
+		defer cancel()
+		outcome, err := h.service.SetPause(ctx, selector, pause)
+		if err != nil {
+			return serviceFailure(err)
+		}
+		response := pauseResponse{GlobalPaused: outcome.GlobalPaused, Changed: outcome.Changed, UpdatedAt: timestamp(outcome.UpdatedAt)}
+		if selector.All {
+			response.All = true
+		} else {
+			appPaused, effective := outcome.AppPaused, outcome.Effective()
+			response.App, response.AppPaused, response.EffectivePaused = selector.App, &appPaused, &effective
+		}
+		writeJSON(w, http.StatusOK, response)
+		return nil
+	}
+}
+
+// serviceFailure maps service errors to fixed answers; anything unexpected is
+// reported as an unconfirmed operation.
+func serviceFailure(err error) *apiError {
+	switch {
+	case errors.Is(err, ErrInvalidInput):
+		return invalid("request is not valid for this endpoint")
+	case errors.Is(err, ErrAppNotFound):
+		return errAppNotFound
+	case errors.Is(err, ErrUserBusy):
+		return errUserBusy
+	case errors.Is(err, ErrDeletion):
+		return errDeletionFailed
+	}
+	return errStorage
 }

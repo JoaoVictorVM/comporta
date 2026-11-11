@@ -15,6 +15,7 @@ import (
 
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/config"
+	"github.com/JoaoVictorVM/comporta/internal/runtimecontrol"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
@@ -64,9 +65,17 @@ func (h Hooks) streamEvent(ctx context.Context, envelope *Envelope, raw []byte) 
 	return h.StreamEvent(ctx, envelope, raw)
 }
 
+// Gate admits a request against the operator overrides and returns the ticket
+// that must be released once its completion reached accounting.
+type Gate interface {
+	Admit(runtimecontrol.Subject) (*runtimecontrol.Ticket, error)
+}
+
 // Options configures a Handler.
 type Options struct {
 	Accounting Accounting
+	// Gate applies pauses and deletion barriers. Without it nothing is paused.
+	Gate       Gate
 	Auth       *auth.HTTP
 	Transports *TransportPool
 	Sink       ResultSink
@@ -82,6 +91,7 @@ type Options struct {
 // Handler serves the fixed routes.
 type Handler struct {
 	accounting Accounting
+	gate       Gate
 	auth       *auth.HTTP
 	transports *TransportPool
 	sink       ResultSink
@@ -94,8 +104,8 @@ type Handler struct {
 // NewHandler returns a Handler.
 func NewHandler(options Options) *Handler {
 	handler := &Handler{
-		accounting: options.Accounting,
-		auth:       options.Auth, transports: options.Transports, sink: options.Sink,
+		accounting: options.Accounting, gate: options.Gate,
+		auth: options.Auth, transports: options.Transports, sink: options.Sink,
 		hooks: options.Hooks, identity: options.Identity, logger: options.Logger, now: options.Now,
 	}
 	if handler.transports == nil {
@@ -194,6 +204,7 @@ type operation struct {
 	snapshot   *config.Snapshot
 	admission  time.Time
 	attempt    *attempt
+	ticket     *runtimecontrol.Ticket
 	stream     bool
 }
 
@@ -217,6 +228,9 @@ func (o *operation) finish() {
 	if o.attempt != nil {
 		o.attempt.finish()
 	}
+	// The completion is in the accounting queue by now, which is what a deletion
+	// barrier waits for.
+	o.ticket.Release()
 	if abort {
 		panic(http.ErrAbortHandler)
 	}
@@ -270,6 +284,14 @@ func (o *operation) serve(r *http.Request) {
 	if failure := request.applyIdentity(o.handler.identity, o.route, o.snapshot); failure != nil {
 		WriteFailure(o.w, o.format, *failure)
 		return
+	}
+	if o.handler.gate != nil {
+		ticket, err := o.handler.gate.Admit(runtimecontrol.Subject{App: envelope.AppName, Hash: envelope.Identity.Hash().Hex(), Anonymous: envelope.Identity.Anonymous()})
+		if err != nil {
+			WriteFailure(o.w, o.format, gateFailure(err, envelope.AppName))
+			return
+		}
+		o.ticket = ticket
 	}
 
 	hooks := o.handler.hooks
