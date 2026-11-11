@@ -399,6 +399,62 @@ func (h *Handler) registerOperations() {
 	h.routes[Prefix+"users/forget"] = route{access: accessAny, methods: map[string]handlerFunc{
 		http.MethodPost: h.forget,
 	}}
+	h.routes[Prefix+"usage/query"] = route{access: accessAny, methods: map[string]handlerFunc{
+		http.MethodPost: h.queryUsage,
+	}}
+}
+
+type usageRequest struct {
+	App       *string `json:"app"`
+	UserID    *string `json:"user_id"`
+	Anonymous *bool   `json:"anonymous"`
+	Since     *string `json:"since"`
+	From      *string `json:"from"`
+	Through   *string `json:"through"`
+	Limit     *int    `json:"limit"`
+	Cursor    *string `json:"cursor"`
+}
+
+func (h *Handler) queryUsage(w http.ResponseWriter, r *http.Request, body []byte) *apiError {
+	var request usageRequest
+	if failure := decodeStrict(body, &request); failure != nil {
+		return failure
+	}
+	var query UsageQuery
+	text := func(value *string, target *string) bool {
+		if value == nil {
+			return true
+		}
+		*target = *value
+		return *value != ""
+	}
+	if !text(request.App, &query.App) || !text(request.Since, &query.Since) || !text(request.From, &query.From) ||
+		!text(request.Through, &query.Through) || !text(request.Cursor, &query.Cursor) {
+		return invalid("empty filter values are not accepted")
+	}
+	if request.UserID != nil {
+		query.UserID, query.HasUser = *request.UserID, true
+	}
+	if request.Anonymous != nil {
+		query.Anonymous = *request.Anonymous
+	}
+	if request.Limit != nil {
+		if *request.Limit == 0 {
+			return invalid("limit must be between 1 and 1000")
+		}
+		query.Limit = *request.Limit
+	}
+	ctx, cancel := operationContext(r, 15*time.Second)
+	defer cancel()
+	page, err := h.service.QueryUsage(ctx, query)
+	if errors.Is(err, ErrInvalidInput) {
+		return invalid("usage filters are not valid; the period is at most 366 days")
+	}
+	if err != nil {
+		return serviceFailure(err)
+	}
+	writeJSON(w, http.StatusOK, page)
+	return nil
 }
 
 // ForgetTimeout bounds a deletion request end to end.

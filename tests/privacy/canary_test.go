@@ -128,6 +128,7 @@ type liveGateway struct {
 	t          *testing.T
 	dir        string
 	proxyPort  int
+	adminPort  int
 	key        string
 	strictKey  string
 	limitedKey string
@@ -179,6 +180,7 @@ func startLive(t *testing.T, scenario, extraListeners string) *liveGateway {
 	t.Helper()
 	gateway := &liveGateway{t: t, dir: t.TempDir(), proxyPort: freePort(t)}
 	fakePort, adminPort := freePort(t), freePort(t)
+	gateway.adminPort = adminPort
 	config := filepath.Join(gateway.dir, "comporta.yaml")
 	text := fmt.Sprintf(`timezone: UTC
 providers:

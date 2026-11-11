@@ -10,7 +10,9 @@ import (
 
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/runtimecontrol"
+	"github.com/JoaoVictorVM/comporta/internal/storage"
 	"github.com/JoaoVictorVM/comporta/internal/storage/sqlite"
+	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
 const serviceConfig = `timezone: UTC
@@ -22,12 +24,21 @@ providers:
 apps:
   bot-discord:
     allowed_models: [fake-gpt]
+    timezone: America/Sao_Paulo
   other:
     allowed_models: [fake-gpt]
 `
 
+type noLimits struct{}
+
+func (noLimits) ForgetSubjects(_ []storage.SubjectRef, persist func() error) (int, error) {
+	return 0, persist()
+}
+func (noLimits) Apps() []string { return nil }
+
 type serviceFixture struct {
 	*apiFixture
+	service *Service
 	store   *sqlite.Store
 	control *runtimecontrol.Control
 	manager *config.Manager
@@ -44,6 +55,10 @@ func newServiceAPI(t *testing.T) *serviceFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	identity, err := useridentity.Open(context.Background(), useridentity.Options{Dir: manager.Capture().DataDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	store, err := sqlite.Open(context.Background(), manager.Capture().DataDir())
 	if err != nil {
 		t.Fatal(err)
@@ -54,10 +69,10 @@ func newServiceAPI(t *testing.T) *serviceFixture {
 		t.Fatal(err)
 	}
 	clock := newFakeClock()
-	service := NewService(ServiceOptions{Control: control, Source: manager, Now: clock.Now})
+	service := NewService(ServiceOptions{Control: control, Source: manager, Now: clock.Now, Identity: identity, History: store, Usage: store, Limits: noLimits{}})
 	api := newAPI(t, service)
 	api.clock = clock
-	return &serviceFixture{apiFixture: api, store: store, control: control, manager: manager}
+	return &serviceFixture{apiFixture: api, service: service, store: store, control: control, manager: manager}
 }
 
 func decode[T any](t *testing.T, body []byte) T {

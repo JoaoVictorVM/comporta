@@ -33,6 +33,7 @@
     "process/missing-user",
     "process/invalid-request",
     "process/limits",
+    "process/admin-operations",
     "pipeline/provider-receives-prompt",
     "pipeline/upstream-error-echo",
     "pipeline/stream-error-echo",

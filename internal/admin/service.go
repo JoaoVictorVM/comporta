@@ -29,9 +29,10 @@ type SnapshotSource interface {
 	Capture() *config.Snapshot
 }
 
-// Hasher computes the same app-scoped pseudonym as a request.
+// Hasher computes the same app-scoped pseudonyms as a request.
 type Hasher interface {
 	LookupHash(app, id string) (useridentity.Hash, error)
+	AnonymousHash(app string) useridentity.Hash
 }
 
 // Metering is the usage queue a deletion drains and holds still.
@@ -54,6 +55,7 @@ type ServiceOptions struct {
 	History  storage.ForgetStore
 	Metering Metering
 	Limits   LimitMaintenance
+	Usage    storage.UsageQueryStore
 	Logger   *slog.Logger
 	Now      func() time.Time
 	// PrepareTimeout bounds the wait for the user's requests in flight.
@@ -68,16 +70,20 @@ type Service struct {
 	history  storage.ForgetStore
 	metering Metering
 	limits   LimitMaintenance
+	usage    storage.UsageQueryStore
 	logger   *slog.Logger
 	now      func() time.Time
 	prepare  time.Duration
+	// cursorKey signs usage cursors; it lives only in this process.
+	cursorKey []byte
 }
 
 // NewService returns the operational services.
 func NewService(options ServiceOptions) *Service {
 	s := &Service{
 		control: options.Control, source: options.Source, identity: options.Identity, history: options.History,
-		metering: options.Metering, limits: options.Limits, logger: options.Logger, now: options.Now, prepare: options.PrepareTimeout,
+		metering: options.Metering, limits: options.Limits, usage: options.Usage, logger: options.Logger, now: options.Now, prepare: options.PrepareTimeout,
+		cursorKey: newCursorKey(),
 	}
 	if s.prepare <= 0 {
 		s.prepare = 10 * time.Second

@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/storage"
@@ -84,4 +86,56 @@ func (s *Store) Records(ctx context.Context, f storage.RecordFilter) (storage.Re
 		page.Records = append(page.Records, record)
 	}
 	return page, rows.Err()
+}
+
+// QueryDaily reads the daily aggregates of one scope in a single read
+// transaction, so a page and its totals come from the same state. The app and
+// user scopes are never mixed: summing both would count usage twice.
+func (s *Store) QueryDaily(ctx context.Context, selector storage.UsageSelector) ([]storage.Daily, error) {
+	if selector.Scope != "app" && selector.Scope != "user" {
+		return nil, storage.ErrInvalid
+	}
+	if selector.Scope == "user" && len(selector.Subjects) == 0 {
+		return nil, nil
+	}
+	query := `SELECT day,timezone,app_name,scope,subject,anonymous,requests,attempts,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,usage_missing_count,recovered_count,cost_microusd FROM usage_daily WHERE scope=? AND day>=? AND day<=?`
+	args := []any{selector.Scope, selector.From, selector.Through}
+	if len(selector.Subjects) > 0 {
+		var clauses []string
+		for _, subject := range selector.Subjects {
+			if !recordName.MatchString(subject.App) || (selector.Scope == "user" && !hexID.MatchString(subject.Subject)) {
+				return nil, storage.ErrInvalid
+			}
+			clauses = append(clauses, `(app_name=? AND subject=? AND anonymous=?)`)
+			args = append(args, subject.App, subject.Subject, subject.Anonymous)
+		}
+		query += ` AND (` + strings.Join(clauses, ` OR `) + `)`
+	}
+	query += ` ORDER BY day,timezone,app_name`
+	db := s.readDB
+	if db == nil {
+		db = s.db
+	}
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, storage.ErrUnavailable
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, storage.ErrUnavailable
+	}
+	defer rows.Close()
+	var out []storage.Daily
+	for rows.Next() {
+		var d storage.Daily
+		if err = rows.Scan(&d.Day, &d.Timezone, &d.AppName, &d.Scope, &d.Subject, &d.Anonymous, &d.Requests, &d.Attempts, &d.Input, &d.Output, &d.CacheWrite, &d.CacheRead, &d.UsageMissing, &d.Recovered, &d.Cost); err != nil {
+			return nil, storage.ErrUnavailable
+		}
+		out = append(out, d)
+	}
+	if rows.Err() != nil {
+		return nil, storage.ErrUnavailable
+	}
+	return out, nil
 }

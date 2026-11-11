@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
 )
 
@@ -147,3 +148,5 @@ func errorCode(t *testing.T, recorder *httptest.ResponseRecorder) string {
 func pauseChange(app string) storage.PauseChange {
 	return storage.PauseChange{App: app, Paused: true, At: time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)}
 }
+
+func configMicrousd(n int64) config.Microusd { return config.Microusd(n) }

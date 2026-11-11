@@ -79,6 +79,10 @@ func (c *Candidate) Warnings() []Diagnostic {
 // DataDir is the absolute data directory.
 func (c *Candidate) DataDir() string { return c.cfg.DataDir }
 
+// Listeners returns a copy of the listener settings, for clients that need to
+// find the running gateway.
+func (c *Candidate) Listeners() Listeners { return c.cfg.Listeners.clone() }
+
 // AppNames lists apps in sorted order.
 func (c *Candidate) AppNames() []string { return slices.Sorted(maps.Keys(c.cfg.Apps)) }
 
