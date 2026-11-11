@@ -34,6 +34,14 @@ type guardEntry struct {
 	blockedUntil time.Time
 }
 
+// GuardOptions overrides the thresholds of a guard. Zero values keep the defaults
+// of the proxy listener.
+type GuardOptions struct {
+	MaxFailures int
+	Window      time.Duration
+	Cooldown    time.Duration
+}
+
 // Guard limits failed authentications per connection address. Its state lives in
 // this process only and a restart clears it, so it is not a distributed limit. It
 // keeps no record of addresses outside memory and logs only aggregates.
@@ -41,7 +49,10 @@ type Guard struct {
 	clock  Clock
 	logger *slog.Logger
 
-	capacity int
+	capacity    int
+	maxFailures int
+	window      time.Duration
+	cooldown    time.Duration
 
 	mu            sync.Mutex
 	entries       map[netip.Addr]*guardEntry
@@ -52,13 +63,29 @@ type Guard struct {
 
 // NewGuard returns an empty guard. A nil logger discards the aggregates.
 func NewGuard(clock Clock, logger *slog.Logger) *Guard {
+	return NewGuardWith(clock, logger, GuardOptions{})
+}
+
+// NewGuardWith returns an empty guard with its own thresholds, for a surface whose
+// credentials deserve a stricter count than app keys.
+func NewGuardWith(clock Clock, logger *slog.Logger, options GuardOptions) *Guard {
+	if options.MaxFailures <= 0 {
+		options.MaxFailures = guardMaxFailures
+	}
+	if options.Window <= 0 {
+		options.Window = guardWindow
+	}
+	if options.Cooldown <= 0 {
+		options.Cooldown = guardCooldown
+	}
 	if clock == nil {
 		clock = systemClock{}
 	}
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return &Guard{clock: clock, logger: logger, capacity: guardMaxAddresses, entries: make(map[netip.Addr]*guardEntry)}
+	return &Guard{clock: clock, logger: logger, capacity: guardMaxAddresses, maxFailures: options.MaxFailures,
+		window: options.Window, cooldown: options.Cooldown, entries: make(map[netip.Addr]*guardEntry)}
 }
 
 // Admit decides whether an attempt from this address may be verified at all. A
@@ -122,10 +149,10 @@ func (g *Guard) Failure(addr netip.Addr) Decision {
 	if decision := g.current(entry, now); !decision.Allowed {
 		return decision
 	}
-	entry.failures = pruneFailures(entry.failures, now)
+	entry.failures = pruneFailures(entry.failures, now, g.window)
 	entry.failures = append(entry.failures, now)
-	if len(entry.failures) >= guardMaxFailures {
-		entry.blockedUntil = now.Add(guardCooldown)
+	if len(entry.failures) >= g.maxFailures {
+		entry.blockedUntil = now.Add(g.cooldown)
 		entry.failures = entry.failures[:0]
 		g.blocksStarted++
 	}
@@ -133,10 +160,10 @@ func (g *Guard) Failure(addr netip.Addr) Decision {
 }
 
 // pruneFailures drops a failure at exactly the end of its window.
-func pruneFailures(failures []time.Time, now time.Time) []time.Time {
+func pruneFailures(failures []time.Time, now time.Time, window time.Duration) []time.Time {
 	kept := failures[:0]
 	for _, at := range failures {
-		if now.Sub(at) < guardWindow {
+		if now.Sub(at) < window {
 			kept = append(kept, at)
 		}
 	}
@@ -159,7 +186,7 @@ func (g *Guard) maybeSweep(now time.Time, every time.Duration) {
 			delete(g.entries, addr)
 			continue
 		}
-		entry.failures = pruneFailures(entry.failures, now)
+		entry.failures = pruneFailures(entry.failures, now, g.window)
 		if len(entry.failures) == 0 {
 			delete(g.entries, addr)
 		}

@@ -33,10 +33,10 @@ type HistoryGuard interface {
 
 // These cannot hold usage history. Everything else in the directory counts as history,
 // including empty databases, because emptiness cannot be judged by size when a WAL may
-// hold the data.
+// hold the data. The admin token file stores only a digest of the operator token.
 var (
-	keyStoreArtifacts = map[string]bool{"keys.json": true, "keys.lock": true, lockFile: true}
-	ownTemporary      = regexp.MustCompile(`^\.(hmac|keys)-[0-9A-Za-z_-]+\.tmp$`)
+	keyStoreArtifacts = map[string]bool{"keys.json": true, "keys.lock": true, lockFile: true, "admin-token.json": true, "admin-token.lock": true}
+	ownTemporary      = regexp.MustCompile(`^\.(hmac|keys)-[0-9A-Za-z_-]+\.tmp$|^\.admin-token-[0-9a-f]{32}\.tmp$`)
 )
 
 type filesystemGuard struct {
