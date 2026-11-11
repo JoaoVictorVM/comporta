@@ -99,7 +99,18 @@ func TestAdminOperationsNeverPersistRawIdentityOrToken(t *testing.T) {
 	if status, _ := g.adminCall("admin-forget-email", token, http.MethodPost, "/admin/v1/users/forget", map[string]string{"user_id": testkit.EmailID()}); status != http.StatusBadRequest {
 		t.Fatalf("an email ID: %d", status)
 	}
-	if status, data := g.adminCall("admin-forget", token, http.MethodPost, "/admin/v1/users/forget", map[string]string{"user_id": user}); status != http.StatusOK || !strings.Contains(string(data), `"requests":1`) {
+	// A settlement whose write missed its deadline keeps the reservation open
+	// until the limit worker retries it, every 5 seconds; until then the
+	// deletion is refused with 409 and the operator tries again.
+	var status int
+	var data []byte
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(500 * time.Millisecond) {
+		status, data = g.adminCall("admin-forget", token, http.MethodPost, "/admin/v1/users/forget", map[string]string{"user_id": user})
+		if status != http.StatusConflict || time.Now().After(deadline) {
+			break
+		}
+	}
+	if status != http.StatusOK || !strings.Contains(string(data), `"requests":1`) {
 		logs, _ := os.ReadFile(serveStderr)
 		t.Fatalf("positive control: forget %d %s\ngateway log:\n%s", status, data, logs)
 	}
@@ -118,8 +129,8 @@ func TestAdminOperationsNeverPersistRawIdentityOrToken(t *testing.T) {
 	if err := tokens.Err("database", "files", "logs"); err != nil {
 		t.Fatalf("the admin token leaked: %v", err)
 	}
-	data, _ := os.ReadFile(serveStdout)
-	if strings.Count(string(data), token) != 1 {
+	shown, _ := os.ReadFile(serveStdout)
+	if strings.Count(string(shown), token) != 1 {
 		t.Fatal("the token must be shown exactly once")
 	}
 }

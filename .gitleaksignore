@@ -1,0 +1,2 @@
+# Synthetic admin token used by a CLI test, already in published history.
+86834ab37a27e01d350b2bbfdb545230c7ad0ffc:internal/cli/admin_test.go:generic-api-key:15
