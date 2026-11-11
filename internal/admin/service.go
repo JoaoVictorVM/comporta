@@ -10,6 +10,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/runtimecontrol"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
+	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
 // Failures of the operational services, mapped to fixed HTTP answers.
@@ -28,25 +29,59 @@ type SnapshotSource interface {
 	Capture() *config.Snapshot
 }
 
+// Hasher computes the same app-scoped pseudonym as a request.
+type Hasher interface {
+	LookupHash(app, id string) (useridentity.Hash, error)
+}
+
+// Metering is the usage queue a deletion drains and holds still.
+type Metering interface {
+	Maintain(ctx context.Context, fn func(context.Context) error) error
+	HasPending(subjects []storage.SubjectRef) bool
+}
+
+// LimitMaintenance is the limit coordinator seen by a deletion.
+type LimitMaintenance interface {
+	ForgetSubjects(subjects []storage.SubjectRef, persist func() error) (int, error)
+	Apps() []string
+}
+
 // ServiceOptions configures the operational services.
 type ServiceOptions struct {
-	Control *runtimecontrol.Control
-	Source  SnapshotSource
-	Logger  *slog.Logger
-	Now     func() time.Time
+	Control  *runtimecontrol.Control
+	Source   SnapshotSource
+	Identity Hasher
+	History  storage.ForgetStore
+	Metering Metering
+	Limits   LimitMaintenance
+	Logger   *slog.Logger
+	Now      func() time.Time
+	// PrepareTimeout bounds the wait for the user's requests in flight.
+	PrepareTimeout time.Duration
 }
 
 // Service holds the operations of the admin API, independent of HTTP.
 type Service struct {
-	control *runtimecontrol.Control
-	source  SnapshotSource
-	logger  *slog.Logger
-	now     func() time.Time
+	control  *runtimecontrol.Control
+	source   SnapshotSource
+	identity Hasher
+	history  storage.ForgetStore
+	metering Metering
+	limits   LimitMaintenance
+	logger   *slog.Logger
+	now      func() time.Time
+	prepare  time.Duration
 }
 
 // NewService returns the operational services.
 func NewService(options ServiceOptions) *Service {
-	s := &Service{control: options.Control, source: options.Source, logger: options.Logger, now: options.Now}
+	s := &Service{
+		control: options.Control, source: options.Source, identity: options.Identity, history: options.History,
+		metering: options.Metering, limits: options.Limits, logger: options.Logger, now: options.Now, prepare: options.PrepareTimeout,
+	}
+	if s.prepare <= 0 {
+		s.prepare = 10 * time.Second
+	}
 	if s.logger == nil {
 		s.logger = slog.New(slog.DiscardHandler)
 	}
@@ -122,4 +157,97 @@ func overridden(state storage.PauseState, app string) bool {
 		}
 	}
 	return false
+}
+
+// ForgetResult reports a deletion without naming the user or its apps.
+type ForgetResult struct {
+	Counts  storage.ForgetCounts
+	Cleared int
+}
+
+// Forget deletes every record of an identified end user in every app with
+// state, configured or removed. The raw identifier is used only in memory to
+// compute each app's pseudonym. New requests of that user wait behind a
+// barrier while the requests already admitted finish and reach accounting;
+// then usage, limits and storage are held still while one transaction deletes
+// the history. Any failure deletes nothing.
+func (s *Service) Forget(ctx context.Context, id string) (ForgetResult, error) {
+	if useridentity.ValidateID(id) != nil {
+		return ForgetResult{}, ErrInvalidInput
+	}
+	prepare, cancel := context.WithTimeout(ctx, s.prepare)
+	defer cancel()
+	barrier, err := s.control.BeginForget(prepare, func(app string) (string, error) {
+		hash, err := s.identity.LookupHash(app, id)
+		if err != nil {
+			return "", err
+		}
+		return hash.Hex(), nil
+	})
+	if err != nil {
+		return ForgetResult{}, ErrUserBusy
+	}
+	defer barrier.End()
+	apps, err := s.apps(prepare)
+	if err != nil {
+		return ForgetResult{}, ErrDeletion
+	}
+	if err := barrier.Include(apps); err != nil {
+		return ForgetResult{}, ErrDeletion
+	}
+	if err := barrier.Drain(prepare); err != nil {
+		return ForgetResult{}, ErrUserBusy
+	}
+	subjects := barrier.Subjects()
+	var result ForgetResult
+	persist := func() error {
+		counts, err := s.history.ForgetSubjects(ctx, subjects)
+		result.Counts = counts
+		return err
+	}
+	err = s.metering.Maintain(ctx, func(context.Context) error {
+		if s.metering.HasPending(subjects) {
+			return storage.ErrBusy
+		}
+		cleared, err := s.limits.ForgetSubjects(subjects, persist)
+		result.Cleared = cleared
+		return err
+	})
+	switch {
+	case err == nil:
+		return result, nil
+	case errors.Is(err, storage.ErrBusy):
+		return ForgetResult{}, ErrUserBusy
+	}
+	s.logger.Error("user deletion failed; no records were removed")
+	return ForgetResult{}, ErrDeletion
+}
+
+// apps is every app that may hold state of a user: configured, persisted in
+// any table, overridden or still in the limit projection.
+func (s *Service) apps(ctx context.Context) ([]string, error) {
+	seen := map[string]bool{}
+	for _, app := range s.source.Capture().AppNames() {
+		seen[app] = true
+	}
+	historical, err := s.history.HistoricalApps(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, app := range historical {
+		seen[app] = true
+	}
+	for _, app := range s.limits.Apps() {
+		seen[app] = true
+	}
+	for _, entry := range s.control.State().Apps {
+		seen[entry.App] = true
+	}
+	apps := make([]string, 0, len(seen))
+	for app := range seen {
+		if appName.MatchString(app) {
+			apps = append(apps, app)
+		}
+	}
+	return apps, nil
 }

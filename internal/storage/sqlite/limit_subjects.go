@@ -18,10 +18,22 @@ var userLimitQueries = []string{
 	`SELECT count(*) FROM limit_checkpoints WHERE metadata_json LIKE '%"scope":"user"%'`,
 }
 
+// unlinkCounts reports the rows unlinkLimitSubjects changed: rows deleted per
+// table, and rows kept for the app whose user link was cleared, once per row.
+type unlinkCounts struct {
+	items, budgets, unlinked int64
+}
+
 // unlinkLimitSubjects removes the user side of limit state while keeping every
 // app obligation: reservations, rate events and ledger deltas of the app stay,
 // only the link to the user goes. An empty app unlinks every user.
 func unlinkLimitSubjects(ctx context.Context, tx *sql.Tx, app, subject string, anonymous bool) error {
+	_, err := unlinkLimitSubjectsCounted(ctx, tx, app, subject, anonymous)
+	return err
+}
+
+func unlinkLimitSubjectsCounted(ctx context.Context, tx *sql.Tx, app, subject string, anonymous bool) (unlinkCounts, error) {
+	var counts unlinkCounts
 	all := app == ""
 	match := func(column string) (string, []any) {
 		if all {
@@ -39,21 +51,29 @@ func unlinkLimitSubjects(ctx context.Context, tx *sql.Tx, app, subject string, a
 	steps := []struct {
 		query string
 		args  []any
+		count *int64
 	}{
-		{`DELETE FROM limit_reservation_items WHERE ` + itemFilter, itemArgs},
-		{`UPDATE limit_reservations SET subject='',anonymous=0 WHERE ` + reservations, args},
-		{`UPDATE limit_rate_events SET subject='',anonymous=0 WHERE ` + reservations, args},
+		{`DELETE FROM limit_reservation_items WHERE ` + itemFilter, itemArgs, &counts.items},
+		{`UPDATE limit_reservations SET subject='',anonymous=0 WHERE ` + reservations, args, &counts.unlinked},
+		{`UPDATE limit_rate_events SET subject='',anonymous=0 WHERE ` + reservations, args, &counts.unlinked},
 	}
 	if !all {
 		steps = append(steps, struct {
 			query string
 			args  []any
-		}{`DELETE FROM budget_state WHERE scope='user' AND app_name=? AND subject=? AND anonymous=?`, []any{app, subject, anonymous}})
+			count *int64
+		}{`DELETE FROM budget_state WHERE scope='user' AND app_name=? AND subject=? AND anonymous=?`, []any{app, subject, anonymous}, &counts.budgets})
 	}
 	for _, step := range steps {
-		if _, err := tx.ExecContext(ctx, step.query, step.args...); err != nil {
-			return databaseError(err)
+		result, err := tx.ExecContext(ctx, step.query, step.args...)
+		if err != nil {
+			return counts, databaseError(err)
 		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return counts, databaseError(err)
+		}
+		*step.count += n
 	}
 	keep := func(entryApp, scope, entrySubject string, entryAnonymous bool) bool {
 		if scope != "user" {
@@ -63,7 +83,7 @@ func unlinkLimitSubjects(ctx context.Context, tx *sql.Tx, app, subject string, a
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT seq,payload_json FROM limit_ledger WHERE payload_json LIKE '%"scope":"user"%'`)
 	if err != nil {
-		return databaseError(err)
+		return counts, databaseError(err)
 	}
 	type rewrite struct {
 		seq  int64
@@ -75,18 +95,21 @@ func unlinkLimitSubjects(ctx context.Context, tx *sql.Tx, app, subject string, a
 		var data string
 		if err = rows.Scan(&seq, &data); err != nil {
 			rows.Close()
-			return databaseError(err)
+			return counts, databaseError(err)
 		}
 		var payload ledgerPayload
 		if err = decodeStrict(data, &payload); err != nil {
 			rows.Close()
-			return err
+			return counts, err
 		}
 		kept := payload.Deltas[:0]
 		for _, d := range payload.Deltas {
 			if keep(payload.AppName, d.Scope, d.Subject, d.Anonymous) {
 				kept = append(kept, d)
 			}
+		}
+		if len(kept) == len(payload.Deltas) {
+			continue
 		}
 		payload.Deltas = kept
 		updated, _ := json.Marshal(payload)
@@ -95,24 +118,25 @@ func unlinkLimitSubjects(ctx context.Context, tx *sql.Tx, app, subject string, a
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		return databaseError(err)
+		return counts, databaseError(err)
 	}
 	for _, r := range rewrites {
 		if _, err = tx.ExecContext(ctx, `UPDATE limit_ledger SET payload_json=? WHERE seq=?`, r.data, r.seq); err != nil {
-			return databaseError(err)
+			return counts, databaseError(err)
 		}
+		counts.unlinked++
 	}
 	var metadata string
 	err = tx.QueryRowContext(ctx, `SELECT metadata_json FROM limit_checkpoints WHERE id=1`).Scan(&metadata)
 	if err == sql.ErrNoRows || (err == nil && !strings.Contains(metadata, `"scope":"user"`)) {
-		return nil
+		return counts, nil
 	}
 	if err != nil {
-		return databaseError(err)
+		return counts, databaseError(err)
 	}
 	var meta storage.CheckpointMetadata
 	if err = decodeStrict(metadata, &meta); err != nil {
-		return err
+		return counts, err
 	}
 	kept := meta.Unknown[:0]
 	for _, ref := range meta.Unknown {
@@ -120,12 +144,16 @@ func unlinkLimitSubjects(ctx context.Context, tx *sql.Tx, app, subject string, a
 			kept = append(kept, ref)
 		}
 	}
+	if len(kept) == len(meta.Unknown) {
+		return counts, nil
+	}
 	meta.Unknown = kept
 	updated, _ := json.Marshal(meta)
 	if _, err = tx.ExecContext(ctx, `UPDATE limit_checkpoints SET metadata_json=? WHERE id=1`, string(updated)); err != nil {
-		return databaseError(err)
+		return counts, databaseError(err)
 	}
-	return nil
+	counts.unlinked++
+	return counts, nil
 }
 
 // ForgetLimitSubject removes one user of one app from the persisted limit

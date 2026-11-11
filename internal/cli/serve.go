@@ -106,7 +106,10 @@ func newServeCommand(out streams) *cobra.Command {
 			}
 			adminAPI := admin.NewHandler(admin.HandlerOptions{
 				Credential: credential, Logger: logger,
-				Service: admin.NewService(admin.ServiceOptions{Control: control, Source: manager, Logger: logger}),
+				Service: admin.NewService(admin.ServiceOptions{
+					Control: control, Source: manager, Identity: identity, History: store,
+					Metering: accounting, Limits: coordinator, Logger: logger,
+				}),
 			})
 			if err := runGateway(command.Context(), logger, manager, keyManager, identity, accounting, control, adminAPI, configEvents.Run, coordinator.Run); err != nil {
 				return err

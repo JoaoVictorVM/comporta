@@ -16,3 +16,12 @@ func databaseError(err error) error {
 	}
 	return storage.ErrUnavailable
 }
+
+// sqliteCode returns the primary result code of a driver error.
+func sqliteCode(err error) (int, bool) {
+	var failure *sqlitedriver.Error
+	if !errors.As(err, &failure) {
+		return 0, false
+	}
+	return failure.Code() & 255, true
+}

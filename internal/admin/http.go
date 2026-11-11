@@ -396,6 +396,61 @@ func (h *Handler) registerOperations() {
 	h.routes[Prefix+"resume"] = route{access: accessAny, methods: map[string]handlerFunc{
 		http.MethodPost: h.pauseHandler(false),
 	}}
+	h.routes[Prefix+"users/forget"] = route{access: accessAny, methods: map[string]handlerFunc{
+		http.MethodPost: h.forget,
+	}}
+}
+
+// ForgetTimeout bounds a deletion request end to end.
+const ForgetTimeout = 25 * time.Second
+
+type forgetRequest struct {
+	UserID *string `json:"user_id"`
+}
+
+// ForgetDeleted counts the rows removed per category.
+type ForgetDeleted struct {
+	Requests         int64 `json:"requests"`
+	UsageDaily       int64 `json:"usage_daily"`
+	Events           int64 `json:"events"`
+	Journal          int64 `json:"journal"`
+	BudgetState      int64 `json:"budget_state"`
+	ReservationItems int64 `json:"reservation_items"`
+}
+
+// ForgetResponse never repeats the identifier, the pseudonyms or the apps.
+type ForgetResponse struct {
+	DeletedRows           int64         `json:"deleted_rows"`
+	Deleted               ForgetDeleted `json:"deleted"`
+	UnlinkedRows          int64         `json:"unlinked_rows"`
+	ClearedMemorySubjects int           `json:"cleared_memory_subjects"`
+}
+
+func (h *Handler) forget(w http.ResponseWriter, r *http.Request, body []byte) *apiError {
+	var request forgetRequest
+	if failure := decodeStrict(body, &request); failure != nil {
+		return failure
+	}
+	if request.UserID == nil {
+		return invalid("user_id is required")
+	}
+	ctx, cancel := operationContext(r, ForgetTimeout)
+	defer cancel()
+	result, err := h.service.Forget(ctx, *request.UserID)
+	if errors.Is(err, ErrInvalidInput) {
+		return invalid("user_id is not a valid user ID")
+	}
+	if err != nil {
+		return serviceFailure(err)
+	}
+	c := result.Counts
+	writeJSON(w, http.StatusOK, ForgetResponse{
+		DeletedRows: c.DeletedRows(),
+		Deleted: ForgetDeleted{Requests: c.Requests, UsageDaily: c.UsageDaily, Events: c.Events, Journal: c.Journal,
+			BudgetState: c.BudgetState, ReservationItems: c.ReservationItems},
+		UnlinkedRows: c.Unlinked, ClearedMemorySubjects: result.Cleared,
+	})
+	return nil
 }
 
 type pauseRequest struct {

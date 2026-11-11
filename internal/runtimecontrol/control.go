@@ -36,9 +36,11 @@ type Subject struct {
 type Control struct {
 	store storage.PauseStore
 
-	// operations serializes pause changes and deletions; it is always taken
-	// before mu and never while mu is held.
-	operations sync.Mutex
+	// operations serializes pause changes and maintenance serializes
+	// deletions. Both are taken before mu, never while it is held, and a
+	// deletion never waits on a pause, so an operator can pause during one.
+	operations  sync.Mutex
+	maintenance sync.Mutex
 
 	mu       sync.Mutex
 	loaded   bool
@@ -170,7 +172,135 @@ func (c *Control) Apply(ctx context.Context, change storage.PauseChange) (PauseR
 	return PauseResult{State: state, Changed: changed, At: change.At}, nil
 }
 
-// Barrier holds back the admissions of one user while it is deleted.
-type Barrier struct{}
+// HashFunc computes the pseudonym of the user being deleted in one app. It
+// closes over the raw identifier, which lives only in memory and only while
+// the barrier exists.
+type HashFunc func(app string) (string, error)
 
-func (b *Barrier) covers(Subject) bool { return false }
+// Barrier holds back the admissions of one identified user, in every app,
+// while that user is deleted. Other users keep being admitted.
+type Barrier struct {
+	control *Control
+	hash    HashFunc
+	hashes  map[string]string
+	ended   bool
+}
+
+// covers runs under the control lock. An app first seen while the barrier is
+// up, such as one added by a reload, joins it before its first admission; if
+// its pseudonym cannot be computed, the admission is refused.
+func (b *Barrier) covers(subject Subject) bool {
+	hash, ok := b.hashes[subject.App]
+	if !ok {
+		computed, err := b.hash(subject.App)
+		if err != nil {
+			return true
+		}
+		b.hashes[subject.App], hash = computed, computed
+	}
+	return hash == subject.Hash
+}
+
+// BeginForget installs the barrier of one user. Deletions are serialized: a
+// second one waits for the first to end.
+func (c *Control) BeginForget(ctx context.Context, hash HashFunc) (*Barrier, error) {
+	locked := make(chan struct{})
+	go func() {
+		c.maintenance.Lock()
+		close(locked)
+	}()
+	select {
+	case <-locked:
+	case <-ctx.Done():
+		go func() {
+			<-locked
+			c.maintenance.Unlock()
+		}()
+		return nil, ctx.Err()
+	}
+	barrier := &Barrier{control: c, hash: hash, hashes: map[string]string{}}
+	c.mu.Lock()
+	c.barriers = append(c.barriers, barrier)
+	c.mu.Unlock()
+	return barrier, nil
+}
+
+// Include adds apps to the barrier, such as the apps found only in history.
+func (b *Barrier) Include(apps []string) error {
+	c := b.control
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, app := range apps {
+		if _, ok := b.hashes[app]; ok {
+			continue
+		}
+		hash, err := b.hash(app)
+		if err != nil {
+			return err
+		}
+		b.hashes[app] = hash
+	}
+	return nil
+}
+
+// Drain waits until no ticket of the user is still open. It never cancels a
+// request: when ctx ends first the deletion gives up instead.
+func (b *Barrier) Drain(ctx context.Context) error {
+	c := b.control
+	for {
+		c.mu.Lock()
+		busy := false
+		for subject := range c.tickets {
+			if !subject.Anonymous && b.covers(subject) {
+				busy = true
+				break
+			}
+		}
+		released := c.released
+		c.mu.Unlock()
+		if !busy {
+			return nil
+		}
+		select {
+		case <-released:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// Subjects lists the pseudonyms the barrier covers, one per app.
+func (b *Barrier) Subjects() []storage.SubjectRef {
+	c := b.control
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	subjects := make([]storage.SubjectRef, 0, len(b.hashes))
+	for app, hash := range b.hashes {
+		subjects = append(subjects, storage.SubjectRef{App: app, Hash: hash})
+	}
+	slices.SortFunc(subjects, func(a, b storage.SubjectRef) int {
+		switch {
+		case a.App < b.App:
+			return -1
+		case a.App > b.App:
+			return 1
+		}
+		return 0
+	})
+	return subjects
+}
+
+// End removes the barrier and forgets the pseudonyms and the identifier.
+func (b *Barrier) End() {
+	c := b.control
+	c.mu.Lock()
+	if b.ended {
+		c.mu.Unlock()
+		return
+	}
+	b.ended = true
+	c.barriers = slices.DeleteFunc(c.barriers, func(other *Barrier) bool { return other == b })
+	b.hash, b.hashes = nil, nil
+	c.mu.Unlock()
+	c.maintenance.Unlock()
+}
