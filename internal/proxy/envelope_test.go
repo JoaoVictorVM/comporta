@@ -230,6 +230,26 @@ func TestLastMessagesHashStableForGrowingContext(t *testing.T) {
 	}
 }
 
+// The loop signature keeps tool IDs: an agent whose tool calls get a new ID
+// every turn is not seen as repeating itself. Both formats follow this rule.
+func TestToolIDsRemainSignatureRelevant(t *testing.T) {
+	anthropic := func(id string) Optional[[32]byte] {
+		return mustParse(t, RouteMessages, `{"model":"m","max_tokens":1,"messages":[{"role":"user","content":[{"type":"tool_result","content":"same","tool_use_id":"`+id+`"}]}]}`).envelope.LastMessagesHash
+	}
+	if anthropic("a") == anthropic("b") {
+		t.Fatal("anthropic: a new tool_use_id kept the signature")
+	}
+	openai := func(id string) Optional[[32]byte] {
+		return mustParse(t, RouteChatCompletions, `{"model":"m","messages":[{"role":"user","content":"go"},{"role":"tool","tool_call_id":"`+id+`","content":"same"}]}`).envelope.LastMessagesHash
+	}
+	if openai("a") == openai("b") {
+		t.Fatal("openai: a new tool_call_id kept the signature")
+	}
+	if openai("a") != openai("a") || !openai("a").Known {
+		t.Fatal("openai: a stable id must keep the signature")
+	}
+}
+
 func TestRequestHashFollowsEffectiveBody(t *testing.T) {
 	plain := `{"model":"m","messages":[],"stream":true,"unknown":1}`
 	result := mustParse(t, RouteChatCompletions, plain)

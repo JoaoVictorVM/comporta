@@ -4,6 +4,7 @@
     "internal/pricing/estimate_test.go",
     "internal/proxy/bench_test.go",
     "internal/proxy/handler_test.go",
+    "internal/proxy/loopguard_test.go",
     "internal/proxy/result_test.go",
     "internal/proxy/sse_test.go",
     "tests/integration/config_proxy_test.go",

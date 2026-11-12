@@ -80,6 +80,9 @@ type Options struct {
 	Transports *TransportPool
 	Sink       ResultSink
 	Hooks      Hooks
+	// Loop cuts runaway agents after BeforeSend and before accounting. Without
+	// it no loop is detected.
+	Loop *LoopStage
 	// Identity pseudonymizes end users. Without it conversation requests fail: leaving
 	// it out never turns pseudonymization off.
 	Identity *useridentity.Service
@@ -96,6 +99,7 @@ type Handler struct {
 	transports *TransportPool
 	sink       ResultSink
 	hooks      Hooks
+	loop       *LoopStage
 	identity   *useridentity.Service
 	logger     *slog.Logger
 	now        func() time.Time
@@ -106,7 +110,7 @@ func NewHandler(options Options) *Handler {
 	handler := &Handler{
 		accounting: options.Accounting, gate: options.Gate,
 		auth: options.Auth, transports: options.Transports, sink: options.Sink,
-		hooks: options.Hooks, identity: options.Identity, logger: options.Logger, now: options.Now,
+		hooks: options.Hooks, loop: options.Loop, identity: options.Identity, logger: options.Logger, now: options.Now,
 	}
 	if handler.transports == nil {
 		handler.transports = NewTransportPool(nil, nil)
@@ -323,6 +327,12 @@ func (o *operation) serve(r *http.Request) {
 			WriteFailure(o.w, o.format, rejection.failure())
 			return
 		}
+	}
+	// Counted once per HTTP request, before any reservation: a cut never
+	// reserves budget and never reaches the provider.
+	if rejection := o.handler.loop.evaluate(r.Context(), o.snapshot, envelope); rejection != nil {
+		writeRejection(o.w, o.format, rejection)
+		return
 	}
 	if o.handler.accounting != nil {
 		admission, rejection := o.handler.accounting.Admit(r.Context(), o.snapshot, envelope, providerName, provider)
