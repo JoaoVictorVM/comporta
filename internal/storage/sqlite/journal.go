@@ -40,14 +40,18 @@ func validate(r storage.Record) error {
 	if r.RequestCount < 0 || r.RequestCount > 1 {
 		return storage.ErrInvalid
 	}
+	if r.Outcome == "loop_cut" && r.AttemptIndex != 0 {
+		return storage.ErrInvalid
+	}
 	switch r.BlockReason {
 	case "", "spent", "reservation":
 	default:
 		return storage.ErrInvalid
 	}
 	// Attempt 0 is a request refused locally before any attempt: it is terminal,
-	// costs nothing and never counts as a request in the generation totals.
-	if r.AttemptIndex == 0 && (r.Outcome != "blocked" || r.RequestCount != 0 || r.Cost != 0 || r.ReservedCost != 0 || r.FinishedAt.IsZero()) {
+	// costs nothing and never counts as a request in the generation totals. A
+	// loop cut is only ever attempt 0.
+	if r.AttemptIndex == 0 && ((r.Outcome != "blocked" && r.Outcome != "loop_cut") || r.RequestCount != 0 || r.Cost != 0 || r.ReservedCost != 0 || r.FinishedAt.IsZero()) {
 		return storage.ErrInvalid
 	}
 	if !r.FinishedAt.IsZero() && r.FinishedAt.Before(r.StartedAt) {
@@ -235,6 +239,11 @@ func (s *Store) Commit(ctx context.Context, records []storage.Record) error {
 	for _, r := range records {
 		if err = validate(r); err != nil {
 			return err
+		}
+		// Loop cuts go through CommitLocalCut with their own event; here they
+		// would gain a blocked event as well.
+		if r.Outcome == "loop_cut" {
+			return storage.ErrInvalid
 		}
 		inserted := false
 		if err = commitRecord(ctx, tx, r, &inserted); err != nil {

@@ -44,7 +44,7 @@ func newFakeProviderCommand(out streams) *cobra.Command {
 	command.Flags().IntVar(&port, "port", 9090, "port to listen on")
 	command.Flags().StringVar(&bind, "bind", "127.0.0.1", "IP address to listen on")
 	command.Flags().StringVar(&scenarioName, "scenario", string(fakeprovider.ScenarioSuccess),
-		"success, rate-limit, overload, header-timeout, slow-stream or disconnect-midstream")
+		"success, rate-limit, overload, header-timeout, slow-stream, disconnect-midstream or agent-loop")
 	return command
 }
 

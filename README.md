@@ -2,9 +2,9 @@
 
 Open-source LLM gateway, in development.
 
-**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, and operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
+**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, and operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
 
-**Not implemented yet:** policies (including `max_tokens` caps and `allowed_models` enforcement on calls), fallback, cache, loop guard, sensitive data detection, alerts, telemetry and the admin panel. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
+**Not implemented yet:** policies (including `max_tokens` caps and `allowed_models` enforcement on calls), fallback, cache, sensitive data detection, alerts, telemetry and the admin panel. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
 
 ## Commands
 
@@ -256,6 +256,45 @@ Every refusal before an attempt is stored as a blocked record with attempt 0, ze
 
 **For later features:** policies, the panel, alerts, telemetry, fallback, cache and multiple instances consume typed decisions, a consistent state per app and user (used, reserved, limit, renewal, degradation, active and pending timezone) and a reservation handle with reserve, settle and release. `comporta users forget` removes a user's limit state together with the user's records, see Operations.
 
+### Loop guard
+
+An agent stuck repeating one step can burn through a budget in minutes. The loop guard watches each end user of each app and cuts them for a while when their traffic looks like a loop, before any reservation is made and before anything reaches the provider.
+
+```yaml
+apps:
+  agent-app:
+    loop_guard:
+      enabled: true            # false turns the guard off for this app
+      similar_requests: 10     # similar requests allowed in the window
+      similar_window: 30s
+      requests_per_minute: 60  # requests allowed in any 60 second span
+      cooldown: 120s
+```
+
+These are the defaults. The first 10 similar requests within 30 seconds go through and the 11th is cut; the first 60 requests within any 60 second span go through and the 61st is cut, whatever they contain. A cut lasts 120 seconds from the first refusal. Retries during the cooldown get the same answer and do not extend it; the first request after it ends is accepted and starts with empty windows. A request already admitted, including a stream in progress, is never interrupted.
+
+**What "similar" means:** the signature is a digest of the last user message and the last tool result of the request, with the API format, not of the whole body. An agent that keeps appending to its conversation while sending back the same tool result is detected even though every body is larger than the last. JSON key order and escaping do not matter; message content, block order, number spelling and tool call IDs do, so an agent whose runtime issues a new tool call ID every turn is caught by the per-minute rule, not by repetition. A request without a user message or tool result is subject to the per-minute rule only.
+
+**Who is counted:** each pair of app and pseudonymous user, so two keys of the same app share the count, and switching model or streaming does not reset it. Requests without a user ID share the anonymous subject of the app: many unidentified users of one app can be cut together. Require a user ID, raise the thresholds or disable the guard for such apps. Only `POST /v1/messages` and `POST /v1/chat/completions` are counted, once per HTTP request; `count_tokens` and `GET /v1/models` never are. Requests refused earlier (authentication, user ID, invalid body, pause, user deletion in progress) do not count.
+
+**The answer** is HTTP 429 in the error envelope of each SDK, before any stream byte, as `application/json` with `Cache-Control: no-store` and a `Retry-After` in whole seconds, rounded up. No budget header is added.
+
+```json
+{"error":{"type":"rate_limit_error","message":"loop detected: 10 similar requests in 30s; requests from this user are paused for 120s","comporta_code":"loop_detected"}}
+```
+
+The per-minute variant reads `loop detected: more than 60 requests in 60s; ...`. Retries report the remaining seconds. Clients should stop retrying on `loop_detected` instead of retrying in a loop.
+
+| `comporta_code` | Status | Cause |
+|---|---|---|
+| `loop_detected` | 429 | Repetition or request rate above the thresholds; `Retry-After` is the time left |
+| `loop_guard_unavailable` | 503 | The guard reached its internal memory ceiling (100,000 users or 1,000,000 recorded arrivals); no protected user is evicted to make room |
+| `usage_storage_unavailable` | 503 | The cut could not be recorded; the user stays in cooldown and nothing is forwarded |
+
+**Records and events:** every cut request is stored with outcome `loop_cut`, attempt 0, status 429, zero cost and no reservation; it never enters the daily totals or the budgets. The first cut of an episode also writes one `loop_cut` event, in the same transaction, with the app, the user hash, the anonymous flag, the reason (`similar_requests` or `request_rate`), the count (11 or 61), the window and the cooldown in milliseconds. Retries in the same episode add records but no event. The event is announced to subscribers only after it is committed. Alert delivery for these events belongs to the alerts feature.
+
+**Memory only:** signatures and arrival times live in memory for at most their window and are never written to disk, logs, events or errors; a cut drops them at once. A restart clears all counters and cooldowns, so the guard complements budgets, which persist, and does not replace them. A configuration reload applies to the next request: disabling an app clears its state, including cooldowns; changing thresholds or windows discards the counts but keeps cooldowns already running; changing only the cooldown affects new cuts. `comporta users forget` clears the user's counters and cooldowns once the deletion has committed, and keeps them if it fails.
+
 ### End users
 
 To attribute requests to the people using your app, send an opaque ID. In most SDKs that is one line, and it is the only code change later per-user limits will need:
@@ -349,7 +388,7 @@ These routes are what the future panel will use. Pauses and sessions are local t
 
 ## Fake provider
 
-`comporta fake-provider` imitates both APIs with synthetic, deterministic responses, for tests without keys or cost. It listens on `127.0.0.1:9090` by default. The scenario is chosen when it starts, and no request can change it: `success`, `rate-limit` (429), `overload` (529), `header-timeout`, `slow-stream` and `disconnect-midstream`.
+`comporta fake-provider` imitates both APIs with synthetic, deterministic responses, for tests without keys or cost. It listens on `127.0.0.1:9090` by default. The scenario is chosen when it starts, and no request can change it: `success`, `rate-limit` (429), `overload` (529), `header-timeout`, `slow-stream`, `disconnect-midstream` and `agent-loop`, which answers every conversation with the same tool call, so a client that keeps sending back the same tool result reproduces an agent loop with growing context.
 
 ```yaml
 providers:

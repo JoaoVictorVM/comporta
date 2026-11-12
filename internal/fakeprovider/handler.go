@@ -95,21 +95,26 @@ func (h *handler) serveConversation(w http.ResponseWriter, r *http.Request, body
 	if h.failByScenario(w, r, anthropic) {
 		return
 	}
-	if !parsed.Stream {
-		if anthropic {
-			writeJSON(w, anthropicMessage(parsed.Model))
-		} else {
-			writeJSON(w, openAICompletion(parsed.Model))
-		}
-		return
+	loop := h.options.Scenario == ScenarioAgentLoop
+	includeUsage := parsed.StreamOptions != nil && parsed.StreamOptions.IncludeUsage
+	switch {
+	case !parsed.Stream && anthropic && loop:
+		writeJSON(w, anthropicToolUse(parsed.Model))
+	case !parsed.Stream && loop:
+		writeJSON(w, openAIToolCall(parsed.Model))
+	case !parsed.Stream && anthropic:
+		writeJSON(w, anthropicMessage(parsed.Model))
+	case !parsed.Stream:
+		writeJSON(w, openAICompletion(parsed.Model))
+	case anthropic && loop:
+		h.stream(w, r, anthropicToolEvents(parsed.Model))
+	case loop:
+		h.stream(w, r, openAIToolEvents(parsed.Model, includeUsage))
+	case anthropic:
+		h.stream(w, r, anthropicEvents(parsed.Model))
+	default:
+		h.stream(w, r, openAIEvents(parsed.Model, includeUsage))
 	}
-	var events []string
-	if anthropic {
-		events = anthropicEvents(parsed.Model)
-	} else {
-		events = openAIEvents(parsed.Model, parsed.StreamOptions != nil && parsed.StreamOptions.IncludeUsage)
-	}
-	h.stream(w, r, events)
 }
 
 // failByScenario answers the scenarios that end before any success byte.

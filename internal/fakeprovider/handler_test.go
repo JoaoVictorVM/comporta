@@ -201,3 +201,52 @@ func TestObserverSeesExactBytes(t *testing.T) {
 		t.Fatalf("request %+v", request)
 	}
 }
+
+func TestAgentLoopScenario(t *testing.T) {
+	loop := startFake(t, Options{Scenario: ScenarioAgentLoop})
+	plain := startFake(t, Options{})
+	for _, anthropic := range []bool{true, false} {
+		path, model := "/v1/chat/completions", "fake-gpt"
+		if anthropic {
+			path, model = "/v1/messages", "fake-claude"
+		}
+		agent := NewAgentLoop(anthropic, model, "u-1", "check the status")
+		var sizes []int
+		for turn := range 3 {
+			body := agent.Body(false)
+			sizes = append(sizes, len(body))
+			response, data := post(t, loop.URL+path, string(body))
+			if response.StatusCode != 200 || !json.Valid([]byte(data)) {
+				t.Fatalf("turn %d: %d %s", turn, response.StatusCode, data)
+			}
+			if err := agent.Advance([]byte(data), LoopToolResult); err != nil {
+				t.Fatalf("turn %d: %v", turn, err)
+			}
+		}
+		if agent.Turns() != 3 || !(sizes[0] < sizes[1] && sizes[1] < sizes[2]) {
+			t.Fatalf("context does not grow: %v", sizes)
+		}
+		for _, id := range []string{LoopToolUseID, LoopToolCallID} {
+			if (id == LoopToolUseID) == anthropic && !strings.Contains(string(agent.Body(false)), id) {
+				t.Fatalf("stable id %s missing", id)
+			}
+		}
+		// The scenario is chosen at setup: the same request gets plain text elsewhere.
+		_, data := post(t, plain.URL+path, string(agent.Body(false)))
+		if err := agent.Advance([]byte(data), LoopToolResult); err == nil {
+			t.Fatal("success scenario answered with a tool call")
+		}
+		_, stream := post(t, loop.URL+path, string(agent.Body(true)))
+		for _, line := range strings.Split(stream, "\n") {
+			if payload, ok := strings.CutPrefix(line, "data: "); ok && payload != "[DONE]" && !json.Valid([]byte(payload)) {
+				t.Fatalf("invalid SSE payload %q", payload)
+			}
+		}
+		if !strings.Contains(stream, LoopToolName) {
+			t.Fatalf("stream without the tool call: %s", stream)
+		}
+	}
+	if _, err := ParseScenario("agent-loop"); err != nil {
+		t.Fatal(err)
+	}
+}

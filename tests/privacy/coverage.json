@@ -4,6 +4,7 @@
     "internal/pricing/estimate_test.go",
     "internal/proxy/bench_test.go",
     "internal/proxy/handler_test.go",
+    "internal/proxy/loopguard_test.go",
     "internal/proxy/result_test.go",
     "internal/proxy/sse_test.go",
     "tests/integration/config_proxy_test.go",
@@ -12,7 +13,8 @@
     "tests/privacy/canary_test.go",
     "tests/integration/proxy_limits_test.go",
     "tests/integration/limits_failmode_test.go",
-    "tests/integration/limits_bootstrap_test.go"
+    "tests/integration/limits_bootstrap_test.go",
+    "tests/integration/proxy_loopguard_test.go"
   ],
   "parser_only_go_files": [
     {
@@ -34,6 +36,7 @@
     "process/invalid-request",
     "process/limits",
     "process/admin-operations",
+    "process/loop-cut",
     "pipeline/provider-receives-prompt",
     "pipeline/upstream-error-echo",
     "pipeline/stream-error-echo",
