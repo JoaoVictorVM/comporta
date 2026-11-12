@@ -45,6 +45,8 @@ const (
 	CodeUsageStorageUnavailable Code = "usage_storage_unavailable"
 	CodeAppPaused               Code = "app_paused"
 	CodeUserMaintenance         Code = "user_maintenance"
+	CodeLoopDetected            Code = "loop_detected"
+	CodeLoopGuardUnavailable    Code = "loop_guard_unavailable"
 )
 
 // ErrorClass groups failures for internal decisions, such as a later fallback.

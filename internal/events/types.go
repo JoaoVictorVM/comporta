@@ -50,6 +50,10 @@ type Payload struct {
 	LimitName       string `json:"limit_name,omitempty"`
 	Scope           string `json:"scope,omitempty"`
 	DegradedSeconds int64  `json:"degraded_seconds,omitempty"`
+	// WindowMS and CooldownMS exist only on loop cuts, rounded up to the
+	// millisecond.
+	WindowMS   int64 `json:"window_ms,omitempty"`
+	CooldownMS int64 `json:"cooldown_ms,omitempty"`
 }
 
 var eventID = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -66,7 +70,43 @@ type Event struct {
 	At        time.Time `json:"occurred_at"`
 	RequestID string    `json:"request_id,omitempty"`
 	App       string    `json:"app,omitempty"`
-	Payload   Payload   `json:"payload"`
+	// UserHash and Anonymous name the pseudonymous subject of a loop cut and
+	// nothing else. They are a pair: both present or both absent.
+	UserHash  string  `json:"user_hash,omitempty"`
+	Anonymous *bool   `json:"anonymous,omitempty"`
+	Payload   Payload `json:"payload"`
+}
+
+// Loop cut reasons.
+const (
+	ReasonSimilarRequests = "similar_requests"
+	ReasonRequestRate     = "request_rate"
+)
+
+// NewLoopCut builds the event of one loop episode. Durations are rounded up to the
+// millisecond so a sub-millisecond configuration never reads as zero.
+func NewLoopCut(id string, at time.Time, requestID, app, userHash string, anonymous bool, reason string, count int64, window, cooldown time.Duration) Event {
+	return Event{
+		ID: id, Type: LoopCut, At: at.UTC(), RequestID: requestID, App: app, UserHash: userHash, Anonymous: &anonymous,
+		Payload: Payload{ErrorClass: "rate_limit", ErrorCode: "loop_detected", Outcome: "loop_cut", Reason: reason, Count: count,
+			WindowMS: ceilMillis(window), CooldownMS: ceilMillis(cooldown)},
+	}
+}
+
+func ceilMillis(d time.Duration) int64 {
+	return int64((d + time.Millisecond - 1) / time.Millisecond)
+}
+
+// ValidateLoopCut holds a new loop cut to its full contract. Validate alone
+// still accepts older loop cut events stored without a subject.
+func (e Event) ValidateLoopCut() error {
+	if err := e.Validate(); err != nil {
+		return err
+	}
+	if e.Type != LoopCut || e.UserHash == "" || e.RequestID == "" || e.Payload.Reason == "" || e.Payload.Count < 1 || e.Payload.WindowMS < 1 || e.Payload.CooldownMS < 1 {
+		return errors.New("invalid loop cut event")
+	}
+	return nil
 }
 
 func New(kind Type, at time.Time) Event {
@@ -84,6 +124,9 @@ func (e Event) Validate() error {
 		return err
 	}
 	if err := e.validatePause(); err != nil {
+		return err
+	}
+	if err := e.validateLoop(); err != nil {
 		return err
 	}
 	if !eventID.MatchString(e.ID) || (e.RequestID != "" && !eventID.MatchString(e.RequestID)) || (e.App != "" && !appName.MatchString(e.App)) || e.At.IsZero() || e.Payload.Count < 0 || e.Payload.Cost < 0 || e.Payload.AttemptIndex < 0 {
@@ -108,7 +151,8 @@ func (e Event) Validate() error {
 	}
 	switch e.Payload.ErrorCode {
 	case "", "provider_unreachable", "provider_timeout", "provider_redirect", "invalid_upstream_response", "provider_rate_limited", "provider_overloaded", "provider_error", "internal_error", "client_disconnected", "price_unknown", "pricing_overflow", "usage_storage_unavailable",
-		"rate_limited", "concurrency_exceeded", "budget_exceeded", "budget_reserved", "hard_cap_exceeded", "limits_unavailable", "app_paused", "user_maintenance":
+		"rate_limited", "concurrency_exceeded", "budget_exceeded", "budget_reserved", "hard_cap_exceeded", "limits_unavailable", "app_paused", "user_maintenance",
+		"loop_detected", "loop_guard_unavailable":
 	default:
 		return errors.New("invalid event error code")
 	}
@@ -155,6 +199,13 @@ func (e Event) validateLimitFields() error {
 	}
 	switch e.Payload.Reason {
 	case "", "spent", "reservation", "checkpoint", "settlement", "integrity":
+		if e.Type == LoopCut && e.Payload.Reason != "" {
+			return errors.New("invalid event reason")
+		}
+	case ReasonSimilarRequests, ReasonRequestRate:
+		if e.Type != LoopCut {
+			return errors.New("invalid event reason")
+		}
 	default:
 		return errors.New("invalid event reason")
 	}
@@ -189,6 +240,25 @@ func (e Event) validatePause() error {
 	return nil
 }
 
+// validateLoop keeps the subject and the loop metadata on loop cuts only.
+func (e Event) validateLoop() error {
+	hasSubject := e.UserHash != "" || e.Anonymous != nil
+	hasLoop := e.Payload.WindowMS != 0 || e.Payload.CooldownMS != 0
+	if e.Type != LoopCut {
+		if hasSubject || hasLoop {
+			return errors.New("invalid event payload")
+		}
+		return nil
+	}
+	if hasSubject && (e.Anonymous == nil || !eventID.MatchString(e.UserHash) || e.App == "") {
+		return errors.New("invalid loop cut subject")
+	}
+	if e.Payload.WindowMS < 0 || e.Payload.CooldownMS < 0 {
+		return errors.New("invalid loop cut payload")
+	}
+	return nil
+}
+
 func ValidType(kind Type) bool {
 	switch kind {
 	case RequestCompleted, Blocked, Cached, Fallback, Downgraded, LoopCut, ConfigChanged, ConfigReloadFailed, Paused, SensitiveDataDetected, LimitStateUnavailable, LimitStateRecovered:
@@ -198,6 +268,10 @@ func ValidType(kind Type) bool {
 }
 
 func (e Event) Clone() Event {
+	if e.Anonymous != nil {
+		anonymous := *e.Anonymous
+		e.Anonymous = &anonymous
+	}
 	if e.Payload.Paused != nil {
 		paused := *e.Payload.Paused
 		e.Payload.Paused = &paused
