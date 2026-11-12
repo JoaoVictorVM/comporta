@@ -13,7 +13,8 @@
     "tests/privacy/canary_test.go",
     "tests/integration/proxy_limits_test.go",
     "tests/integration/limits_failmode_test.go",
-    "tests/integration/limits_bootstrap_test.go"
+    "tests/integration/limits_bootstrap_test.go",
+    "tests/integration/proxy_loopguard_test.go"
   ],
   "parser_only_go_files": [
     {
@@ -35,6 +36,7 @@
     "process/invalid-request",
     "process/limits",
     "process/admin-operations",
+    "process/loop-cut",
     "pipeline/provider-receives-prompt",
     "pipeline/upstream-error-echo",
     "pipeline/stream-error-echo",

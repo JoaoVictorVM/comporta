@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/config"
+	"github.com/JoaoVictorVM/comporta/internal/loopguard"
 	"github.com/JoaoVictorVM/comporta/internal/runtimecontrol"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
@@ -47,6 +48,13 @@ type LimitMaintenance interface {
 	Apps() []string
 }
 
+// LoopMaintenance is the loop guard seen by a deletion. Its state lives only in
+// memory, so forgetting a subject there cannot fail.
+type LoopMaintenance interface {
+	ForgetSubjects([]loopguard.Subject) int
+	Apps() []string
+}
+
 // ServiceOptions configures the operational services.
 type ServiceOptions struct {
 	Control  *runtimecontrol.Control
@@ -55,9 +63,11 @@ type ServiceOptions struct {
 	History  storage.ForgetStore
 	Metering Metering
 	Limits   LimitMaintenance
-	Usage    storage.UsageQueryStore
-	Logger   *slog.Logger
-	Now      func() time.Time
+	// Loop is optional: without it there is no loop state to clear.
+	Loop   LoopMaintenance
+	Usage  storage.UsageQueryStore
+	Logger *slog.Logger
+	Now    func() time.Time
 	// PrepareTimeout bounds the wait for the user's requests in flight.
 	PrepareTimeout time.Duration
 }
@@ -70,6 +80,7 @@ type Service struct {
 	history  storage.ForgetStore
 	metering Metering
 	limits   LimitMaintenance
+	loop     LoopMaintenance
 	usage    storage.UsageQueryStore
 	logger   *slog.Logger
 	now      func() time.Time
@@ -82,7 +93,7 @@ type Service struct {
 func NewService(options ServiceOptions) *Service {
 	s := &Service{
 		control: options.Control, source: options.Source, identity: options.Identity, history: options.History,
-		metering: options.Metering, limits: options.Limits, usage: options.Usage, logger: options.Logger, now: options.Now, prepare: options.PrepareTimeout,
+		metering: options.Metering, limits: options.Limits, loop: options.Loop, usage: options.Usage, logger: options.Logger, now: options.Now, prepare: options.PrepareTimeout,
 		cursorKey: newCursorKey(),
 	}
 	if s.prepare <= 0 {
@@ -223,6 +234,9 @@ func (s *Service) Forget(ctx context.Context, id string) (ForgetResult, error) {
 	})
 	switch {
 	case err == nil:
+		// Only after the history committed, and still under the barrier: a
+		// failed deletion keeps the counters and cooldowns of the user.
+		s.forgetLoop(subjects)
 		return result, nil
 	case errors.Is(err, storage.ErrBusy):
 		reason := "pending usage"
@@ -237,8 +251,19 @@ func (s *Service) Forget(ctx context.Context, id string) (ForgetResult, error) {
 	return ForgetResult{}, ErrDeletion
 }
 
+func (s *Service) forgetLoop(subjects []storage.SubjectRef) {
+	if s.loop == nil {
+		return
+	}
+	targets := make([]loopguard.Subject, 0, len(subjects))
+	for _, subject := range subjects {
+		targets = append(targets, loopguard.Subject{App: subject.App, Hash: subject.Hash})
+	}
+	s.loop.ForgetSubjects(targets)
+}
+
 // apps is every app that may hold state of a user: configured, persisted in
-// any table, overridden or still in the limit projection.
+// any table, overridden, still in the limit projection or in the loop guard.
 func (s *Service) apps(ctx context.Context) ([]string, error) {
 	seen := map[string]bool{}
 	for _, app := range s.source.Capture().AppNames() {
@@ -253,6 +278,11 @@ func (s *Service) apps(ctx context.Context) ([]string, error) {
 	}
 	for _, app := range s.limits.Apps() {
 		seen[app] = true
+	}
+	if s.loop != nil {
+		for _, app := range s.loop.Apps() {
+			seen[app] = true
+		}
 	}
 	for _, entry := range s.control.State().Apps {
 		seen[entry.App] = true
