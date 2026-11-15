@@ -51,6 +51,7 @@
     "process/admin-operations",
     "process/loop-cut",
     "process/sensitive-data",
+    "process/limit-policies",
     "pipeline/provider-receives-prompt",
     "pipeline/upstream-error-echo",
     "pipeline/stream-error-echo",
@@ -86,6 +87,7 @@
     "Search and deletion call LookupHash for each app in history, including removed apps, and pick anonymous explicitly",
     "A storage-backed HistoryGuard replaces the filesystem guard before the database is created, and its reset keeps spending totals",
     "Each channel above moves to covered when it exists, in the same change, and the suite then requires it",
-    "Sensitive data events and records carry categories, counts, actions and secret kinds only; alerts and metrics project app, category, count and action, never the subject"
+    "Sensitive data events and records carry categories, counts, actions and secret kinds only; alerts and metrics project app, category, count and action, never the subject",
+    "Policy outcomes (blocked, warned, downgraded) carry the limit path, scope, reason, renewal and configured model names; their events have no user hash, and the panel and the demo read them from records and events"
   ]
 }

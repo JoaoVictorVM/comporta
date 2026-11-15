@@ -29,6 +29,7 @@ const (
 	CodeInvalidEnvironment   Code = "invalid_environment"
 	CodePermissionWarning    Code = "permission_warning"
 	CodeFallbackMixedFormat  Code = "fallback_mixed_format"
+	CodeDowngradeMixedFormat Code = "downgrade_mixed_format"
 	CodeDiagnosticsTruncated Code = "diagnostics_truncated"
 )
 

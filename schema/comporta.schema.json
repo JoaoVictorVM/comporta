@@ -119,7 +119,7 @@
     },
     "hardCap": {
       "$ref": "#/$defs/budget",
-      "description": "Ceiling per budget dimension. Each dimension needs a matching budget and must be at least that budget. With on_limit downgrade, omitted dimensions default to 120%, rounded up. With on_limit warn, an omitted dimension has no hard ceiling."
+      "description": "Ceiling per budget dimension that blocks every new generation whatever on_limit says, including requests that cost nothing once the cap is reached. Each dimension needs a matching budget and must be at least that budget. With on_limit downgrade, omitted dimensions default to 120%, rounded up. With on_limit warn and no hard_cap, there is no financial ceiling at all: rate, token and concurrency limits still apply. With fail_mode fail_open, the cap is not guaranteed while limit state is unavailable."
     },
     "app": {
       "type": "object",
@@ -127,10 +127,10 @@
       "required": ["allowed_models"],
       "properties": {
         "require_user": {"type": "boolean", "description": "Default: false."},
-        "allowed_models": {"$ref": "#/$defs/models", "minItems": 1, "description": "Declared models this app may use."},
-        "max_tokens": {"$ref": "#/$defs/positiveInteger", "description": "Default: 4096."},
-        "on_limit": {"enum": ["block", "downgrade", "warn"], "description": "Default: block."},
-        "downgrade_to": {"type": "string", "minLength": 1, "description": "Required for on_limit downgrade. Must be allowed and have a known price."},
+        "allowed_models": {"$ref": "#/$defs/models", "minItems": 1, "description": "Declared models this app may use. Requests for any other model get HTTP 403 model_not_allowed, and a downgrade never turns a forbidden model into an allowed one."},
+        "max_tokens": {"$ref": "#/$defs/positiveInteger", "description": "Output cap per request. Larger values are lowered to it; a request in OpenAI format without an output limit gets it injected. Default: 4096."},
+        "on_limit": {"enum": ["block", "downgrade", "warn"], "description": "What happens when a calendar budget is exceeded. block answers 429 with the limit name and renewal time. downgrade sends downgrade_to instead and stops at hard_cap. warn forwards the request, marks it warned and emits an event; without hard_cap it has no financial ceiling. Rate, token and concurrency limits always block. Default: block."},
+        "downgrade_to": {"type": "string", "minLength": 1, "description": "Required for on_limit downgrade. Must be allowed and have a known price. Switching models changes the safety behavior the app sees; configuring a target means accepting that trade-off. A lower price is never inferred from the name. Requests in another API format than the target are blocked at the limit until cross-provider translation exists."},
         "timezone": {"type": "string", "minLength": 1, "description": "Default: the root timezone."},
         "fail_mode": {"$ref": "#/$defs/failMode", "description": "Default: the root fail_mode."},
         "limits": {"$ref": "#/$defs/limits"},

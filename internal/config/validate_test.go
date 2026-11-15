@@ -143,7 +143,14 @@ func TestDowngradeRequiresAllowedPricedModel(t *testing.T) {
 	requireDiagnostic(t, noBudget, CodeInvalidValue, "apps.bot.on_limit")
 
 	localTarget := replaced(t, baseYAML, "allowed_models: [model-a, model-b]", "allowed_models: [model-a, local/model]\n    on_limit: downgrade\n    downgrade_to: local/model")
-	requireValid(t, localTarget)
+	// A mixed-format app stays valid, with a warning that the other format is
+	// blocked at the limit instead of downgraded.
+	if warnings := requireValid(t, localTarget).Warnings(); !hasDiagnostic(warnings, CodeDowngradeMixedFormat, "apps.bot.downgrade_to") {
+		t.Fatalf("mixed formats must warn: %+v", warnings)
+	}
+	if warnings := requireValid(t, policy("    on_limit: downgrade\n    downgrade_to: model-b\n")).Warnings(); hasDiagnostic(warnings, CodeDowngradeMixedFormat, "apps.bot.downgrade_to") {
+		t.Fatalf("a single-format app warned: %+v", warnings)
+	}
 
 	catalogTarget := policy("    on_limit: downgrade\n    downgrade_to: model-a\n")
 	if _, diags := loadText(t, catalogTarget, Options{SystemTimezone: "UTC", Catalog: fakeCatalog{"model-a": true}}); diags != nil {
