@@ -9,12 +9,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/config"
+	"github.com/JoaoVictorVM/comporta/internal/keys"
 	"github.com/JoaoVictorVM/comporta/internal/runtimecontrol"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
@@ -95,6 +97,9 @@ type Options struct {
 	Logger   *slog.Logger
 	// Now replaces the clock in tests.
 	Now func() time.Time
+	// Source supplies the configuration in force when accounting reports that a
+	// reload overtook an admission. Without it such a request gets a 503.
+	Source SnapshotSource
 }
 
 // Handler serves the fixed routes.
@@ -110,12 +115,13 @@ type Handler struct {
 	identity   *useridentity.Service
 	logger     *slog.Logger
 	now        func() time.Time
+	source     SnapshotSource
 }
 
 // NewHandler returns a Handler.
 func NewHandler(options Options) *Handler {
 	handler := &Handler{
-		accounting: options.Accounting, gate: options.Gate,
+		accounting: options.Accounting, gate: options.Gate, source: options.Source,
 		auth: options.Auth, transports: options.Transports, sink: options.Sink,
 		hooks: options.Hooks, loop: options.Loop, sensitive: options.Sensitive, identity: options.Identity, logger: options.Logger, now: options.Now,
 	}
@@ -217,6 +223,8 @@ type operation struct {
 	attempt    *attempt
 	ticket     *runtimecontrol.Ticket
 	stream     bool
+	// downgraded: the policy sent the target instead of the requested model.
+	downgraded bool
 	// sensitive holds the reverse map of this request until the operation ends.
 	sensitive *sensitiveState
 }
@@ -310,64 +318,137 @@ func (o *operation) serve(r *http.Request) {
 	}
 
 	hooks := o.handler.hooks
-	content := RequestContent{Document: request.document, Body: body}
 	if hooks.Prepare != nil {
-		if rejection := hooks.Prepare(r.Context(), envelope, content); rejection != nil {
+		if rejection := hooks.Prepare(r.Context(), envelope, RequestContent{Document: request.document, Body: body}); rejection != nil {
 			WriteFailure(o.w, o.format, rejection.failure())
 			return
 		}
 	}
-
-	providerName, provider, failure := o.resolveProvider(envelope.ModelEffective)
-	if failure != nil {
-		WriteFailure(o.w, o.format, *failure)
-		return
-	}
-
-	if o.handler.accounting != nil {
-		app, _ := o.snapshot.App(envelope.AppName)
-		if err := request.capOutput(app.MaxTokens); err != nil {
-			WriteFailure(o.w, o.format, internalFailure())
-			return
-		}
-	}
-	effective := request.effectiveBody()
-	if hooks.BeforeSend != nil {
-		content.Body = effective
-		if rejection := hooks.BeforeSend(r.Context(), envelope, content); rejection != nil {
-			WriteFailure(o.w, o.format, rejection.failure())
-			return
-		}
-	}
-	// The inspection sees the body BeforeSend saw and its patches reach both the
-	// loop signature's request hash and the reservation estimate.
-	state, rejection := o.handler.sensitive.inspect(r.Context(), o.snapshot, request, o.w, o.handler.logger, o.handler.now)
-	o.sensitive = state
+	plan, rejection := o.prepare(r, request, true)
 	if rejection != nil {
-		if rejection.Code != CodeClientDisconnected {
-			writeRejection(o.w, o.format, rejection)
-		}
+		o.reject(rejection)
 		return
-	}
-	if state != nil {
-		effective = request.effectiveBody()
 	}
 	// Counted once per HTTP request, before any reservation: a cut never
 	// reserves budget and never reaches the provider.
-	if rejection := o.handler.loop.evaluate(r.Context(), o.snapshot, envelope); rejection != nil {
+	if rejection := o.handler.loop.evaluate(r.Context(), o.snapshot, plan.request.envelope); rejection != nil {
 		writeRejection(o.w, o.format, rejection)
 		return
 	}
+	admission := Admission{}
 	if o.handler.accounting != nil {
-		admission, rejection := o.handler.accounting.Admit(r.Context(), o.snapshot, envelope, providerName, provider)
-		if rejection != nil {
-			writeRejection(o.w, o.format, rejection)
-			return
+		for retry := 0; ; retry++ {
+			admission, rejection = o.admit(r.Context(), plan)
+			if rejection == nil {
+				break
+			}
+			if !rejection.Stale || o.handler.source == nil || retry >= staleRetries {
+				writeRejection(o.w, o.format, rejection)
+				return
+			}
+			// A reload overtook the admission and nothing was reserved: everything
+			// that depends on the snapshot is prepared again from the body kept in
+			// memory, under the same request ID. The loop guard already counted it.
+			o.snapshot = o.handler.source.Capture()
+			if plan, rejection = o.reprepare(r, body, identity, plan.request.envelope.RequestID); rejection != nil {
+				o.reject(rejection)
+				return
+			}
 		}
 		o.completion = admission.Complete
 		applyBudgetHeaders(o.w.Header(), admission.Budget)
 	}
-	o.send(r, envelope, providerName, provider, effective, listeners)
+	choice, ok := plan.selected(admission)
+	if !ok {
+		// The admission authorized a body this operation does not hold. It is
+		// still ended through the attempt, as never sent.
+		o.attempt = newAttempt(plan.request.envelope, plan.providerName, o.admission, o.handler.now, o.handler.sink, o.handler.logger)
+		o.attempt.complete = o.completion
+		o.attempt.result.NotSent = true
+		WriteFailure(o.w, o.format, internalFailure())
+		return
+	}
+	if choice.downgraded {
+		o.w.Header().Set(downgradedFromHeader, envelope.ModelRequested)
+	}
+	o.downgraded = choice.downgraded
+	o.send(r, choice.envelope, choice.providerName, choice.provider, choice.body, listeners)
+}
+
+// reject answers a refusal unless the client already left.
+func (o *operation) reject(rejection *Rejection) {
+	if rejection.Code != CodeClientDisconnected {
+		writeRejection(o.w, o.format, rejection)
+	}
+}
+
+// prepare runs every stage that depends on the snapshot. first is false when a
+// reload restarted the admission: the client hooks do not run twice.
+func (o *operation) prepare(r *http.Request, request *prepared, first bool) (*preparation, *Rejection) {
+	envelope := request.envelope
+	app, ok := o.snapshot.App(envelope.AppName)
+	if !ok {
+		return nil, asRejection(internalFailure())
+	}
+	providerName, provider, failure := o.resolveProvider(envelope.ModelEffective)
+	if failure != nil {
+		return nil, asRejection(*failure)
+	}
+	// Checked on the model the client asked for, before any switch: a downgrade
+	// never turns a forbidden model into an allowed one.
+	if !slices.Contains(app.AllowedModels, envelope.ModelRequested) {
+		return nil, modelNotAllowed(envelope.ModelRequested, envelope.AppName)
+	}
+	if o.handler.accounting != nil {
+		if err := request.capOutput(app.MaxTokens); err != nil {
+			return nil, asRejection(internalFailure())
+		}
+	}
+	effective := request.effectiveBody()
+	if hooks := o.handler.hooks; first && hooks.BeforeSend != nil {
+		if rejection := hooks.BeforeSend(r.Context(), envelope, RequestContent{Document: request.document, Body: effective}); rejection != nil {
+			return nil, asRejection(rejection.failure())
+		}
+	}
+	// The inspection sees the body BeforeSend saw and its patches reach both the
+	// loop signature's request hash and the reservation estimate. The target is
+	// built afterwards, so it carries the same sanitized content.
+	state, rejection := o.handler.sensitive.inspect(r.Context(), o.snapshot, request, o.w, o.handler.logger, o.handler.now)
+	o.sensitive = state
+	if rejection != nil {
+		return nil, rejection
+	}
+	if state != nil {
+		effective = request.effectiveBody()
+	}
+	plan := &preparation{request: request, effective: effective, providerName: providerName, provider: provider}
+	if _, policy := o.handler.accounting.(PolicyAccounting); policy {
+		plan.target = o.downgradeTarget(request, app)
+	}
+	return plan, nil
+}
+
+// reprepare rebuilds the request from the original body on the current
+// snapshot. Identity is resolved again because the app's rules may have changed.
+func (o *operation) reprepare(r *http.Request, body []byte, identity keys.Identity, requestID string) (*preparation, *Rejection) {
+	o.sensitive.release()
+	o.sensitive = nil
+	request, failure := parseRequest(o.route, r, body, identity, o.snapshot.Generation())
+	if failure != nil {
+		return nil, asRejection(*failure)
+	}
+	request.envelope.RequestID = requestID
+	if failure := request.applyIdentity(o.handler.identity, o.route, o.snapshot); failure != nil {
+		return nil, asRejection(*failure)
+	}
+	return o.prepare(r, request, false)
+}
+
+func (o *operation) admit(ctx context.Context, plan *preparation) (Admission, *Rejection) {
+	if policy, ok := o.handler.accounting.(PolicyAccounting); ok {
+		return policy.AdmitCandidates(ctx, o.snapshot, plan.request.envelope, plan.candidates())
+	}
+	return o.handler.accounting.Admit(ctx, o.snapshot, plan.request.envelope, plan.providerName, plan.provider)
 }
 
 // readBody applies the size limit and the same total deadline as the rest of the
@@ -473,7 +554,14 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 			o.attempt.clientGone()
 			return
 		}
-		current.failBeforeCommit(classifyTransportError(err, connected.Load(), name), "")
+		failure := classifyTransportError(err, connected.Load(), name)
+		if o.downgraded && failure.Code == CodeProviderTimeout {
+			// On the downgrade path an unanswered target is reported to the client as
+			// unreachable; the recorded result keeps the timeout as the cause.
+			o.attempt.fail(failure)
+			failure = Failure{http.StatusBadGateway, CodeProviderUnreachable, ClassConnection, "provider " + name + " is unreachable"}
+		}
+		current.failBeforeCommit(failure, "")
 		return
 	}
 	defer func() { _ = response.Body.Close() }()

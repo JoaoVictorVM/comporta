@@ -23,6 +23,7 @@ func TestUnpricedModelReturnsDocumented400WithoutProvider(t *testing.T) {
 			gw.reload(func(text string) string {
 				text = strings.ReplaceAll(text, "models: [fake-claude]", "models: [fake-claude, unpriced-claude]")
 				text = strings.ReplaceAll(text, "models: [fake-gpt]", "models: [fake-gpt, unpriced-gpt]")
+				text = strings.Replace(text, "allowed_models: [fake-claude, fake-gpt]", "allowed_models: [fake-claude, fake-gpt, unpriced-claude, unpriced-gpt]", 1)
 				return strings.ReplaceAll(text, "base_url: "+gw.upstream.URL+"/v1", "base_url: https://api.openai.com/v1")
 			})
 			path, body, model := "/v1/messages", testkit.AnthropicBody(), "unpriced-claude"
