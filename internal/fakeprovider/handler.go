@@ -24,6 +24,10 @@ type Request struct {
 // Options configures the handler. Everything is optional.
 type Options struct {
 	Scenario Scenario
+	// ByModel overrides the scenario for the named models, so one fake can play
+	// a fallback chain: the first model overloaded, the next one answering.
+	// It is fixed when the handler is created, like Scenario.
+	ByModel map[string]Scenario
 	// SlowDelay is the wait between events of the slow-stream scenario.
 	SlowDelay time.Duration
 	// Sleep replaces the wait, so that tests can hold or release events.
@@ -67,7 +71,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "POST /v1/messages", "POST /v1/chat/completions":
 		h.serveConversation(w, r, body, anthropic)
 	case "POST /v1/messages/count_tokens":
-		if h.failByScenario(w, r, true) {
+		if h.failByScenario(w, r, true, h.options.Scenario) {
 			return
 		}
 		writeJSON(w, `{"input_tokens":10}`)
@@ -92,10 +96,18 @@ func (h *handler) serveConversation(w http.ResponseWriter, r *http.Request, body
 		writeError(w, anthropic, http.StatusBadRequest, "invalid_request_error", "invalid JSON")
 		return
 	}
-	if h.failByScenario(w, r, anthropic) {
+	scenario := h.options.Scenario
+	if chosen, ok := h.options.ByModel[parsed.Model]; ok {
+		scenario = chosen
+	}
+	if !parsed.Stream && scenario == ScenarioStreamErrorBeforeChunk {
+		writeError(w, anthropic, 529, "overloaded_error", "fake overload")
 		return
 	}
-	loop := h.options.Scenario == ScenarioAgentLoop
+	if h.failByScenario(w, r, anthropic, scenario) {
+		return
+	}
+	loop := scenario == ScenarioAgentLoop
 	includeUsage := parsed.StreamOptions != nil && parsed.StreamOptions.IncludeUsage
 	switch {
 	case !parsed.Stream && anthropic && loop:
@@ -107,25 +119,47 @@ func (h *handler) serveConversation(w http.ResponseWriter, r *http.Request, body
 	case !parsed.Stream:
 		writeJSON(w, openAICompletion(parsed.Model))
 	case anthropic && loop:
-		h.stream(w, r, anthropicToolEvents(parsed.Model))
+		h.stream(w, r, scenario, anthropicToolEvents(parsed.Model))
 	case loop:
-		h.stream(w, r, openAIToolEvents(parsed.Model, includeUsage))
+		h.stream(w, r, scenario, openAIToolEvents(parsed.Model, includeUsage))
 	case anthropic:
-		h.stream(w, r, anthropicEvents(parsed.Model))
+		h.stream(w, r, scenario, streamErrors(scenario, anthropic, anthropicEvents(parsed.Model)))
 	default:
-		h.stream(w, r, openAIEvents(parsed.Model, includeUsage))
+		h.stream(w, r, scenario, streamErrors(scenario, anthropic, openAIEvents(parsed.Model, includeUsage)))
 	}
 }
 
+// streamErrors places an overload error event where the scenario asks for one:
+// first, or right after the first event.
+func streamErrors(scenario Scenario, anthropic bool, events []string) []string {
+	failure := `data: {"error":{"type":"overloaded_error","message":"fake overload"}}` + "\n\n"
+	if anthropic {
+		failure = "event: error\n" + `data: {"type":"error","error":{"type":"overloaded_error","message":"fake overload"}}` + "\n\n"
+	}
+	switch scenario {
+	case ScenarioStreamErrorBeforeChunk:
+		return []string{failure}
+	case ScenarioStreamErrorAfterChunk:
+		return []string{events[0], failure}
+	}
+	return events
+}
+
 // failByScenario answers the scenarios that end before any success byte.
-func (h *handler) failByScenario(w http.ResponseWriter, r *http.Request, anthropic bool) bool {
-	switch h.options.Scenario {
+func (h *handler) failByScenario(w http.ResponseWriter, r *http.Request, anthropic bool, scenario Scenario) bool {
+	switch scenario {
 	case ScenarioRateLimit:
 		w.Header().Set("Retry-After", "1")
 		writeError(w, anthropic, http.StatusTooManyRequests, "rate_limit_error", "fake rate limit")
 		return true
 	case ScenarioOverload:
 		writeError(w, anthropic, 529, "overloaded_error", "fake overload")
+		return true
+	case ScenarioServerError:
+		writeError(w, anthropic, http.StatusInternalServerError, "api_error", "fake server error")
+		return true
+	case ScenarioBadRequest:
+		writeError(w, anthropic, http.StatusBadRequest, "invalid_request_error", "fake invalid request")
 		return true
 	case ScenarioHeaderTimeout:
 		<-r.Context().Done()
@@ -135,11 +169,11 @@ func (h *handler) failByScenario(w http.ResponseWriter, r *http.Request, anthrop
 	return false
 }
 
-func (h *handler) stream(w http.ResponseWriter, r *http.Request, events []string) {
+func (h *handler) stream(w http.ResponseWriter, r *http.Request, scenario Scenario, events []string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	controller := http.NewResponseController(w)
 	for i, event := range events {
-		if h.options.Scenario == ScenarioDisconnectMidstream && i == len(events)/2 {
+		if scenario == ScenarioDisconnectMidstream && i == len(events)/2 {
 			// Closing the connection without finishing the chunked body is what a
 			// provider failing mid-stream looks like on the wire.
 			panic(http.ErrAbortHandler)
@@ -152,7 +186,7 @@ func (h *handler) stream(w http.ResponseWriter, r *http.Request, events []string
 			h.notifyCancel()
 			return
 		}
-		if h.options.Scenario == ScenarioSlowStream && i < len(events)-1 {
+		if scenario == ScenarioSlowStream && i < len(events)-1 {
 			if err := h.options.Sleep(r.Context(), h.options.SlowDelay); err != nil {
 				h.notifyCancel()
 				return
