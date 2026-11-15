@@ -14,6 +14,47 @@ import (
 type Admission struct {
 	Complete func(AttemptResult)
 	Budget   *BudgetHeaders
+	// Selected is the only candidate that may be sent; empty means the original.
+	Selected CandidateID
+	Policy   PolicyOutcome
+}
+
+// CandidateID correlates the admitted choice with a body the proxy prepared.
+// It is a closed set: a selection never carries a URL or a header.
+type CandidateID string
+
+const (
+	CandidateOriginal  CandidateID = "original"
+	CandidateDowngrade CandidateID = "downgrade"
+)
+
+// PolicyOutcome is what the on_limit policy did to the admitted attempt.
+type PolicyOutcome string
+
+const (
+	PolicyNone       PolicyOutcome = ""
+	PolicyBlocked    PolicyOutcome = "blocked"
+	PolicyWarned     PolicyOutcome = "warned"
+	PolicyDowngraded PolicyOutcome = "downgraded"
+)
+
+// Candidate is one prepared way to send the request, described by what
+// accounting needs to price it. The body itself stays with the proxy.
+type Candidate struct {
+	ID                CandidateID
+	Model             string
+	ProviderName      string
+	Provider          config.Provider
+	BodySizeEffective int64
+	// Unavailable is the answer when the policy needs this candidate but it could
+	// not be prepared, such as a target in another API format.
+	Unavailable *Rejection
+}
+
+// PolicyAccounting admits one of several candidates. The original comes
+// first. Accounting that only implements Accounting never applies a policy.
+type PolicyAccounting interface {
+	AdmitCandidates(context.Context, *config.Snapshot, *Envelope, []Candidate) (Admission, *Rejection)
 }
 
 // BudgetHeaders describe the most restrictive applicable budget right after

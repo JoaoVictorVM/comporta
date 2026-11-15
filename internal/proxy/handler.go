@@ -28,6 +28,9 @@ type Rejection struct {
 	// RetryAfter is in whole seconds and only set when an honest value exists.
 	RetryAfter int64
 	Limit      *LimitDetail
+	// Stale asks the pipeline to prepare the request again on the configuration
+	// now in force. Nothing was reserved.
+	Stale bool
 }
 
 func (r *Rejection) failure() Failure {

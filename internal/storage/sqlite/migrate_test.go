@@ -10,6 +10,7 @@ import (
 
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/events"
+	"github.com/JoaoVictorVM/comporta/internal/limits"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
@@ -17,7 +18,7 @@ import (
 func TestMigrationFailureRollsBackWholeSet(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	err := migrateSet(ctx, s.db, append(migrations(), migration{3, `CREATE TABLE staged(value INTEGER) STRICT;`}, migration{4, `THIS IS NOT SQL`}))
+	err := migrateSet(ctx, s.db, append(migrations(), migration{latest() + 1, `CREATE TABLE staged(value INTEGER) STRICT;`}, migration{latest() + 2, `THIS IS NOT SQL`}))
 	if err == nil {
 		t.Fatal("migration accepted invalid SQL")
 	}
@@ -25,7 +26,7 @@ func TestMigrationFailureRollsBackWholeSet(t *testing.T) {
 	if err = s.db.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE name='staged'`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("partial schema survived: %d %v", n, err)
 	}
-	if err = s.db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&n); err != nil || n != 2 {
+	if err = s.db.QueryRow(`SELECT max(version) FROM schema_migrations`).Scan(&n); err != nil || n != latest() {
 		t.Fatalf("partial version survived: %d %v", n, err)
 	}
 }
@@ -37,7 +38,7 @@ func TestSyntheticPreviousSchemaMigration(t *testing.T) {
 	if err := s.Admit(ctx, r); err != nil {
 		t.Fatal(err)
 	}
-	if err := migrateSet(ctx, s.db, append(migrations(), migration{3, `CREATE TABLE next_release(value INTEGER) STRICT;`})); err != nil {
+	if err := migrateSet(ctx, s.db, append(migrations(), migration{latest() + 1, `CREATE TABLE next_release(value INTEGER) STRICT;`})); err != nil {
 		t.Fatal(err)
 	}
 	var n int
@@ -99,7 +100,7 @@ func TestMigrateSchemaOneToTwoPreservesUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if v, err := checkSchema(context.Background(), s.db); err != nil || v != 2 {
+	if v, err := checkSchema(context.Background(), s.db); err != nil || v != latest() {
 		t.Fatalf("version %d %v", v, err)
 	}
 	for query, want := range map[string]int{
@@ -108,8 +109,8 @@ func TestMigrateSchemaOneToTwoPreservesUsage(t *testing.T) {
 		`SELECT count(*) FROM metering_journal`:                              1,
 		`SELECT count(*) FROM events`:                                        2,
 		`SELECT count(*) FROM config_changes`:                                1,
-		`SELECT count(*) FROM schema_migrations WHERE checksum<>''`:          2,
-		`SELECT count(*) FROM sqlite_schema WHERE name LIKE '%_v2'`:          0,
+		`SELECT count(*) FROM schema_migrations WHERE checksum<>''`:          latest(),
+		`SELECT count(*) FROM sqlite_schema WHERE name GLOB '*_v[0-9]'`:      0,
 		`SELECT count(*) FROM pragma_foreign_key_check`:                      0,
 		`SELECT count(*) FROM sqlite_schema WHERE name='ix_events_app_type'`: 1,
 	} {
@@ -162,7 +163,7 @@ func TestLimitsMigrationRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err = migrateSet(context.Background(), s.db, append(migrations(), migration{3, `THIS IS NOT SQL`})); err == nil {
+	if err = migrateSet(context.Background(), s.db, append(migrations(), migration{latest() + 1, `THIS IS NOT SQL`})); err == nil {
 		t.Fatal("broken migration accepted")
 	}
 	if count(t, s, `SELECT max(version) FROM schema_migrations`) != 1 || count(t, s, `SELECT count(*) FROM sqlite_schema WHERE name LIKE 'limit_%'`) != 0 {
@@ -175,7 +176,7 @@ func TestLimitsMigrationRollback(t *testing.T) {
 
 func TestFutureSchemaRejected(t *testing.T) {
 	s := testStore(t)
-	if _, err := s.db.Exec(`INSERT INTO schema_migrations VALUES(3,'unknown',0)`); err != nil {
+	if _, err := s.db.Exec(`INSERT INTO schema_migrations VALUES(?,'unknown',0)`, latest()+1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := checkSchema(context.Background(), s.db); err == nil {
@@ -183,5 +184,109 @@ func TestFutureSchemaRejected(t *testing.T) {
 	}
 	if err := migrate(context.Background(), s.db); err == nil {
 		t.Fatal("future schema migrated")
+	}
+}
+
+func latest() int { return len(migrations()) }
+
+// schemaTwoStore builds a database as the limits release left it: a finished
+// request, an admission with an open reservation and a configuration event.
+func schemaTwoStore(t *testing.T) string {
+	t.Helper()
+	migrateTarget = 2
+	defer func() { migrateTarget = 0 }()
+	dir := filepath.Join(t.TempDir(), "private")
+	s, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	done := fixture()
+	if err = s.Admit(ctx, done); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Commit(ctx, []storage.Record{done}); err != nil {
+		t.Fatal(err)
+	}
+	m := limits.New(limits.Options{Store: s})
+	if err = m.Recover(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = admitLimited(m, s, limitRecord(7)); err != nil {
+		t.Fatal(err)
+	}
+	e := events.New(events.ConfigChanged, time.Now())
+	e.Payload.Generation, e.Payload.Result = 1, config.ResultInitial
+	if err = s.Publish(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestPolicyMigrationPreservesConfigChangesAndOpenJournal(t *testing.T) {
+	dir := schemaTwoStore(t)
+	s, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if v, err := checkSchema(context.Background(), s.db); err != nil || v != latest() || latest() != 3 {
+		t.Fatalf("version %d %v", v, err)
+	}
+	for query, want := range map[string]int{
+		`SELECT count(*) FROM requests`:                                  1,
+		`SELECT count(*) FROM metering_journal`:                          1,
+		`SELECT count(*) FROM limit_reservations WHERE state='reserved'`: 1,
+		`SELECT count(*) FROM events`:                                    2,
+		`SELECT count(*) FROM config_changes`:                            1,
+		`SELECT count(*) FROM sqlite_schema WHERE name GLOB '*_v[0-9]'`:  0,
+		`SELECT count(*) FROM pragma_foreign_key_check`:                  0,
+		`SELECT count(*) FROM sqlite_schema WHERE name IN('ix_events_time','ix_events_app_type','ix_events_user')`: 3,
+	} {
+		if got := count(t, s, query); got != want {
+			t.Fatalf("%s = %d, want %d", query, got, want)
+		}
+	}
+	if _, err = s.db.Exec(`DELETE FROM events WHERE type='config_changed'`); err != nil {
+		t.Fatal(err)
+	}
+	if count(t, s, `SELECT count(*) FROM config_changes`) != 0 {
+		t.Fatal("config_changes lost its cascade to events")
+	}
+	warned := events.NewPolicyAdmission(events.Warned, time.Now(), "0123456789abcdef0123456789abcdef", 1, "bot", "apps.bot.budget.usd_per_day", "app", "spent", "m", "m")
+	if err = s.Publish(context.Background(), warned); err != nil {
+		t.Fatalf("warned refused after migration: %v", err)
+	}
+	// The open reservation of the previous release still settles once on recovery.
+	m := limits.New(limits.Options{Store: s})
+	if err = m.Recover(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Recover(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if count(t, s, `SELECT count(*) FROM limit_reservations WHERE state='reserved'`) != 0 || count(t, s, `SELECT count(*) FROM metering_journal`) != 0 || count(t, s, `SELECT count(*) FROM requests`) != 2 {
+		t.Fatal("open admission lost or duplicated across the migration")
+	}
+}
+
+func TestPolicyMigrationRollback(t *testing.T) {
+	dir := schemaTwoStore(t)
+	migrateTarget = 2
+	s, err := Open(context.Background(), dir)
+	migrateTarget = 0
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err = migrateSet(context.Background(), s.db, append(migrations(), migration{latest() + 1, `THIS IS NOT SQL`})); err == nil {
+		t.Fatal("broken migration accepted")
+	}
+	if count(t, s, `SELECT max(version) FROM schema_migrations`) != 2 || count(t, s, `SELECT count(*) FROM config_changes`) != 1 || count(t, s, `SELECT count(*) FROM events`) != 2 {
+		t.Fatal("rollback changed the previous release")
+	}
+	if _, err = s.db.Exec(`INSERT INTO events(event_id,type,occurred_at,payload_json) VALUES('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','warned',1,'{}')`); err == nil {
+		t.Fatal("migration 0003 survived a later failure")
 	}
 }

@@ -22,6 +22,7 @@ const (
 	Cached                Type = "cached"
 	Fallback              Type = "fallback"
 	Downgraded            Type = "downgraded"
+	Warned                Type = "warned"
 	LoopCut               Type = "loop_cut"
 	ConfigChanged         Type = "config_changed"
 	ConfigReloadFailed    Type = "config_reload_failed"
@@ -59,6 +60,48 @@ type Payload struct {
 	// Detections exist only on sensitive data events: categories, counts and the
 	// policy applied, never a value, a position or a placeholder.
 	Detections sensitivedata.Summary `json:"detections,omitempty"`
+	// ModelRequested and ModelUsed exist only on policy admissions (warned and
+	// downgraded): configured model names, never request content.
+	ModelRequested string `json:"model_requested,omitempty"`
+	ModelUsed      string `json:"model_used,omitempty"`
+}
+
+// PolicyEventID derives the event of one policy admission, so a retried write
+// of the same admission can never become a second event.
+func PolicyEventID(requestID string, attempt int, kind Type) string {
+	id := sha256.Sum256([]byte(fmt.Sprintf("policy:%s:%d:%s", requestID, attempt, kind)))
+	return hex.EncodeToString(id[:16])
+}
+
+// NewPolicyAdmission builds the event of an attempt admitted by the warn or
+// downgrade policy. It records the decision, not the upstream result.
+func NewPolicyAdmission(kind Type, at time.Time, requestID string, attempt int, app, limitName, scope, reason, requested, used string) Event {
+	return Event{
+		ID: PolicyEventID(requestID, attempt, kind), Type: kind, At: at.UTC(), RequestID: requestID, App: app,
+		Payload: Payload{Outcome: string(kind), AttemptIndex: attempt, LimitName: limitName, Scope: scope, Reason: reason, ModelRequested: requested, ModelUsed: used},
+	}
+}
+
+var modelName = regexp.MustCompile(`^[\x21-\x7e]{1,256}$`)
+
+// validatePolicy keeps model names on policy events and requires the full
+// admission payload on warned events, which only policies produce.
+func (e Event) validatePolicy() error {
+	hasModels := e.Payload.ModelRequested != "" || e.Payload.ModelUsed != ""
+	if e.Type != Warned && e.Type != Downgraded {
+		if hasModels {
+			return errors.New("invalid event payload")
+		}
+		return nil
+	}
+	if hasModels && (!modelName.MatchString(e.Payload.ModelRequested) || !modelName.MatchString(e.Payload.ModelUsed)) {
+		return errors.New("invalid policy event models")
+	}
+	if e.Type == Warned && (e.RequestID == "" || e.App == "" || e.Payload.Outcome != string(Warned) || e.Payload.LimitName == "" ||
+		e.Payload.Scope == "" || e.Payload.Reason == "" || !hasModels) {
+		return errors.New("invalid warned event")
+	}
+	return nil
 }
 
 var eventID = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -152,7 +195,7 @@ func New(kind Type, at time.Time) Event {
 }
 func (e Event) Validate() error {
 	switch e.Type {
-	case RequestCompleted, Blocked, Cached, Fallback, Downgraded, LoopCut, ConfigChanged, ConfigReloadFailed, Paused, SensitiveDataDetected, LimitStateUnavailable, LimitStateRecovered:
+	case RequestCompleted, Blocked, Cached, Fallback, Downgraded, Warned, LoopCut, ConfigChanged, ConfigReloadFailed, Paused, SensitiveDataDetected, LimitStateUnavailable, LimitStateRecovered:
 	default:
 		return errors.New("invalid event type")
 	}
@@ -165,6 +208,9 @@ func (e Event) Validate() error {
 	if err := e.validateLoop(); err != nil {
 		return err
 	}
+	if err := e.validatePolicy(); err != nil {
+		return err
+	}
 	if !eventID.MatchString(e.ID) || (e.RequestID != "" && !eventID.MatchString(e.RequestID)) || (e.App != "" && !appName.MatchString(e.App)) || e.At.IsZero() || e.Payload.Count < 0 || e.Payload.Cost < 0 || e.Payload.AttemptIndex < 0 {
 		return errors.New("invalid event")
 	}
@@ -175,7 +221,7 @@ func (e Event) Validate() error {
 	}
 	if e.Payload.Outcome != "" {
 		switch e.Payload.Outcome {
-		case "ok", "blocked", "cached", "fallback", "downgraded", "loop_cut":
+		case "ok", "blocked", "cached", "fallback", "downgraded", "warned", "loop_cut":
 		default:
 			return errors.New("invalid event outcome")
 		}
@@ -187,7 +233,7 @@ func (e Event) Validate() error {
 	}
 	switch e.Payload.ErrorCode {
 	case "", "provider_unreachable", "provider_timeout", "provider_redirect", "invalid_upstream_response", "provider_rate_limited", "provider_overloaded", "provider_error", "internal_error", "client_disconnected", "price_unknown", "pricing_overflow", "usage_storage_unavailable",
-		"rate_limited", "concurrency_exceeded", "budget_exceeded", "budget_reserved", "hard_cap_exceeded", "limits_unavailable", "app_paused", "user_maintenance",
+		"rate_limited", "concurrency_exceeded", "budget_exceeded", "budget_reserved", "hard_cap_exceeded", "limits_unavailable", "app_paused", "user_maintenance", "model_not_allowed", "provider_format_mismatch",
 		"loop_detected", "loop_guard_unavailable", "sensitive_data_blocked", "sensitive_data_scan_failed", "response_rehydration_failed":
 	default:
 		return errors.New("invalid event error code")
@@ -308,7 +354,7 @@ func (e Event) validateLoop() error {
 
 func ValidType(kind Type) bool {
 	switch kind {
-	case RequestCompleted, Blocked, Cached, Fallback, Downgraded, LoopCut, ConfigChanged, ConfigReloadFailed, Paused, SensitiveDataDetected, LimitStateUnavailable, LimitStateRecovered:
+	case RequestCompleted, Blocked, Cached, Fallback, Downgraded, Warned, LoopCut, ConfigChanged, ConfigReloadFailed, Paused, SensitiveDataDetected, LimitStateUnavailable, LimitStateRecovered:
 		return true
 	}
 	return false

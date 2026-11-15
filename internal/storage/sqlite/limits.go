@@ -9,6 +9,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/JoaoVictorVM/comporta/internal/events"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
 )
 
@@ -103,13 +104,42 @@ func (s *Store) AdmitReserved(ctx context.Context, r storage.Record, res storage
 	if err != nil {
 		return 0, err
 	}
+	// The policy decision is a fact of the admission: it commits with the journal
+	// and the reservation, or the attempt is never sent.
+	event, hasEvent := policyEvent(r)
+	notify := false
+	if hasEvent {
+		if err = event.Validate(); err != nil {
+			return 0, storage.ErrInvalid
+		}
+		payload, _ := json.Marshal(event.Payload)
+		if notify, err = putEvent(ctx, tx, event, string(payload)); err != nil {
+			return 0, err
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		return 0, databaseError(err)
 	}
 	if added {
 		s.journalCount++
 	}
+	if notify {
+		s.Bus.Notify(event)
+	}
 	return seq, nil
+}
+
+func policyEvent(r storage.Record) (events.Event, bool) {
+	var kind events.Type
+	switch r.PolicyOutcome {
+	case "warned":
+		kind = events.Warned
+	case "downgraded":
+		kind = events.Downgraded
+	default:
+		return events.Event{}, false
+	}
+	return events.NewPolicyAdmission(kind, r.StartedAt, r.RequestID, r.AttemptIndex, r.AppName, r.PolicyLimitName, r.PolicyScope, r.PolicyReason, r.ModelRequested, r.ModelUsed), true
 }
 
 func (s *Store) admitJournal(ctx context.Context, tx *sql.Tx, r storage.Record) (bool, error) {

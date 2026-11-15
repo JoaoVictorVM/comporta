@@ -119,6 +119,12 @@ func limitsCrashHelper(t *testing.T, s *Store, mode string) {
 		return
 	}
 	m := limitManager(t, s)
+	if mode == "limits-policy" {
+		if _, _, err := admitWarned(m, s, limitRecord(1)); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	n := 1
 	if mode == "limits-admitted-many" {
 		n = 3
@@ -241,4 +247,63 @@ func TestCrashDuringRecoveryIsIdempotent(t *testing.T) {
 		t.Fatal("recovery without its checkpoint reported success")
 	}
 	checkRestart(t, dir, 300, 300)
+}
+
+// admitWarned admits a record past a one-microdollar budget under warn, the
+// way metering builds its policy record inside the commit.
+func admitWarned(m *limits.Manager, s *Store, r storage.Record) (*limits.Handle, limits.Selection, error) {
+	p := limitPolicy()
+	p.OnLimit = config.OnLimitWarn
+	p.AppSet.Budget = config.Budget{USDPerDay: 1}
+	if r.ModelRequested == "" {
+		r.ModelRequested = "principal"
+	}
+	r.ModelUsed = "principal"
+	original := limits.Candidate{ID: limits.CandidateOriginal, Model: r.ModelUsed, EstimatedTokens: 100, ReservedCost: r.ReservedCost}
+	h, d, sel, err := m.ReserveSelect(p, limitRequest(r), []limits.Candidate{original}, func(res storage.Reservation, sel limits.Selection) (int64, error) {
+		r.PolicyOutcome = string(sel.Outcome)
+		if v := sel.Trigger; v != nil {
+			r.PolicyLimitName, r.PolicyScope, r.PolicyReason = v.LimitName, string(v.Scope), string(v.Reason)
+		}
+		return s.AdmitReserved(context.Background(), r, res)
+	})
+	if err == nil && (!d.Allowed || sel.Outcome != limits.PolicyWarned) {
+		err = fmt.Errorf("not warned: %+v", sel)
+	}
+	return h, sel, err
+}
+
+func TestPolicyAdmissionCrashRecoversOnce(t *testing.T) {
+	dir := crashAt(t, "limits-policy")
+	for range 2 {
+		s, _, err := restartLimits(t, dir, nil)
+		if err != nil {
+			s.Close()
+			t.Fatal(err)
+		}
+		warned := count(t, s, `SELECT count(*) FROM events WHERE type='warned'`)
+		requests := count(t, s, `SELECT count(*) FROM requests WHERE json_extract(record_json,'$.PolicyOutcome')='warned' AND recovered=1`)
+		open := count(t, s, `SELECT count(*) FROM limit_reservations WHERE state='reserved'`) + count(t, s, `SELECT count(*) FROM metering_journal`)
+		s.Close()
+		if warned != 1 || requests != 1 || open != 0 {
+			t.Fatalf("after restart: %d warned events, %d warned requests, %d open entries", warned, requests, open)
+		}
+	}
+}
+
+func TestPolicyEventCommitFailurePreventsSend(t *testing.T) {
+	s := testStore(t)
+	m := limitManager(t, s)
+	r := limitRecord(1)
+	r.ModelRequested = "principal model"
+	h, _, err := admitWarned(m, s, r)
+	if err == nil || h != nil {
+		t.Fatalf("admission authorized without its durable event: %v", err)
+	}
+	if count(t, s, `SELECT count(*) FROM metering_journal`)+count(t, s, `SELECT count(*) FROM limit_reservations`)+count(t, s, `SELECT count(*) FROM events`) != 0 {
+		t.Fatal("a failed event left part of the admission behind")
+	}
+	if spent, reserved := budget(t, m); spent != 0 || reserved != 0 {
+		t.Fatalf("memory changed after a failed commit: %d %d", spent, reserved)
+	}
 }

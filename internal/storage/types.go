@@ -4,6 +4,7 @@ import (
 	"errors"
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
+	"regexp"
 	"time"
 )
 
@@ -38,6 +39,35 @@ type Record struct {
 	// Detections is the safe summary of the request's sensitive data inspection.
 	// Absent when nothing matched and in records written before inspection existed.
 	Detections sensitivedata.Summary `json:",omitempty"`
+	// Policy fields record what the on_limit policy did, apart from the transport
+	// outcome. Absent in older records, which never means warned.
+	PolicyOutcome   string     `json:",omitempty"`
+	PolicyLimitName string     `json:",omitempty"`
+	PolicyScope     string     `json:",omitempty"`
+	PolicyReason    string     `json:",omitempty"`
+	PolicyRenewsAt  *time.Time `json:",omitempty"`
+}
+
+var policyLimitName = regexp.MustCompile(`^apps\.[a-z0-9-]{1,40}\.(per_user\.)?(limits|budget|hard_cap)\.[a-z_]{1,32}$`)
+
+// ValidatePolicy holds the policy fields to their domain: a triggered policy
+// names its limit, scope and reason; no policy leaves them all empty.
+func (r Record) ValidatePolicy() error {
+	switch r.PolicyOutcome {
+	case "":
+		if r.PolicyLimitName != "" || r.PolicyScope != "" || r.PolicyReason != "" || r.PolicyRenewsAt != nil {
+			return ErrInvalid
+		}
+		return nil
+	case "blocked", "warned", "downgraded":
+	default:
+		return ErrInvalid
+	}
+	if !policyLimitName.MatchString(r.PolicyLimitName) || (r.PolicyScope != "app" && r.PolicyScope != "user") ||
+		(r.PolicyReason != "spent" && r.PolicyReason != "reservation") {
+		return ErrInvalid
+	}
+	return nil
 }
 
 type Quote struct {
