@@ -40,6 +40,12 @@ type LimitQuote struct {
 	ReservedCost    config.Microusd `json:"reserved_cost_microusd"`
 	Generation      int64           `json:"generation"`
 	Degraded        bool            `json:"degraded,omitempty"`
+	// Candidate, Model and PolicyOutcome freeze the choice of an on_limit
+	// policy. Absent in plain admissions and in reservations written before
+	// policies existed.
+	Candidate     string `json:"candidate,omitempty"`
+	Model         string `json:"model,omitempty"`
+	PolicyOutcome string `json:"policy_outcome,omitempty"`
 }
 
 // RateEvent is one admitted logical request in the sliding windows of its app

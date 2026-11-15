@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"math/bits"
+	"slices"
 	"sync"
 	"time"
 
@@ -56,14 +57,19 @@ type handleKey struct {
 // Handle is the opaque reservation of one attempt. It is internal: it is
 // never a bearer value and never comes from a client.
 type Handle struct {
-	key      handleKey
-	request  Request
-	app      string
-	items    []storage.LimitItem
-	event    *rateEvent
-	state    string
-	finished bool
-	degraded bool
+	key handleKey
+	// request carries the chosen candidate's estimate; asked and candidates are
+	// what the caller sent, compared on an idempotent repeat.
+	request    Request
+	asked      Request
+	candidates []Candidate
+	selection  Selection
+	app        string
+	items      []storage.LimitItem
+	event      *rateEvent
+	state      string
+	finished   bool
+	degraded   bool
 }
 
 // Degraded reports whether the attempt was admitted while limits were degraded
@@ -95,7 +101,6 @@ type Manager struct {
 	seq        int64
 	retry      []pendingSettlement
 	generation int64
-	onLimit    map[string]config.OnLimit
 
 	degraded      bool
 	degradedSince time.Time
@@ -119,7 +124,7 @@ func New(options Options) *Manager {
 		store: options.Store, clock: options.Clock, logger: options.Logger, publisher: options.Publisher,
 		interval: options.CheckpointInterval,
 		windows:  map[Subject]*slidingWindow{}, concurrent: map[Subject]int64{}, buckets: map[bucketKey]*bucket{},
-		handles: map[handleKey]*Handle{}, zones: map[string]*zone{}, onLimit: map[string]config.OnLimit{},
+		handles: map[handleKey]*Handle{}, zones: map[string]*zone{},
 		affected: map[string]bool{},
 	}
 }
@@ -271,10 +276,6 @@ func (m *Manager) observeGeneration(p Policy, generation int64) error {
 		return ErrStale
 	}
 	m.generation = generation
-	if p.OnLimit != "" && p.OnLimit != config.OnLimitBlock && m.onLimit[p.App] != p.OnLimit {
-		m.logger.Warn("on_limit policy is not implemented yet; limits block requests", "app", p.App, "on_limit", string(p.OnLimit))
-	}
-	m.onLimit[p.App] = p.OnLimit
 	return nil
 }
 
@@ -372,18 +373,22 @@ func (m *Manager) evaluate(p Policy, r Request, civil time.Time, now time.Durati
 					if d.money() {
 						requested = int64(r.ReservedCost)
 					}
-					total, ok := checkedAdd(b.spent, b.reserved)
+					committed, ok := checkedAdd(b.spent, b.reserved)
+					total := committed
 					if ok {
-						total, ok = checkedAdd(total, requested)
+						total, ok = checkedAdd(committed, requested)
 					}
 					if !ok {
 						return Decision{}, ErrIntegrity
 					}
-					if total <= limit && !b.unknown {
+					// A hard cap already reached blocks every new generation, even one
+					// that costs nothing; landing exactly on it is still admitted.
+					reached := hard && committed >= limit
+					if total <= limit && !b.unknown && !reached {
 						continue
 					}
 					reason := ReasonReservation
-					if b.unknown || b.spent+requested > limit {
+					if b.unknown || b.spent+requested > limit || (hard && b.spent >= limit) {
 						reason = ReasonSpent
 					}
 					kind := KindBudget
@@ -398,6 +403,7 @@ func (m *Manager) evaluate(p Policy, r Request, civil time.Time, now time.Durati
 						v.LimitName = p.LimitName(s.scope(), KindHardCap, d)
 					}
 					v.hardCap = hard
+					v.Unknown = b.unknown
 					renew := w.end
 					v.RenewsAt = &renew
 					v.Timezone = tz
@@ -418,55 +424,109 @@ func (m *Manager) evaluate(p Policy, r Request, civil time.Time, now time.Durati
 // it durable together with the usage journal. Memory changes only after the
 // commit succeeds, and nothing may be sent upstream before Reserve returns.
 func (m *Manager) Reserve(p Policy, r Request, commit func(storage.Reservation) (int64, error)) (*Handle, Decision, error) {
+	original := Candidate{ID: CandidateOriginal, EstimatedTokens: r.EstimatedTokens, ReservedCost: r.ReservedCost}
+	handle, decision, _, err := m.ReserveSelect(p, r, []Candidate{original}, func(res storage.Reservation, _ Selection) (int64, error) {
+		return commit(res)
+	})
+	return handle, decision, err
+}
+
+// ReserveSelect applies the on_limit policy and reserves the chosen candidate
+// under one lock, so no other admission runs between the choice and the
+// reservation. candidates[0] is the original; an optional second one is the
+// downgrade target. Only the returned selection may be sent. The selection is
+// frozen in the reservation that commit makes durable, and a repeat of the same
+// request returns that same selection.
+func (m *Manager) ReserveSelect(p Policy, r Request, candidates []Candidate, commit func(storage.Reservation, Selection) (int64, error)) (*Handle, Decision, Selection, error) {
+	if len(candidates) == 0 || len(candidates) > 2 || candidates[0].ID != CandidateOriginal || candidates[0].Unavailable ||
+		(len(candidates) == 2 && candidates[1].ID != CandidateDowngrade) {
+		return nil, Decision{}, Selection{}, ErrIntegrity
+	}
+	r.EstimatedTokens, r.ReservedCost = candidates[0].EstimatedTokens, candidates[0].ReservedCost
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.observeGeneration(p, r.Generation); err != nil {
-		return nil, Decision{}, err
+		return nil, Decision{}, Selection{}, err
 	}
 	key := handleKey{r.RequestID, r.AttemptIndex}
 	if existing := m.handles[key]; existing != nil {
-		if existing.request == r {
-			return existing, Decision{Allowed: true, Degraded: existing.degraded}, nil
+		if existing.asked == r && slices.Equal(existing.candidates, candidates) {
+			return existing, Decision{Allowed: true, Degraded: existing.degraded}, existing.selection, nil
 		}
-		return nil, Decision{}, ErrConflict
+		return nil, Decision{}, Selection{}, ErrConflict
 	}
 	civil, elapsed := m.now()
 	degraded := m.degraded
 	if degraded {
 		m.noteAffected(p.App, civil)
 		if p.FailMode != config.FailOpen {
-			return nil, Decision{Degraded: true}, ErrUnavailable
+			return nil, Decision{Degraded: true}, Selection{}, ErrUnavailable
 		}
 	}
 	tz := m.zoneFor(p, civil)
-	decision, err := m.evaluate(p, r, civil, elapsed, tz)
-	if err != nil || !decision.Allowed {
-		decision.Degraded = degraded
-		return nil, decision, err
+	var target *Candidate
+	if len(candidates) == 2 {
+		target = &candidates[1]
 	}
+	if r.Operation != OperationGeneration {
+		// Counting tokens is advisory: it has no budget to relax.
+		target = nil
+		p.OnLimit = config.OnLimitBlock
+	}
+	picked, err := choose(p, candidates[0], target, func(c Candidate) (Decision, error) {
+		asked := r
+		asked.EstimatedTokens, asked.ReservedCost = c.EstimatedTokens, c.ReservedCost
+		return m.evaluate(p, asked, civil, elapsed, tz)
+	})
+	if err != nil {
+		return nil, Decision{Degraded: degraded}, Selection{}, err
+	}
+	decision := picked.decision
 	decision.Degraded = degraded
-	reservation, err := m.buildReservation(p, r, civil, tz, degraded)
-	if err != nil {
-		return nil, decision, err
+	if picked.unavailable {
+		return nil, decision, picked.selection, ErrTargetUnavailable
 	}
-	seq, err := commit(reservation)
-	if err != nil {
-		return nil, decision, err
+	if !decision.Allowed {
+		return nil, decision, picked.selection, nil
 	}
-	h := &Handle{key: key, request: r, app: p.App, items: reservation.Items, state: storage.ReservationReserved, degraded: degraded}
+	chosen := r
+	chosen.EstimatedTokens, chosen.ReservedCost = picked.candidate.EstimatedTokens, picked.candidate.ReservedCost
+	reservation, err := m.buildReservation(p, chosen, civil, tz, degraded, picked.selection)
+	if err != nil {
+		return nil, decision, Selection{}, err
+	}
+	seq, err := commit(reservation, picked.selection)
+	if err != nil {
+		return nil, decision, Selection{}, err
+	}
+	h := &Handle{key: key, request: chosen, asked: r, candidates: slices.Clone(candidates), selection: picked.selection,
+		app: p.App, items: reservation.Items, state: storage.ReservationReserved, degraded: degraded}
 	if err := m.applyAdmission(h, elapsed, civil, seq); err != nil {
 		m.markDegraded(civil, "integrity")
-		return nil, decision, err
+		return nil, decision, Selection{}, err
 	}
 	decision.Budget = m.budgetStatus(p, r.Subject, civil, tz)
-	return h, decision, nil
+	return h, decision, picked.selection, nil
 }
 
-func (m *Manager) buildReservation(p Policy, r Request, civil time.Time, tz string, degraded bool) (storage.Reservation, error) {
+// Selection is the choice frozen with the reservation.
+func (h *Handle) Selection() Selection {
+	if h == nil {
+		return Selection{}
+	}
+	return h.selection
+}
+
+func (m *Manager) buildReservation(p Policy, r Request, civil time.Time, tz string, degraded bool, selection Selection) (storage.Reservation, error) {
 	res := storage.Reservation{
 		RequestID: r.RequestID, AttemptIndex: r.AttemptIndex, AppName: p.App, Subject: r.Subject.Hash, Anonymous: r.Subject.Anonymous,
 		AdmittedAt: civil, State: storage.ReservationReserved,
 		Quote: storage.LimitQuote{Operation: string(r.Operation), EstimatedTokens: r.EstimatedTokens, ReservedCost: r.ReservedCost, Generation: r.Generation, Degraded: degraded},
+	}
+	// Plain admissions keep the quote they always had; a policy decision is
+	// frozen with the reservation so a repeat with another choice conflicts.
+	if selection.Outcome != PolicyNone {
+		res.Quote.Candidate, res.Quote.Model, res.Quote.PolicyOutcome = string(selection.Candidate), selection.Model, string(selection.Outcome)
 	}
 	tokens := int64(0)
 	if r.Operation == OperationGeneration {

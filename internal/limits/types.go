@@ -21,6 +21,9 @@ var (
 	ErrStale = errors.New("configuration generation is stale")
 	// ErrConflict means the same idempotency key arrived with different data.
 	ErrConflict = errors.New("incompatible reservation")
+	// ErrTargetUnavailable means the policy needs the downgrade target, which
+	// could not be prepared. Nothing is reserved and nothing may be sent.
+	ErrTargetUnavailable = errors.New("downgrade target unavailable")
 )
 
 type Scope string
@@ -166,12 +169,13 @@ func ceiling(b config.Budget, d Dimension) int64 {
 
 // Policy is the limit configuration of one app in one generation.
 type Policy struct {
-	App      string
-	Timezone string
-	FailMode config.FailMode
-	OnLimit  config.OnLimit
-	AppSet   Set
-	UserSet  Set
+	App         string
+	Timezone    string
+	FailMode    config.FailMode
+	OnLimit     config.OnLimit
+	DowngradeTo string
+	AppSet      Set
+	UserSet     Set
 }
 
 // PolicyFor extracts the limits of an app from a snapshot.
@@ -181,7 +185,7 @@ func PolicyFor(snapshot *config.Snapshot, name string) (Policy, bool) {
 		return Policy{}, false
 	}
 	return Policy{
-		App: name, Timezone: app.Timezone, FailMode: app.FailMode, OnLimit: app.OnLimit,
+		App: name, Timezone: app.Timezone, FailMode: app.FailMode, OnLimit: app.OnLimit, DowngradeTo: app.DowngradeTo,
 		AppSet:  Set{Limits: app.Limits, Budget: app.Budget, HardCap: app.HardCap},
 		UserSet: Set{Limits: app.PerUser.Limits, Budget: app.PerUser.Budget, HardCap: app.PerUser.HardCap},
 	}, true
@@ -240,8 +244,11 @@ type Violation struct {
 	// TooLarge marks a request larger than the whole limit.
 	TooLarge bool   `json:"request_too_large_for_limit,omitempty"`
 	Timezone string `json:"timezone,omitempty"`
-	App      string `json:"-"`
-	hardCap  bool
+	// Unknown marks a budget whose history could not be proven. It is never a
+	// legitimately exceeded budget, so no policy may relax it.
+	Unknown bool   `json:"unknown,omitempty"`
+	App     string `json:"-"`
+	hardCap bool
 }
 
 // Key is the short identifier used in Decision.Exceeded.
@@ -276,6 +283,45 @@ type Decision struct {
 	Primary  *Violation
 	Exceeded []Violation
 	Budget   *BudgetStatus
+}
+
+// CandidateID names a prepared body. The proxy keeps the bodies; the
+// coordinator only sees what it needs to price and reserve them.
+type CandidateID string
+
+const (
+	CandidateOriginal  CandidateID = "original"
+	CandidateDowngrade CandidateID = "downgrade"
+)
+
+// Candidate is one way an attempt could be sent, priced on its own body.
+type Candidate struct {
+	ID              CandidateID
+	Model           string
+	EstimatedTokens int64
+	ReservedCost    config.Microusd
+	// Unavailable marks a target that could not be prepared: choosing it refuses
+	// the request without a reservation.
+	Unavailable bool
+}
+
+// PolicyOutcome is what the on_limit policy did to an attempt.
+type PolicyOutcome string
+
+const (
+	PolicyNone       PolicyOutcome = ""
+	PolicyBlocked    PolicyOutcome = "blocked"
+	PolicyWarned     PolicyOutcome = "warned"
+	PolicyDowngraded PolicyOutcome = "downgraded"
+)
+
+// Selection is the only authorization to send. Trigger is the relaxed budget
+// that made the policy act; it is nil when no policy acted.
+type Selection struct {
+	Candidate CandidateID
+	Model     string
+	Outcome   PolicyOutcome
+	Trigger   *Violation
 }
 
 // Usage is the consumption of a finished attempt. Tokens is the sum of the four
