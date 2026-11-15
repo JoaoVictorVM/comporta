@@ -57,6 +57,30 @@ type PolicyAccounting interface {
 	AdmitCandidates(context.Context, *config.Snapshot, *Envelope, []Candidate) (Admission, *Rejection)
 }
 
+// SessionAccounting admits a logical request whose attempts may continue on
+// other models after an eligible failure. A nil session with no rejection
+// means continuations are not available, and the admission is a plain one
+// whose Complete ends it.
+type SessionAccounting interface {
+	AdmitSession(context.Context, *config.Snapshot, *Envelope, []Candidate) (AccountingSession, Admission, *Rejection)
+}
+
+// AccountingSession is the accounting side of one logical request. The proxy
+// calls it from one goroutine, in order: Conclude for each attempt, Continue
+// between attempts and Close once at the end.
+type AccountingSession interface {
+	// Conclude makes the attempt's result durable and settles its reservation.
+	// An error means that result is not assured, so nothing else may be sent.
+	Conclude(AttemptResult) error
+	// Continue admits the next attempt after an eligible failure of the
+	// previous model, with its own quote and reservation. A rejection is final.
+	Continue(ctx context.Context, e *Envelope, candidates []Candidate, from, cause string) (Admission, *Rejection)
+	// Close ends the logical request: the last concluded attempt becomes the
+	// terminal one, and terminal is the answer when it differs from that
+	// attempt's own. The concurrency slot is freed here, exactly once.
+	Close(terminal *Failure)
+}
+
 // BudgetHeaders describe the most restrictive applicable budget right after
 // admission. They are a photograph of that moment, not a promise about the
 // balance when a stream ends.

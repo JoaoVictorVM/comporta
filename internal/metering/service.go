@@ -68,7 +68,7 @@ var errReloaded = &proxy.Rejection{Status: 503, Code: proxy.CodeInternalError, C
 // so a stale ceiling is never applied after a newer one.
 func (s *Service) Admit(ctx context.Context, snapshot *config.Snapshot, e *proxy.Envelope, name string, p config.Provider) (proxy.Admission, *proxy.Rejection) {
 	for attempt := 0; ; attempt++ {
-		admission, rejection, stale := s.admit(ctx, snapshot, e, []proxy.Candidate{original(e, name, p)})
+		admission, rejection, stale := s.admit(ctx, snapshot, e, []proxy.Candidate{original(e, name, p)}, nil)
 		if !stale {
 			return admission, rejection
 		}
@@ -92,7 +92,7 @@ func (s *Service) Admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 // admission comes back as Stale: the bodies depend on the snapshot, so only
 // the proxy can prepare them again.
 func (s *Service) AdmitCandidates(ctx context.Context, snapshot *config.Snapshot, e *proxy.Envelope, candidates []proxy.Candidate) (proxy.Admission, *proxy.Rejection) {
-	admission, rejection, stale := s.admit(ctx, snapshot, e, candidates)
+	admission, rejection, stale := s.admit(ctx, snapshot, e, candidates, nil)
 	if stale {
 		rejection := *errReloaded
 		rejection.Stale = true
@@ -170,7 +170,10 @@ func withPolicy(r storage.Record, chosen priced, sel limits.Selection) storage.R
 	return r
 }
 
-func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy.Envelope, candidates []proxy.Candidate) (proxy.Admission, *proxy.Rejection, bool) {
+// admit prices and reserves the first attempt. With open, the attempt starts a
+// logical request whose later attempts the session admits; open is filled only
+// when the attempt is admitted.
+func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy.Envelope, candidates []proxy.Candidate, open *session) (proxy.Admission, *proxy.Rejection, bool) {
 	reject := func(status int, code, msg string) (proxy.Admission, *proxy.Rejection, bool) {
 		class := proxy.ClassInvalidRequest
 		if status >= 500 {
@@ -254,11 +257,20 @@ func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 		}
 		return base
 	}
-	handle, decision, sel, err := s.limits.ReserveSelect(policy, request, options, func(res storage.Reservation, sel limits.Selection) (int64, error) {
+	commit := func(res storage.Reservation, sel limits.Selection) (int64, error) {
 		admitted := withPolicy(r, chosen(sel), sel)
 		admitted.LimitsDegraded = res.Quote.Degraded
 		return s.limitStore.AdmitReserved(ctx, admitted, res)
-	})
+	}
+	var handle *limits.Handle
+	var decision limits.Decision
+	var sel limits.Selection
+	var op *limits.Session
+	if open != nil {
+		op, handle, decision, sel, err = s.limits.ReserveSession(policy, request, options, commit)
+	} else {
+		handle, decision, sel, err = s.limits.ReserveSelect(policy, request, options, commit)
+	}
 	switch {
 	case errors.Is(err, limits.ErrStale):
 		<-s.slots
@@ -288,6 +300,10 @@ func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 	admitted := withPolicy(r, chosen(sel), sel)
 	admitted.LimitsDegraded = handle.Degraded()
 	q := chosen(sel).quote
+	if open != nil {
+		*open = session{service: s, snapshot: snapshot, op: op, first: admitted, current: admitted, quote: q, handle: handle}
+		return proxy.Admission{Budget: budgetHeaders(decision), Selected: proxy.CandidateID(sel.Candidate), Policy: proxy.PolicyOutcome(sel.Outcome)}, nil, false
+	}
 	var once sync.Once
 	return proxy.Admission{
 		Complete: func(result proxy.AttemptResult) { once.Do(func() { s.complete(admitted, q, handle, result) }) },
@@ -363,6 +379,16 @@ func optional[T any](v proxy.Optional[T]) *T {
 }
 
 func (s *Service) complete(r storage.Record, q pricing.Quote, handle *limits.Handle, result proxy.AttemptResult) {
+	if r, ok, _ := s.conclude(r, q, handle, result); ok {
+		s.enqueue(r)
+	}
+}
+
+// conclude prices the result and makes it durable together with the
+// settlement of its reservation, without queueing it for materialization. It
+// reports whether the record may be queued, and the durability error that
+// forbids anything else from being sent.
+func (s *Service) conclude(r storage.Record, q pricing.Quote, handle *limits.Handle, result proxy.AttemptResult) (storage.Record, bool, error) {
 	r.FinishedAt = s.now().UTC()
 	if r.FinishedAt.Before(r.StartedAt) {
 		r.FinishedAt = r.StartedAt
@@ -401,7 +427,7 @@ func (s *Service) complete(r storage.Record, q pricing.Quote, handle *limits.Han
 			s.unhealthy = true
 			s.mu.Unlock()
 			s.logger.Error("usage accounting failed; admission paused")
-			return
+			return r, false, err
 		}
 		r.Cost = cost
 		r.CacheWriteEstimated = q.CacheWriteEstimated(tokens.CacheWrite, r.CacheWrite5m, r.CacheWrite1h)
@@ -413,7 +439,8 @@ func (s *Service) complete(r storage.Record, q pricing.Quote, handle *limits.Han
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := s.finish(ctx, r, handle, result); err != nil {
+	err := s.finish(ctx, r, handle, result)
+	if err != nil {
 		if errors.Is(err, storage.ErrInvalid) || errors.Is(err, storage.ErrConflict) {
 			s.mu.Lock()
 			s.unhealthy = true
@@ -421,6 +448,12 @@ func (s *Service) complete(r storage.Record, q pricing.Quote, handle *limits.Han
 		}
 		s.warnStorage(err)
 	}
+	return r, true, err
+}
+
+// enqueue hands a decided record to the worker. Its admission slot is released
+// when the batch holding it is flushed.
+func (s *Service) enqueue(r storage.Record) {
 	s.mu.Lock()
 	s.pending = append(s.pending, r)
 	full := len(s.pending) >= 1000
