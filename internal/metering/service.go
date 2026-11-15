@@ -146,7 +146,7 @@ func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 	frozen.ReservedCost = reserved
 	frozen.Generation = snapshot.Generation()
 	frozen.InputFormulaCost, _ = pricing.Cost(pricing.Tokens{Input: input}, q.Price(input))
-	r := storage.Record{RequestID: e.RequestID, AttemptIndex: 1, StartedAt: now, AppName: e.AppName, UserHash: e.Identity.Hash().Hex(), Anonymous: e.Identity.Anonymous(), Operation: string(e.Operation), Provider: name, ModelRequested: e.ModelRequested, ModelUsed: e.ModelEffective, Outcome: "ok", ReservedCost: reserved, Day: now.In(location).Format("2006-01-02"), Timezone: app.Timezone, Quote: frozen, RequestCount: 1}
+	r := storage.Record{RequestID: e.RequestID, AttemptIndex: 1, StartedAt: now, AppName: e.AppName, UserHash: e.Identity.Hash().Hex(), Anonymous: e.Identity.Anonymous(), Operation: string(e.Operation), Provider: name, ModelRequested: e.ModelRequested, ModelUsed: e.ModelEffective, Outcome: "ok", ReservedCost: reserved, Day: now.In(location).Format("2006-01-02"), Timezone: app.Timezone, Quote: frozen, RequestCount: 1, Detections: e.Sensitive.Clone()}
 	if s.limits == nil {
 		if err = s.store.Admit(ctx, r); err != nil {
 			s.warnStorage(err)

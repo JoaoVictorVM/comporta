@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
@@ -43,6 +44,9 @@ type AttemptResult struct {
 	// CountedInputTokens is the advisory answer of count_tokens, kept apart from
 	// the consumption counters so that it can never be charged as usage.
 	CountedInputTokens Optional[int64]
+	// Detections is the safe summary of the request's inspection, shared by every
+	// attempt of the request.
+	Detections sensitivedata.Summary
 }
 
 // ResultSink receives each result once. The default keeps nothing; it is not a
@@ -82,6 +86,7 @@ func newAttempt(envelope *Envelope, provider string, admission time.Time, now fu
 			ModelRequested: envelope.ModelRequested,
 			ModelUsed:      envelope.ModelEffective,
 			StartedAt:      began.UTC(),
+			Detections:     envelope.Sensitive.Clone(),
 		},
 		admission: admission,
 		began:     began,

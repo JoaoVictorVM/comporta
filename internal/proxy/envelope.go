@@ -18,6 +18,7 @@ import (
 
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/keys"
+	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
@@ -77,7 +78,10 @@ type Envelope struct {
 	BodySizeEffective int64
 	ImageCount        int64
 	ClientAskedUsage  bool
-	rawUser           string
+	// Sensitive is the safe summary of the inspection: categories, counts and
+	// actions only. Nil when nothing matched or nothing was inspected.
+	Sensitive sensitivedata.Summary
+	rawUser   string
 }
 
 // RawUser returns the identifier sent by the client, until identity is resolved. It is

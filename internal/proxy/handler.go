@@ -83,6 +83,9 @@ type Options struct {
 	// Loop cuts runaway agents after BeforeSend and before accounting. Without
 	// it no loop is detected.
 	Loop *LoopStage
+	// Sensitive inspects request text after BeforeSend and before the loop guard.
+	// Without it nothing is inspected, whatever the configuration says.
+	Sensitive *SensitiveStage
 	// Identity pseudonymizes end users. Without it conversation requests fail: leaving
 	// it out never turns pseudonymization off.
 	Identity *useridentity.Service
@@ -100,6 +103,7 @@ type Handler struct {
 	sink       ResultSink
 	hooks      Hooks
 	loop       *LoopStage
+	sensitive  *SensitiveStage
 	identity   *useridentity.Service
 	logger     *slog.Logger
 	now        func() time.Time
@@ -110,7 +114,7 @@ func NewHandler(options Options) *Handler {
 	handler := &Handler{
 		accounting: options.Accounting, gate: options.Gate,
 		auth: options.Auth, transports: options.Transports, sink: options.Sink,
-		hooks: options.Hooks, loop: options.Loop, identity: options.Identity, logger: options.Logger, now: options.Now,
+		hooks: options.Hooks, loop: options.Loop, sensitive: options.Sensitive, identity: options.Identity, logger: options.Logger, now: options.Now,
 	}
 	if handler.transports == nil {
 		handler.transports = NewTransportPool(nil, nil)
@@ -210,6 +214,8 @@ type operation struct {
 	attempt    *attempt
 	ticket     *runtimecontrol.Ticket
 	stream     bool
+	// sensitive holds the reverse map of this request until the operation ends.
+	sensitive *sensitiveState
 }
 
 // finish publishes the attempt and keeps a panic to this request. It is the one
@@ -232,6 +238,8 @@ func (o *operation) finish() {
 	if o.attempt != nil {
 		o.attempt.finish()
 	}
+	// Whatever ended the operation, its original values stop being referenced here.
+	o.sensitive.release()
 	// The completion is in the accounting queue by now, which is what a deletion
 	// barrier waits for.
 	o.ticket.Release()
@@ -327,6 +335,19 @@ func (o *operation) serve(r *http.Request) {
 			WriteFailure(o.w, o.format, rejection.failure())
 			return
 		}
+	}
+	// The inspection sees the body BeforeSend saw and its patches reach both the
+	// loop signature's request hash and the reservation estimate.
+	state, rejection := o.handler.sensitive.inspect(r.Context(), o.snapshot, request, o.w, o.handler.logger, o.handler.now)
+	o.sensitive = state
+	if rejection != nil {
+		if rejection.Code != CodeClientDisconnected {
+			writeRejection(o.w, o.format, rejection)
+		}
+		return
+	}
+	if state != nil {
+		effective = request.effectiveBody()
 	}
 	// Counted once per HTTP request, before any reservation: a cut never
 	// reserves budget and never reaches the provider.

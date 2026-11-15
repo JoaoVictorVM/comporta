@@ -14,7 +14,9 @@
     "tests/integration/proxy_limits_test.go",
     "tests/integration/limits_failmode_test.go",
     "tests/integration/limits_bootstrap_test.go",
-    "tests/integration/proxy_loopguard_test.go"
+    "tests/integration/proxy_loopguard_test.go",
+    "internal/proxy/sensitive_test.go",
+    "internal/proxy/sensitive_handler_test.go"
   ],
   "parser_only_go_files": [
     {

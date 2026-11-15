@@ -149,6 +149,14 @@ func (o *Outcome) Map() *ReverseMap {
 	return o.reverse
 }
 
+// DetachMap hands the reverse map over to the caller, who becomes responsible for
+// clearing it; Release no longer touches it.
+func (o *Outcome) DetachMap() {
+	if o != nil {
+		o.reverse = nil
+	}
+}
+
 // Release drops the rewritten fields and the reverse map. It is safe to call twice.
 func (o *Outcome) Release() {
 	if o == nil {

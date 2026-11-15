@@ -20,6 +20,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/pricing"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
 	"github.com/JoaoVictorVM/comporta/internal/runtimecontrol"
+	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
 	"github.com/JoaoVictorVM/comporta/internal/server"
 	"github.com/JoaoVictorVM/comporta/internal/storage/sqlite"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
@@ -109,6 +110,9 @@ func newServeCommand(out streams) *cobra.Command {
 			// memory only: a restart reopens every window and cooldown.
 			guard := loopguard.New(loopguard.Options{Source: manager, Logger: logger})
 			loop := &proxy.LoopStage{Guard: guard, Source: manager, Recorder: accounting}
+			// The scanner is stateless and its detectors are built once; each request
+			// reads its own policy from the snapshot it captured.
+			sensitive := &proxy.SensitiveStage{Scanner: sensitivedata.NewScanner(), Recorder: accounting}
 			adminAPI := admin.NewHandler(admin.HandlerOptions{
 				Credential: credential, Logger: logger,
 				Service: admin.NewService(admin.ServiceOptions{
@@ -116,7 +120,7 @@ func newServeCommand(out streams) *cobra.Command {
 					Metering: accounting, Limits: coordinator, Loop: guard, Usage: store, Logger: logger,
 				}),
 			})
-			if err := runGateway(command.Context(), logger, manager, keyManager, identity, accounting, control, loop, adminAPI, configEvents.Run, coordinator.Run, guard.Run); err != nil {
+			if err := runGateway(command.Context(), logger, manager, keyManager, identity, accounting, control, loop, sensitive, adminAPI, configEvents.Run, coordinator.Run, guard.Run); err != nil {
 				return err
 			}
 			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -138,10 +142,10 @@ func newServeCommand(out streams) *cobra.Command {
 	return command
 }
 
-func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service, accounting *metering.Service, gate proxy.Gate, loop *proxy.LoopStage, adminAPI http.Handler, configWorker, limitsWorker, loopWorker server.Worker) error {
+func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service, accounting *metering.Service, gate proxy.Gate, loop *proxy.LoopStage, sensitive *proxy.SensitiveStage, adminAPI http.Handler, configWorker, limitsWorker, loopWorker server.Worker) error {
 	guard := auth.NewGuard(nil, logger)
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), guard)
-	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Identity: identity, Logger: logger, Accounting: accounting, Gate: gate, Loop: loop})
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Identity: identity, Logger: logger, Accounting: accounting, Gate: gate, Loop: loop, Sensitive: sensitive})
 	defer handler.Close()
 	gateway, err := server.Open(ctx, server.Options{
 		Source:  manager,

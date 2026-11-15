@@ -125,8 +125,9 @@ func (s *Store) ReadEvents(ctx context.Context, f events.Filter) (events.Page, e
 		if err = rows.Scan(&e.ID, &e.Type, &micros, &e.RequestID, &e.App, &hash, &anonymous, &payload); err != nil {
 			return page, storage.ErrUnavailable
 		}
-		// Only loop cuts carry a subject in the event contract.
-		if e.Type == events.LoopCut && hash != "" && anonymous.Valid {
+		// Only loop cuts and sensitive data detections carry a subject in the
+		// event contract.
+		if (e.Type == events.LoopCut || e.Type == events.SensitiveDataDetected) && hash != "" && anonymous.Valid {
 			e.UserHash = hash
 			flag := anonymous.Bool
 			e.Anonymous = &flag
