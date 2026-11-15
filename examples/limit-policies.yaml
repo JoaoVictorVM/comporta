@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=../schema/comporta.schema.json
+#
+# The three on_limit policies against the fake provider, with no real
+# credentials. Start the fake provider with `comporta fake-provider` and the
+# gateway with `comporta serve --config examples/limit-policies.yaml`, create a
+# key per app with `comporta keys create <app>`, then send a few requests to
+# each app: the tiny budgets are exceeded by the first call. Prices are
+# illustrative overrides for the fake models.
+
+timezone: UTC
+data_dir: ./data-limit-policies
+
+providers:
+  fake:
+    api_format: anthropic
+    base_url: http://127.0.0.1:9090
+    models:
+      - fake-claude
+      - fake-haiku
+
+pricing:
+  fake-claude: {input: 3.00, output: 15.00, cache_write: 3.75, cache_read: 0.30}
+  fake-haiku: {input: 1.00, output: 5.00, cache_write: 1.25, cache_read: 0.10}
+
+apps:
+  # block answers 429 budget_exceeded with the limit name and its renewal.
+  strict:
+    allowed_models: [fake-claude]
+    on_limit: block
+    budget: {usd_per_day: 0.01}
+
+  # downgrade sends fake-haiku once the budget is exceeded, with the header
+  # x-comporta-downgraded-from: fake-claude, and blocks every call at the hard
+  # cap. Switching models changes the safety behavior the app sees: setting
+  # downgrade_to accepts that trade-off.
+  economy:
+    allowed_models: [fake-claude, fake-haiku]
+    max_tokens: 1024
+    on_limit: downgrade
+    downgrade_to: fake-haiku
+    budget: {usd_per_day: 0.01}
+    hard_cap: {usd_per_day: 0.05}
+
+  # warn forwards and records the call as warned. This app has a hard cap,
+  # so it still blocks there; without hard_cap, warn has no financial ceiling.
+  observed:
+    allowed_models: [fake-claude]
+    on_limit: warn
+    budget: {usd_per_day: 0.001}
+    hard_cap: {usd_per_day: 0.20}

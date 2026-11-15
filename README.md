@@ -2,9 +2,9 @@
 
 Open-source LLM gateway, in development.
 
-**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, sensitive data detection with redaction and blocking, and operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
+**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, sensitive data detection with redaction and blocking, limit policies (block, downgrade and warn, allowed models and output caps), and operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
 
-**Not implemented yet:** policies (including `max_tokens` caps and `allowed_models` enforcement on calls), fallback, cache, alerts, telemetry and the admin panel. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
+**Not implemented yet:** fallback, cache, alerts, telemetry and the admin panel. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
 
 ## Commands
 
@@ -56,7 +56,7 @@ The file is one YAML document of at most 1,000,000 bytes. Unknown fields, duplic
 
 - **Timezone:** the default is the system timezone when it has an IANA name. Windows zone names are not IANA names, so on Windows set `timezone` in the file or `TZ` in the environment.
 - **Money:** plain decimals with at most six decimal places, converted exactly. Scientific notation and quoted amounts are rejected.
-- **Hard caps:** with `on_limit: downgrade`, an omitted dimension defaults to 120% of its budget, rounded up. With `on_limit: warn`, an omitted dimension has no hard ceiling.
+- **Hard caps:** with `on_limit: downgrade`, an omitted dimension defaults to 120% of its budget, rounded up. With `on_limit: warn`, an omitted dimension has no hard ceiling. See [Limit policies](#limit-policies).
 
 ## Secrets
 
@@ -134,7 +134,7 @@ The proxy listens on `127.0.0.1:8080` and the admin listener on `127.0.0.1:8081`
 
 Every other path or method returns 404 `endpoint not allowed by Comporta`, without forwarding anything, so an app cannot use your provider key for files, batches or admin APIs. The admin listener has only `GET /healthz`, which answers `{"status":"ok"}` and says nothing about providers.
 
-**What reaches the provider:** the body exactly as received, byte for byte, including unknown fields, with documented patches. End-user fields are replaced by a pseudonym, as [End users](#end-users) describes. On OpenAI-format streaming, `stream_options.include_usage` is set to `true` so that usage can be measured, and if the client did not ask for it, the extra usage chunk is removed before delivery. Generation output is capped by the app's `max_tokens`: a higher value is reduced and an absent OpenAI limit is inserted. An existing `max_completion_tokens` field keeps its name. This cap makes the admission quote bounded before the remaining policy features are available. Only `content-type`, `anthropic-version` and `anthropic-beta` are forwarded; every other client header is dropped, and the app key is replaced by the provider key. The destination comes only from the configuration. Redirects are never followed, proxy environment variables are ignored, and a remote provider name that resolves to a private, loopback or link-local address is refused. A base URL may end in `/v1` or not; the same path results.
+**What reaches the provider:** the body exactly as received, byte for byte, including unknown fields, with documented patches. End-user fields are replaced by a pseudonym, as [End users](#end-users) describes. On OpenAI-format streaming, `stream_options.include_usage` is set to `true` so that usage can be measured, and if the client did not ask for it, the extra usage chunk is removed before delivery. Generation output is capped by the app's `max_tokens`: a higher value is reduced and an absent OpenAI limit is inserted. An existing `max_completion_tokens` field keeps its name, and the cap bounds the admission quote. With `on_limit: downgrade` the `model` field can be replaced, see [Limit policies](#limit-policies). Only `content-type`, `anthropic-version` and `anthropic-beta` are forwarded; every other client header is dropped, and the app key is replaced by the provider key. The destination comes only from the configuration. Redirects are never followed, proxy environment variables are ignored, and a remote provider name that resolves to a private, loopback or link-local address is refused. A base URL may end in `/v1` or not; the same path results.
 
 **Errors** use the format of the route and carry a `comporta_code`. Provider error messages are never passed on, because they can echo prompts: status and category are preserved and the message is rebuilt. Inside a stream already started, the failure is an error event followed by closing the stream, so a truncated stream never looks like a success.
 
@@ -144,7 +144,8 @@ Every other path or method returns 404 `endpoint not allowed by Comporta`, witho
 | `host_not_allowed` | 421 | `Host` not allowed |
 | `invalid_request` | 400 | Invalid JSON, types, duplicate keys or query |
 | `user_required`, `user_invalid`, `user_email_not_allowed`, `user_document_not_allowed` | 400 | End-user identifier missing or refused, see [End users](#end-users) |
-| `model_unknown`, `provider_format_mismatch` | 400 | Model not declared, or declared in another API format |
+| `model_unknown`, `provider_format_mismatch` | 400 | Model not declared, or declared in another API format (also a downgrade target in another format) |
+| `model_not_allowed` | 403 | Model outside the app's `allowed_models` |
 | `price_unknown`, `pricing_overflow` | 400 | No effective price, or cost outside the supported integer range |
 | `rate_limited`, `concurrency_exceeded`, `budget_exceeded`, `budget_reserved`, `hard_cap_exceeded` | 429 | A limit or budget, see [Limits and budgets](#limits-and-budgets) |
 | `limits_unavailable` | 503 | Limit state cannot be verified under `fail_closed` |
@@ -162,7 +163,7 @@ Every other path or method returns 404 `endpoint not allowed by Comporta`, witho
 
 ### Model catalog
 
-`GET /v1/models` lists the app's `allowed_models` in the format of the client, without calling a provider, so it costs nothing and says nothing about availability. `created` and `created_at` hold fixed values because the configuration has no release dates. The Anthropic format supports `limit`, `after_id` and `before_id`. This list is only a listing: until policies exist, an app can still call any declared model.
+`GET /v1/models` lists the app's `allowed_models` in the format of the client, without calling a provider, so it costs nothing and says nothing about availability. `created` and `created_at` hold fixed values because the configuration has no release dates. The Anthropic format supports `limit`, `after_id` and `before_id`. Calls are held to the same list: any other model gets 403 `model_not_allowed`.
 
 ### Usage and privacy
 
@@ -223,7 +224,7 @@ apps:
 - **Reserve and settle:** before forwarding, the worst case (the cost of the frozen quote, and estimated input plus capped output in tokens) is reserved against every applicable dimension of the app and the user, atomically: one refusal changes nothing. After the response the reservation is replaced by the real cost. A cancellation or error settles what was consumed; when usage is incomplete, each dimension is charged the greater of what was observed and what was reserved. An attempt that was never sent releases its money and tokens but still counts as a request.
 - **`count_tokens`** counts toward requests per minute and concurrency only. `GET /v1/models` counts toward nothing.
 - **Order:** limits are evaluated as request rate, token rate, concurrency, hard caps, then budgets, app before user, and within budgets USD per day, USD per month, tokens per day, tokens per month. The first exceeded limit names the refusal. Hard caps use the same balances as budgets with their own ceilings.
-- **Policies:** this release always blocks. An `on_limit` of `downgrade` or `warn` is accepted by the configuration and logged as not implemented yet; it does not downgrade or warn.
+- **Policies:** `on_limit` can downgrade or warn instead of blocking a budget, never a rate or concurrency limit; see [Limit policies](#limit-policies).
 
 Refusals use the error envelope of each SDK, with HTTP 429 and `rate_limit_error`, plus `limit_name` (the configuration path), `scope` (`app` or `user`), `reason` and, when known, `renews_at` (UTC, RFC 3339):
 
@@ -254,7 +255,36 @@ Every refusal before an attempt is stored as a blocked record with attempt 0, ze
 
 **Measured cost:** admission and settlement reuse the two synchronous `synchronous=FULL` commits that metering already made, now carrying the reservation. On the reference Windows machine, sequential non-streaming calls through the fake provider measured a p95 of 6.7 ms against 2.0 ms without metering and limits, and streaming time to first byte a p95 of 3.6 ms against 2.6 ms. The coordinator alone takes about 27 µs per reserve and settle. The sustained load target of 200 requests per second for 5 minutes was not measured in this release.
 
-**For later features:** policies, the panel, alerts, telemetry, fallback, cache and multiple instances consume typed decisions, a consistent state per app and user (used, reserved, limit, renewal, degradation, active and pending timezone) and a reservation handle with reserve, settle and release. `comporta users forget` removes a user's limit state together with the user's records, see Operations.
+**For later features:** the panel, alerts, telemetry, fallback, cache and multiple instances consume typed decisions, a consistent state per app and user (used, reserved, limit, renewal, degradation, active and pending timezone) and a reservation handle with reserve, settle and release. `comporta users forget` removes a user's limit state together with the user's records, see Operations.
+
+### Limit policies
+
+`on_limit` chooses what happens when a calendar budget is exceeded. Rate, token rate and concurrency limits always block, whatever the policy: they protect capacity, not money.
+
+```yaml
+apps:
+  bot-discord:
+    allowed_models: [claude-sonnet-4-6, claude-haiku-4-5]
+    max_tokens: 4096                 # default; larger values are lowered
+    on_limit: downgrade              # block (default), downgrade or warn
+    downgrade_to: claude-haiku-4-5
+    budget: {usd_per_day: 2.00}
+    hard_cap: {usd_per_day: 2.40}    # 120% of the budget by default with downgrade
+```
+
+- **`block`** answers 429 `budget_exceeded` with `limit_name`, `scope`, `reason` and `renews_at`, as [Limits and budgets](#limits-and-budgets) describes. A budget committed only by calls in flight still answers `budget_reserved`.
+- **`downgrade`** sends `downgrade_to` instead of the requested model once a budget is exceeded, and continues while spend stays below the hard cap. Only the `model` field of the body changes, together with the documented output cap and identity patches; unknown fields and the content already sanitized by [sensitive data detection](#sensitive-data-detection) are kept. The target is priced on its own body, reserved and settled at its own price, and the answer carries `x-comporta-downgraded-from: <requested model>` with the status line, before the first stream event. The `model` field of the response is the one the provider returned; it is never rewritten. A request that already names the target is admitted as downgraded without the header. A target in another API format than the endpoint is refused with 400 `provider_format_mismatch` without calling any provider; `config validate` warns about such apps. If the target provider cannot be reached the answer is 502 and the original model is never tried instead.
+- **`warn`** forwards the request unchanged, records it as `warned` and emits a durable `warned` event at admission. **Without `hard_cap`, warn has no financial ceiling**: spend can grow past the budget until the window renews. Capacity limits still apply.
+- **Hard cap:** once spent plus reserved reaches the hard cap, every new generation of the app or user is refused with 429 `hard_cap_exceeded` under every policy, even one that would cost nothing, until the window renews: `daily hard cap of $2.40 for app site-suporte would be exceeded (spent $2.40, reserved $0.00); renews at 00:00 America/Sao_Paulo (in 3h12m)`. A request whose projection lands exactly on the cap is still admitted. With `downgrade`, the cap is checked against the target that is actually sent, so a cheaper target can fit where the original would not. A hard cap alone, without an exceeded budget, never triggers a downgrade.
+- **Allowed models:** a request for a model outside `allowed_models` gets 403 `model "claude-opus-x" is not allowed for app bot-discord` before anything is reserved or sent, also on `count_tokens`. A downgrade never turns a forbidden model into an allowed one.
+- **Output cap:** generation output is capped by `max_tokens`; a higher value is lowered, and an OpenAI request without an output limit gets it inserted. The cap applies to both the requested model and the target.
+- **Unknown state:** a budget whose history cannot be proven is never relaxed by `warn` or `downgrade`. With `fail_mode: fail_open`, calls proceed from memory while limit state is unavailable, so the hard cap is not a guarantee during that time.
+
+**Safety trade-off:** downgrade and, later, fallback send the conversation to a different model, which can behave differently on safety, refusals and quality. Configuring `downgrade_to` means accepting that trade-off for the app. A lower price is never inferred from the model name: compare the prices of both models, and rely on the hard cap as the financial bound.
+
+Every admission decided by a policy keeps the decision with its record: `PolicyOutcome` (`blocked`, `warned` or `downgraded`), the limit, scope, reason and renewal that triggered it, and the requested and used models, apart from the transport result, so a warned call that later failed upstream still shows its error. `warned` and `downgraded` events are written in the same transaction as the reservation, carry the request ID, app, limit and models but no user hash or content, and are removed by `comporta users forget` with the user's requests. A configuration reload that overtakes an admission prepares the request again on the new configuration (allowlist, output cap, sanitization, target and price) under the same request ID, at most three times before answering 503; a call already admitted keeps its model, body and price, and a stream in flight finishes even if the new cap is lower.
+
+[`examples/limit-policies.yaml`](examples/limit-policies.yaml) shows the three modes on the fake provider, without real credentials.
 
 ### Loop guard
 

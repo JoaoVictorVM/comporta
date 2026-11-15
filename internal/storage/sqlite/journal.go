@@ -51,6 +51,13 @@ func validate(r storage.Record) error {
 	if r.Detections != nil && (len(r.Detections) == 0 || r.Detections.Validate() != nil) {
 		return storage.ErrInvalid
 	}
+	if err := r.ValidatePolicy(); err != nil {
+		return err
+	}
+	// A downgraded transport outcome only exists when the policy downgraded.
+	if r.Outcome == "downgraded" && r.PolicyOutcome != "downgraded" {
+		return storage.ErrInvalid
+	}
 	// Attempt 0 is a request refused locally before any attempt: it is terminal,
 	// costs nothing and never counts as a request in the generation totals. A
 	// loop cut is only ever attempt 0.
@@ -227,7 +234,8 @@ func (s *Store) Pending(ctx context.Context) ([]storage.Pending, error) {
 func sameAdmission(a, b storage.Record) bool {
 	qa, _ := json.Marshal(a.Quote)
 	qb, _ := json.Marshal(b.Quote)
-	return a.RequestID == b.RequestID && a.AttemptIndex == b.AttemptIndex && a.AppName == b.AppName && a.UserHash == b.UserHash && a.Anonymous == b.Anonymous && a.Operation == b.Operation && a.Provider == b.Provider && a.ModelRequested == b.ModelRequested && a.ModelUsed == b.ModelUsed && a.StartedAt.Equal(b.StartedAt) && a.Day == b.Day && a.Timezone == b.Timezone && a.ReservedCost == b.ReservedCost && string(qa) == string(qb)
+	return a.RequestID == b.RequestID && a.AttemptIndex == b.AttemptIndex && a.AppName == b.AppName && a.UserHash == b.UserHash && a.Anonymous == b.Anonymous && a.Operation == b.Operation && a.Provider == b.Provider && a.ModelRequested == b.ModelRequested && a.ModelUsed == b.ModelUsed && a.StartedAt.Equal(b.StartedAt) && a.Day == b.Day && a.Timezone == b.Timezone && a.ReservedCost == b.ReservedCost && string(qa) == string(qb) &&
+		a.PolicyOutcome == b.PolicyOutcome && a.PolicyLimitName == b.PolicyLimitName
 }
 
 func (s *Store) Commit(ctx context.Context, records []storage.Record) error {
@@ -410,7 +418,9 @@ func (s *Store) Recover(ctx context.Context, now time.Time) error {
 			r.Cost = r.ReservedCost
 			r.UsageMissing = true
 			r.Recovered = true
-			r.Outcome = "ok"
+			if r.Outcome != "downgraded" {
+				r.Outcome = "ok"
+			}
 			r.RequestCount = 1
 		}
 		batch = append(batch, r)

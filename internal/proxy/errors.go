@@ -20,6 +20,7 @@ const (
 	CodeHostNotAllowed          Code = "host_not_allowed"
 	CodeInvalidRequest          Code = "invalid_request"
 	CodeModelUnknown            Code = "model_unknown"
+	CodeModelNotAllowed         Code = "model_not_allowed"
 	CodeProviderFormatMismatch  Code = "provider_format_mismatch"
 	CodeUnsupportedMediaType    Code = "unsupported_media_type"
 	CodeRequestTooLarge         Code = "request_too_large"

@@ -63,13 +63,12 @@ func (s *Service) UseLimits(manager *limits.Manager, store storage.LimitStore, s
 
 var errReloaded = &proxy.Rejection{Status: 503, Code: proxy.CodeInternalError, Class: proxy.ClassInternal, Message: "configuration changed during admission; retry the request"}
 
-// Admit freezes the quote, then asks the limit coordinator for a reservation
-// committed together with the journal entry. A reload that overtakes the
-// admission restarts it on the current snapshot, quote included, so a stale
-// ceiling is never applied after a newer one.
+// Admit admits the request as prepared, without a policy target. A reload that
+// overtakes the admission restarts it on the current snapshot, quote included,
+// so a stale ceiling is never applied after a newer one.
 func (s *Service) Admit(ctx context.Context, snapshot *config.Snapshot, e *proxy.Envelope, name string, p config.Provider) (proxy.Admission, *proxy.Rejection) {
 	for attempt := 0; ; attempt++ {
-		admission, rejection, stale := s.admit(ctx, snapshot, e, name, p)
+		admission, rejection, stale := s.admit(ctx, snapshot, e, []proxy.Candidate{original(e, name, p)})
 		if !stale {
 			return admission, rejection
 		}
@@ -88,7 +87,90 @@ func (s *Service) Admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 	}
 }
 
-func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy.Envelope, name string, p config.Provider) (proxy.Admission, *proxy.Rejection, bool) {
+// AdmitCandidates prices every candidate on the same snapshot and lets the
+// limit coordinator choose and reserve one. A reload that overtakes the
+// admission comes back as Stale: the bodies depend on the snapshot, so only
+// the proxy can prepare them again.
+func (s *Service) AdmitCandidates(ctx context.Context, snapshot *config.Snapshot, e *proxy.Envelope, candidates []proxy.Candidate) (proxy.Admission, *proxy.Rejection) {
+	admission, rejection, stale := s.admit(ctx, snapshot, e, candidates)
+	if stale {
+		rejection := *errReloaded
+		rejection.Stale = true
+		return proxy.Admission{}, &rejection
+	}
+	return admission, rejection
+}
+
+func original(e *proxy.Envelope, name string, p config.Provider) proxy.Candidate {
+	return proxy.Candidate{ID: proxy.CandidateOriginal, Model: e.ModelEffective, ProviderName: name, Provider: p, BodySizeEffective: e.BodySizeEffective}
+}
+
+// priced is a candidate with the quote frozen for its own body.
+type priced struct {
+	candidate proxy.Candidate
+	quote     pricing.Quote
+	frozen    storage.Quote
+	tokens    int64
+	reserved  config.Microusd
+}
+
+func (s *Service) price(snapshot *config.Snapshot, e *proxy.Envelope, c proxy.Candidate) (priced, *proxy.Rejection) {
+	out := priced{candidate: c}
+	reject := func(code, msg string) (priced, *proxy.Rejection) {
+		return out, &proxy.Rejection{Status: 400, Code: proxy.Code(code), Class: proxy.ClassInvalidRequest, Message: msg}
+	}
+	var err error
+	if e.Operation == proxy.OperationGeneration {
+		out.quote, err = s.catalog.Resolve(snapshot, c.Provider, c.Model)
+		if err != nil {
+			return reject("price_unknown", fmt.Sprintf("no price defined for model %q; add it under pricing in comporta.yaml", bounded(c.Model)))
+		}
+	}
+	input, err := pricing.EstimateInput(e.BodySizeOriginal, c.BodySizeEffective, e.ImageCount)
+	if err != nil {
+		return reject("pricing_overflow", pricing.ErrOverflow.Error())
+	}
+	if e.Operation == proxy.OperationGeneration {
+		out.reserved, err = out.quote.Estimate(e.BodySizeOriginal, c.BodySizeEffective, e.ImageCount, e.MaxTokens.Value)
+		if err != nil {
+			return reject("pricing_overflow", pricing.ErrOverflow.Error())
+		}
+		if e.MaxTokens.Value < 0 || input > math.MaxInt64-e.MaxTokens.Value {
+			return reject("pricing_overflow", pricing.ErrOverflow.Error())
+		}
+		// The token reservation is the estimated input plus the capped output,
+		// the same worst case the cost reservation is built from.
+		out.tokens = input + e.MaxTokens.Value
+	}
+	out.frozen = out.quote.Frozen()
+	out.frozen.EstimatedInput = input
+	out.frozen.EstimatedOutput = e.MaxTokens.Value
+	out.frozen.ReservedCost = out.reserved
+	out.frozen.Generation = snapshot.Generation()
+	out.frozen.InputFormulaCost, _ = pricing.Cost(pricing.Tokens{Input: input}, out.quote.Price(input))
+	return out, nil
+}
+
+// withPolicy fills the record of the chosen candidate. It is pure, so a repeat
+// that finds the reservation already made builds the same record.
+func withPolicy(r storage.Record, chosen priced, sel limits.Selection) storage.Record {
+	r.Provider, r.ModelUsed = chosen.candidate.ProviderName, chosen.candidate.Model
+	r.ReservedCost, r.Quote = chosen.reserved, chosen.frozen
+	r.PolicyOutcome = string(sel.Outcome)
+	if sel.Outcome == limits.PolicyDowngraded {
+		r.Outcome = "downgraded"
+	}
+	if v := sel.Trigger; v != nil {
+		r.PolicyLimitName, r.PolicyScope, r.PolicyReason = v.LimitName, string(v.Scope), string(v.Reason)
+		if v.RenewsAt != nil {
+			renew := v.RenewsAt.UTC()
+			r.PolicyRenewsAt = &renew
+		}
+	}
+	return r
+}
+
+func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy.Envelope, candidates []proxy.Candidate) (proxy.Admission, *proxy.Rejection, bool) {
 	reject := func(status int, code, msg string) (proxy.Admission, *proxy.Rejection, bool) {
 		class := proxy.ClassInvalidRequest
 		if status >= 500 {
@@ -96,31 +178,27 @@ func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 		}
 		return proxy.Admission{}, &proxy.Rejection{Status: status, Code: proxy.Code(code), Class: class, Message: msg}, false
 	}
-	q := pricing.Quote{}
-	var err error
-	if e.Operation == proxy.OperationGeneration {
-		q, err = s.catalog.Resolve(snapshot, p, e.ModelEffective)
-		if err != nil {
-			return reject(400, "price_unknown", fmt.Sprintf("no price defined for model %q; add it under pricing in comporta.yaml", bounded(e.ModelEffective)))
-		}
+	if len(candidates) == 0 || len(candidates) > 2 || candidates[0].ID != proxy.CandidateOriginal || candidates[0].Unavailable != nil ||
+		(len(candidates) == 2 && candidates[1].ID != proxy.CandidateDowngrade) {
+		return reject(500, "internal_error", "internal error")
 	}
-	input, err := pricing.EstimateInput(e.BodySizeOriginal, e.BodySizeEffective, e.ImageCount)
-	if err != nil {
-		return reject(400, "pricing_overflow", pricing.ErrOverflow.Error())
+	base, rejection := s.price(snapshot, e, candidates[0])
+	if rejection != nil {
+		return proxy.Admission{}, rejection, false
 	}
-	reserved := config.Microusd(0)
-	tokens := int64(0)
-	if e.Operation == proxy.OperationGeneration {
-		reserved, err = q.Estimate(e.BodySizeOriginal, e.BodySizeEffective, e.ImageCount, e.MaxTokens.Value)
-		if err != nil {
-			return reject(400, "pricing_overflow", pricing.ErrOverflow.Error())
+	// A target that cannot be prepared or priced only matters if the policy
+	// needs it; then the request is refused without being sent.
+	var target *priced
+	var targetRefusal *proxy.Rejection
+	if len(candidates) == 2 {
+		targetRefusal = candidates[1].Unavailable
+		if targetRefusal == nil {
+			quoted, refusal := s.price(snapshot, e, candidates[1])
+			if refusal == nil {
+				target = &quoted
+			}
+			targetRefusal = refusal
 		}
-		if e.MaxTokens.Value < 0 || input > math.MaxInt64-e.MaxTokens.Value {
-			return reject(400, "pricing_overflow", pricing.ErrOverflow.Error())
-		}
-		// The token reservation is the estimated input plus the capped output,
-		// the same worst case the cost reservation is built from.
-		tokens = input + e.MaxTokens.Value
 	}
 	s.mu.Lock()
 	bad := s.unhealthy
@@ -140,13 +218,7 @@ func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 		<-s.slots
 		return reject(503, "usage_storage_unavailable", storage.ErrUnavailable.Error())
 	}
-	frozen := q.Frozen()
-	frozen.EstimatedInput = input
-	frozen.EstimatedOutput = e.MaxTokens.Value
-	frozen.ReservedCost = reserved
-	frozen.Generation = snapshot.Generation()
-	frozen.InputFormulaCost, _ = pricing.Cost(pricing.Tokens{Input: input}, q.Price(input))
-	r := storage.Record{RequestID: e.RequestID, AttemptIndex: 1, StartedAt: now, AppName: e.AppName, UserHash: e.Identity.Hash().Hex(), Anonymous: e.Identity.Anonymous(), Operation: string(e.Operation), Provider: name, ModelRequested: e.ModelRequested, ModelUsed: e.ModelEffective, Outcome: "ok", ReservedCost: reserved, Day: now.In(location).Format("2006-01-02"), Timezone: app.Timezone, Quote: frozen, RequestCount: 1, Detections: e.Sensitive.Clone()}
+	r := storage.Record{RequestID: e.RequestID, AttemptIndex: 1, StartedAt: now, AppName: e.AppName, UserHash: e.Identity.Hash().Hex(), Anonymous: e.Identity.Anonymous(), Operation: string(e.Operation), Provider: base.candidate.ProviderName, ModelRequested: e.ModelRequested, ModelUsed: base.candidate.Model, Outcome: "ok", ReservedCost: base.reserved, Day: now.In(location).Format("2006-01-02"), Timezone: app.Timezone, Quote: base.frozen, RequestCount: 1, Detections: e.Sensitive.Clone()}
 	if s.limits == nil {
 		if err = s.store.Admit(ctx, r); err != nil {
 			s.warnStorage(err)
@@ -154,6 +226,7 @@ func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 			return reject(503, "usage_storage_unavailable", storage.ErrUnavailable.Error())
 		}
 		var once sync.Once
+		q := base.quote
 		return proxy.Admission{Complete: func(result proxy.AttemptResult) { once.Do(func() { s.complete(r, q, nil, result) }) }}, nil, false
 	}
 	policy, ok := limits.PolicyFor(snapshot, e.AppName)
@@ -166,10 +239,25 @@ func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 		operation = limits.OperationCountTokens
 	}
 	request := limits.Request{RequestID: e.RequestID, AttemptIndex: 1, Subject: limits.Subject{App: e.AppName, Hash: r.UserHash, Anonymous: r.Anonymous},
-		Operation: operation, EstimatedTokens: tokens, ReservedCost: reserved, Generation: snapshot.Generation()}
-	handle, decision, err := s.limits.Reserve(policy, request, func(res storage.Reservation) (int64, error) {
-		r.LimitsDegraded = res.Quote.Degraded
-		return s.limitStore.AdmitReserved(ctx, r, res)
+		Operation: operation, Generation: snapshot.Generation()}
+	options := []limits.Candidate{{ID: limits.CandidateOriginal, Model: base.candidate.Model, EstimatedTokens: base.tokens, ReservedCost: base.reserved}}
+	if len(candidates) == 2 {
+		option := limits.Candidate{ID: limits.CandidateDowngrade, Model: candidates[1].Model, Unavailable: target == nil}
+		if target != nil {
+			option.EstimatedTokens, option.ReservedCost = target.tokens, target.reserved
+		}
+		options = append(options, option)
+	}
+	chosen := func(sel limits.Selection) priced {
+		if sel.Candidate == limits.CandidateDowngrade && target != nil {
+			return *target
+		}
+		return base
+	}
+	handle, decision, sel, err := s.limits.ReserveSelect(policy, request, options, func(res storage.Reservation, sel limits.Selection) (int64, error) {
+		admitted := withPolicy(r, chosen(sel), sel)
+		admitted.LimitsDegraded = res.Quote.Degraded
+		return s.limitStore.AdmitReserved(ctx, admitted, res)
 	})
 	switch {
 	case errors.Is(err, limits.ErrStale):
@@ -178,6 +266,14 @@ func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 	case errors.Is(err, limits.ErrUnavailable):
 		s.block(r, now, 503, string(proxy.CodeLimitsUnavailable), string(proxy.ClassInternal), "")
 		return reject(503, string(proxy.CodeLimitsUnavailable), limits.ErrUnavailable.Error())
+	case errors.Is(err, limits.ErrTargetUnavailable):
+		answer := targetRefusal
+		if answer == nil {
+			answer = &proxy.Rejection{Status: 503, Code: proxy.CodeInternalError, Class: proxy.ClassInternal, Message: "internal error"}
+		}
+		blocked := withPolicy(r, base, limits.Selection{Outcome: limits.PolicyBlocked, Trigger: decision.Primary})
+		s.block(blocked, now, answer.Status, string(answer.Code), string(answer.Class), "")
+		return proxy.Admission{}, answer, false
 	case errors.Is(err, limits.ErrIntegrity), errors.Is(err, limits.ErrConflict):
 		<-s.slots
 		s.logger.Error("limit state integrity failure; request rejected")
@@ -187,12 +283,17 @@ func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 		<-s.slots
 		return reject(503, "usage_storage_unavailable", storage.ErrUnavailable.Error())
 	case !decision.Allowed:
-		return s.refuse(r, now, *decision.Primary)
+		return s.refuse(withPolicy(r, base, limits.Selection{Outcome: limits.PolicyBlocked, Trigger: decision.Primary}), now, *decision.Primary)
 	}
+	admitted := withPolicy(r, chosen(sel), sel)
+	admitted.LimitsDegraded = handle.Degraded()
+	q := chosen(sel).quote
 	var once sync.Once
 	return proxy.Admission{
-		Complete: func(result proxy.AttemptResult) { once.Do(func() { s.complete(r, q, handle, result) }) },
+		Complete: func(result proxy.AttemptResult) { once.Do(func() { s.complete(admitted, q, handle, result) }) },
 		Budget:   budgetHeaders(decision),
+		Selected: proxy.CandidateID(sel.Candidate),
+		Policy:   proxy.PolicyOutcome(sel.Outcome),
 	}, nil, false
 }
 

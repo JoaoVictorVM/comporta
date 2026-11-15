@@ -227,6 +227,7 @@ func validateApp(app *App, path string, cfg *Config, owners map[string]string, d
 	}
 
 	validateDowngrade(app, path, cfg, owners, d, opts)
+	warnDowngradeFormats(app, path, cfg, owners, d, warnings)
 	validateFallback(app, path, cfg, owners, d, warnings)
 
 	derive := app.OnLimit == OnLimitDowngrade
@@ -276,6 +277,31 @@ func validateDowngrade(app *App, path string, cfg *Config, owners map[string]str
 		d.reportAt(CodeInvalidReference, targetPath, "price of model "+target+" cannot be verified; add a pricing override")
 	case !priced:
 		d.reportAt(CodeInvalidReference, targetPath, "model "+target+" has no known price")
+	}
+}
+
+// warnDowngradeFormats accepts an app whose allowed models span API formats,
+// but tells the operator that requests in another format than the target are
+// refused at the limit instead of downgraded, until translation exists.
+func warnDowngradeFormats(app *App, path string, cfg *Config, owners map[string]string, d *decoder, warnings *diagnosticList) {
+	if app.OnLimit != OnLimitDowngrade || app.DowngradeTo == "" {
+		return
+	}
+	owner, declared := owners[app.DowngradeTo]
+	if !declared {
+		return
+	}
+	target := cfg.Providers[owner].APIFormat
+	for _, model := range app.AllowedModels {
+		if other, ok := owners[model]; ok && cfg.Providers[other].APIFormat != target {
+			targetPath := joinPath(path, "downgrade_to")
+			position := d.positions[targetPath]
+			warnings.add(Diagnostic{
+				Code: CodeDowngradeMixedFormat, Path: targetPath, Line: position.Line, Column: position.Column,
+				Message: "allowed_models include another API format than downgrade_to; those requests are blocked at the limit instead of downgraded until cross-provider translation exists",
+			})
+			return
+		}
 	}
 }
 

@@ -63,6 +63,11 @@ type fixtureOptions struct {
 	loop        *LoopStage
 	sensitive   *SensitiveStage
 	accounting  Accounting
+	// config replaces the whole configuration; %[1]s is the upstream URL.
+	config string
+	// reloads gives the handler the configuration manager as its Source.
+	reloads bool
+	source  SnapshotSource
 }
 
 func newFixture(t testing.TB, upstream string, options fixtureOptions) *fixture {
@@ -74,6 +79,9 @@ func newFixture(t testing.TB, upstream string, options fixtureOptions) *fixture 
 		extra = "    require_user: true\n" + extra
 	}
 	content := fmt.Sprintf(configTemplate, upstream, extra)
+	if options.config != "" {
+		content = fmt.Sprintf(options.config, upstream)
+	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +103,9 @@ func newFixture(t testing.TB, upstream string, options fixtureOptions) *fixture 
 		t.Fatal(err)
 	}
 	sink := &collector{}
+	if options.reloads {
+		options.source = manager
+	}
 	handler := newTestHandler(authHTTP, sink, identity, options)
 	fx := &fixture{t: t, config: manager, path: path, key: created.Key.Reveal(), sink: sink, handler: handler, identity: identity}
 	fx.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -252,7 +263,7 @@ func newTestHandler(authHTTP *auth.HTTP, sink ResultSink, identity *useridentity
 	if options.logs != nil {
 		logger = slog.New(slog.NewJSONHandler(options.logs, nil))
 	}
-	return NewHandler(Options{Auth: authHTTP, Sink: sink, Hooks: options.hooks, Identity: identity, Logger: logger, Gate: options.gate, Loop: options.loop, Sensitive: options.sensitive, Accounting: options.accounting})
+	return NewHandler(Options{Auth: authHTTP, Sink: sink, Hooks: options.hooks, Identity: identity, Logger: logger, Gate: options.gate, Loop: options.loop, Sensitive: options.sensitive, Accounting: options.accounting, Source: options.source})
 }
 
 func startBenchUpstream(b *testing.B) string {

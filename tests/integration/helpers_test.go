@@ -276,7 +276,7 @@ func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gat
 		inspection = &proxy.SensitiveStage{Scanner: sensitivedata.NewScanner(), Recorder: accounting}
 	}
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), auth.NewGuard(nil, nil))
-	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results, Identity: identity, Hooks: hooks, Accounting: accountant, Loop: stage, Sensitive: inspection})
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results, Identity: identity, Hooks: hooks, Accounting: accountant, Loop: stage, Sensitive: inspection, Source: manager})
 	runtime, err := server.Open(context.Background(), server.Options{
 		Source:  manager,
 		Proxy:   server.ProxySurface(manager, handler),

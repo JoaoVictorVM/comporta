@@ -3,6 +3,7 @@ package limits
 import (
 	"errors"
 	"math"
+	"sync"
 	"testing"
 
 	"github.com/JoaoVictorVM/comporta/internal/config"
@@ -245,5 +246,67 @@ func TestBudgetHeaderPicksSmallestFraction(t *testing.T) {
 	}
 	if d.Budget.LimitName != "apps.bot.per_user.budget.usd_per_day" || d.Budget.Remaining != 50_000 || d.Budget.Unit != UnitMicrousd {
 		t.Fatalf("most restrictive budget: %+v", d.Budget)
+	}
+}
+
+func TestPolicySelectionAndReservationAreAtomic(t *testing.T) {
+	for _, onLimit := range []config.OnLimit{config.OnLimitWarn, config.OnLimitDowngrade} {
+		e := policyEnv(t, onLimit, Set{Budget: budget(100), HardCap: budget(1000), Limits: config.Limits{MaxConcurrent: 500}}, Set{})
+		u := user("bot", 1)
+		e.spend(u, 100)
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		admitted := 0
+		reserved := config.Microusd(0)
+		for i := 0; i < 200; i++ {
+			r := e.request(u, 1, 10)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				h, d, sel, err := e.choose(r, original(r), target(1, 5))
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if d.Allowed {
+					mu.Lock()
+					admitted++
+					reserved += h.request.ReservedCost
+					mu.Unlock()
+					if sel.Outcome == PolicyNone {
+						t.Error("admission past the budget without a policy outcome")
+					}
+				}
+			}()
+		}
+		wg.Wait()
+		if 100+reserved > 1000 {
+			t.Fatalf("%s: reservations crossed the hard cap: %d", onLimit, 100+reserved)
+		}
+		// One reservation, one rate event and one slot per admitted request.
+		if got := len(e.store.reservations) - 1; got != admitted || len(e.store.rates)-1 != admitted || e.manager.concurrent[u] != int64(admitted) {
+			t.Fatalf("%s: %d admitted, %d reservations, %d rate events, %d slots", onLimit, admitted, got, len(e.store.rates)-1, e.manager.concurrent[u])
+		}
+	}
+}
+
+func TestRetryReturnsSamePolicySelection(t *testing.T) {
+	e := policyEnv(t, config.OnLimitDowngrade, Set{Budget: budget(100), HardCap: budget(200)}, Set{})
+	u := user("bot", 1)
+	e.spend(u, 100)
+	r := e.request(u, 1, 30)
+	h, _, sel, err := e.choose(r, original(r), target(1, 10))
+	if err != nil || sel.Outcome != PolicyDowngraded {
+		t.Fatalf("first: %+v %v", sel, err)
+	}
+	again, d, repeat, err := e.choose(r, original(r), target(1, 10))
+	if err != nil || again != h || !d.Allowed || repeat.Outcome != PolicyDowngraded || repeat.Candidate != CandidateDowngrade || h.Selection() != sel {
+		t.Fatalf("repeat changed the decision: %+v %+v %v", repeat, d, err)
+	}
+	if _, _, _, err := e.choose(r, original(r), target(1, 11)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("different candidates under the same key: %v", err)
+	}
+	if len(e.store.reservations) != 2 || len(e.store.rates) != 2 {
+		t.Fatal("a repeat reserved twice")
 	}
 }

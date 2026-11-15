@@ -103,6 +103,7 @@ func (m *Manager) Recover(ctx context.Context, snapshot *config.Snapshot) error 
 			key: handleKey{r.RequestID, r.AttemptIndex}, app: r.AppName, items: r.Items, state: storage.ReservationReserved, finished: true,
 			request: Request{RequestID: r.RequestID, AttemptIndex: r.AttemptIndex, Subject: Subject{App: r.AppName, Hash: r.Subject, Anonymous: r.Anonymous},
 				Operation: Operation(r.Quote.Operation), EstimatedTokens: r.Quote.EstimatedTokens, ReservedCost: r.Quote.ReservedCost, Generation: r.Quote.Generation},
+			selection: Selection{Candidate: CandidateID(r.Quote.Candidate), Model: r.Quote.Model, Outcome: PolicyOutcome(r.Quote.PolicyOutcome)},
 		}
 		if r.AttemptIndex == 1 {
 			h.event = active[r.RequestID].event
