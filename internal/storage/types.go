@@ -46,6 +46,15 @@ type Record struct {
 	PolicyScope     string     `json:",omitempty"`
 	PolicyReason    string     `json:",omitempty"`
 	PolicyRenewsAt  *time.Time `json:",omitempty"`
+	// FallbackFrom and FallbackCause exist only on attempts admitted after an
+	// eligible failure of the previous model, apart from the policy outcome.
+	FallbackFrom  string `json:",omitempty"`
+	FallbackCause string `json:",omitempty"`
+	// TerminalErrorCode and TerminalStatus are what the logical request answered
+	// when that differs from this attempt's own result, such as an exhausted
+	// chain. Only the terminal attempt carries them.
+	TerminalErrorCode string `json:",omitempty"`
+	TerminalStatus    *int   `json:",omitempty"`
 }
 
 var policyLimitName = regexp.MustCompile(`^apps\.[a-z0-9-]{1,40}\.(per_user\.)?(limits|budget|hard_cap)\.[a-z_]{1,32}$`)

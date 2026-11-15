@@ -64,6 +64,11 @@ type Payload struct {
 	// downgraded): configured model names, never request content.
 	ModelRequested string `json:"model_requested,omitempty"`
 	ModelUsed      string `json:"model_used,omitempty"`
+	// FromModel, ToModel and Cause exist only on fallback events: the model that
+	// failed, the next model admitted and the closed cause of the failure.
+	FromModel string `json:"from_model,omitempty"`
+	ToModel   string `json:"to_model,omitempty"`
+	Cause     string `json:"cause,omitempty"`
 }
 
 // PolicyEventID derives the event of one policy admission, so a retried write
@@ -209,6 +214,9 @@ func (e Event) Validate() error {
 		return err
 	}
 	if err := e.validatePolicy(); err != nil {
+		return err
+	}
+	if err := e.validateFallbackFields(); err != nil {
 		return err
 	}
 	if !eventID.MatchString(e.ID) || (e.RequestID != "" && !eventID.MatchString(e.RequestID)) || (e.App != "" && !appName.MatchString(e.App)) || e.At.IsZero() || e.Payload.Count < 0 || e.Payload.Cost < 0 || e.Payload.AttemptIndex < 0 {

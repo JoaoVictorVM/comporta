@@ -56,7 +56,13 @@ func validReservation(r storage.Reservation) error {
 		}
 	}
 	if e := r.Rate; e != nil {
-		if e.RequestID != r.RequestID || e.AppName != r.AppName || e.Subject != r.Subject || e.Anonymous != r.Anonymous || e.EstimatedTokens < 0 || e.ActualTokens != nil || !e.Active || r.AttemptIndex != 1 {
+		// Attempt 1 is the logical request; later attempts only carry tokens.
+		attempt := e.AttemptIndex
+		if attempt == 0 {
+			attempt = 1
+		}
+		if e.RequestID != r.RequestID || e.AppName != r.AppName || e.Subject != r.Subject || e.Anonymous != r.Anonymous || e.EstimatedTokens < 0 || e.ActualTokens != nil || !e.Active ||
+			attempt != r.AttemptIndex || attempt > storage.MaxAttempts {
 			return storage.ErrInvalid
 		}
 	}
@@ -245,7 +251,11 @@ func insertReservation(ctx context.Context, tx *sql.Tx, r storage.Reservation) (
 		}
 		payload.Deltas = append(payload.Deltas, deltaFor(item, 0, item.Reserved))
 	}
-	if e := r.Rate; e != nil {
+	if e := r.Rate; e != nil && r.AttemptIndex > 1 {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO limit_attempt_rate_events VALUES(?,?,?,?,?,?,?,NULL,1)`, e.RequestID, r.AttemptIndex, e.AppName, e.Subject, e.Anonymous, e.AdmittedAt.UnixMicro(), e.EstimatedTokens); err != nil {
+			return 0, databaseError(err)
+		}
+	} else if e != nil {
 		var app, subject string
 		var anonymous bool
 		var admitted, estimated int64
@@ -387,6 +397,10 @@ func settleTx(ctx context.Context, tx *sql.Tx, st storage.Settlement) (int64, er
 	}
 	if st.RateTokens != nil && st.AttemptIndex == 1 {
 		if _, err = tx.ExecContext(ctx, `UPDATE limit_rate_events SET actual_tokens=?,active=0 WHERE request_id=?`, *st.RateTokens, st.RequestID); err != nil {
+			return 0, databaseError(err)
+		}
+	} else if st.RateTokens != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE limit_attempt_rate_events SET actual_tokens=?,active=0 WHERE request_id=? AND attempt_index=?`, *st.RateTokens, st.RequestID, st.AttemptIndex); err != nil {
 			return 0, databaseError(err)
 		}
 	}
@@ -555,8 +569,27 @@ func evidence(ctx context.Context, tx *sql.Tx, requestID string, attempt int) (*
 	return r, decodeRecord(data, r)
 }
 
+// readRates returns the logical requests as attempt 1, followed by the token
+// events of later attempts, each list in admission order.
 func readRates(ctx context.Context, tx *sql.Tx, since time.Time) ([]storage.RateEvent, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT request_id,app_name,subject,anonymous,admitted_at,estimated_tokens,actual_tokens,active FROM limit_rate_events WHERE active=1 OR admitted_at>? ORDER BY admitted_at,request_id`, since.UnixMicro())
+	out, err := readRateTable(ctx, tx, `SELECT request_id,1,app_name,subject,anonymous,admitted_at,estimated_tokens,actual_tokens,active FROM limit_rate_events WHERE active=1 OR admitted_at>? ORDER BY admitted_at,request_id`, since)
+	if err != nil {
+		return nil, err
+	}
+	// A database of an earlier release, read before its migration, has no
+	// later attempts to load.
+	if present, err := hasTable(ctx, tx, "limit_attempt_rate_events"); err != nil || !present {
+		return out, err
+	}
+	later, err := readRateTable(ctx, tx, `SELECT request_id,attempt_index,app_name,subject,anonymous,admitted_at,estimated_tokens,actual_tokens,active FROM limit_attempt_rate_events WHERE active=1 OR admitted_at>? ORDER BY admitted_at,request_id,attempt_index`, since)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, later...), nil
+}
+
+func readRateTable(ctx context.Context, tx *sql.Tx, query string, since time.Time) ([]storage.RateEvent, error) {
+	rows, err := tx.QueryContext(ctx, query, since.UnixMicro())
 	if err != nil {
 		return nil, databaseError(err)
 	}
@@ -566,7 +599,7 @@ func readRates(ctx context.Context, tx *sql.Tx, since time.Time) ([]storage.Rate
 		var e storage.RateEvent
 		var at int64
 		var actual sql.NullInt64
-		if err = rows.Scan(&e.RequestID, &e.AppName, &e.Subject, &e.Anonymous, &at, &e.EstimatedTokens, &actual, &e.Active); err != nil {
+		if err = rows.Scan(&e.RequestID, &e.AttemptIndex, &e.AppName, &e.Subject, &e.Anonymous, &at, &e.EstimatedTokens, &actual, &e.Active); err != nil {
 			return nil, databaseError(err)
 		}
 		e.AdmittedAt = time.UnixMicro(at).UTC()
@@ -663,6 +696,13 @@ func (s *Store) SaveCheckpoint(ctx context.Context, cp storage.LimitCheckpoint) 
 	if _, err = tx.ExecContext(ctx, `INSERT INTO limit_checkpoints VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET covered_seq=excluded.covered_seq,created_at=excluded.created_at,civil_watermark=excluded.civil_watermark,metadata_json=excluded.metadata_json`,
 		cp.CoveredSeq, now, cp.Watermark.UnixMicro(), string(metadata)); err != nil {
 		return databaseError(err)
+	}
+	if later, err := hasTable(ctx, tx, "limit_attempt_rate_events"); err != nil {
+		return err
+	} else if later {
+		if _, err = tx.ExecContext(ctx, `DELETE FROM limit_attempt_rate_events WHERE active=0 AND admitted_at<=?`, cp.RateCutoff.UnixMicro()); err != nil {
+			return databaseError(err)
+		}
 	}
 	const finished = `r.state<>'reserved' AND NOT EXISTS(SELECT 1 FROM metering_journal j WHERE j.request_id=r.request_id AND j.attempt_index=r.attempt_index)`
 	const noLedger = `NOT EXISTS(SELECT 1 FROM limit_ledger l WHERE l.request_id=r.request_id AND l.attempt_index=r.attempt_index)`
