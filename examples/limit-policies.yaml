@@ -46,5 +46,5 @@ apps:
   observed:
     allowed_models: [fake-claude]
     on_limit: warn
-    budget: {usd_per_day: 0.01}
-    hard_cap: {usd_per_day: 0.02}
+    budget: {usd_per_day: 0.001}
+    hard_cap: {usd_per_day: 0.20}

@@ -77,11 +77,22 @@ func TestFiveHundredPolicyAdmissionsRespectHardCap(t *testing.T) {
 			t.Fatal(err)
 		}
 		policy, _ := limits.PolicyFor(gw.config.Capture(), app)
-		var view limits.LimitView
-		for _, v := range gw.limits.State(policy, &limits.Subject{App: app, Hash: hash.Hex()}).Limits {
-			if v.LimitName == "apps."+app+".per_user.hard_cap.usd_per_day" {
-				view = v
+		capView := func() limits.LimitView {
+			for _, v := range gw.limits.State(policy, &limits.Subject{App: app, Hash: hash.Hex()}).Limits {
+				if v.LimitName == "apps."+app+".per_user.hard_cap.usd_per_day" {
+					return v
+				}
 			}
+			return limits.LimitView{}
+		}
+		// A settlement whose write misses its deadline under load stays reserved
+		// until the limit worker retries it; the cap holds meanwhile.
+		view := capView()
+		for deadline := time.Now().Add(20 * time.Second); view.Reserved != 0 && time.Now().Before(deadline); view = capView() {
+			if view.Used+view.Reserved > hardCap {
+				t.Fatalf("round %d (%s): spent and reserved cross the cap: %+v", round, app, view)
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
 		if admitted == 0 || view.Reserved != 0 || view.Used > hardCap || view.Limit != hardCap {
 			t.Fatalf("round %d (%s): %d admitted, cap %+v", round, app, admitted, view)
