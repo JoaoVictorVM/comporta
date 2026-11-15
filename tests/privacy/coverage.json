@@ -23,7 +23,9 @@
     "tests/integration/sensitive_bench_test.go",
     "tests/privacy/canary_sensitive_test.go",
     "internal/proxy/policy_test.go",
-    "internal/proxy/output_limit_test.go"
+    "internal/proxy/output_limit_test.go",
+    "internal/proxy/fallback_test.go",
+    "internal/proxy/fallback_stream_test.go"
   ],
   "parser_only_go_files": [
     {

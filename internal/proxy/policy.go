@@ -80,6 +80,23 @@ func (o *operation) downgradeTarget(request *prepared, app config.App) *target {
 	if e.Operation != OperationGeneration || app.OnLimit != config.OnLimitDowngrade || app.DowngradeTo == "" || app.DowngradeTo == e.ModelRequested {
 		return nil
 	}
+	return o.buildTarget(request, app)
+}
+
+// policyTarget is the downgrade target of a later attempt on model. A target
+// that already failed in this request is described as unavailable: the policy
+// then refuses instead of sending it again or letting a costlier model through.
+func (o *operation) policyTarget(request *prepared, app config.App, model string, sent map[string]bool) *target {
+	if app.OnLimit != config.OnLimitDowngrade || app.DowngradeTo == "" || app.DowngradeTo == model {
+		return nil
+	}
+	if sent[app.DowngradeTo] {
+		return &target{model: app.DowngradeTo, unavailable: fallbackTargetExhausted(app.DowngradeTo)}
+	}
+	return o.buildTarget(request, app)
+}
+
+func (o *operation) buildTarget(request *prepared, app config.App) *target {
 	out := &target{model: app.DowngradeTo}
 	name, declared := o.snapshot.ProviderForModel(app.DowngradeTo)
 	provider, found := o.snapshot.Provider(name)
