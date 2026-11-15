@@ -2,9 +2,9 @@
 
 Open-source LLM gateway, in development.
 
-**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, sensitive data detection with redaction and blocking, limit policies (block, downgrade and warn, allowed models and output caps), and operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
+**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, sensitive data detection with redaction and blocking, limit policies (block, downgrade and warn, allowed models and output caps), fallback routing across a chain of models of the same API format, and operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
 
-**Not implemented yet:** fallback, cache, alerts, telemetry and the admin panel. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
+**Not implemented yet:** cache, alerts, telemetry, the admin panel and fallback to a model of another API format. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
 
 ## Commands
 
@@ -255,7 +255,7 @@ Every refusal before an attempt is stored as a blocked record with attempt 0, ze
 
 **Measured cost:** admission and settlement reuse the two synchronous `synchronous=FULL` commits that metering already made, now carrying the reservation. On the reference Windows machine, sequential non-streaming calls through the fake provider measured a p95 of 6.7 ms against 2.0 ms without metering and limits, and streaming time to first byte a p95 of 3.6 ms against 2.6 ms. The coordinator alone takes about 27 µs per reserve and settle. The sustained load target of 200 requests per second for 5 minutes was not measured in this release.
 
-**For later features:** the panel, alerts, telemetry, fallback, cache and multiple instances consume typed decisions, a consistent state per app and user (used, reserved, limit, renewal, degradation, active and pending timezone) and a reservation handle with reserve, settle and release. `comporta users forget` removes a user's limit state together with the user's records, see Operations.
+**For later features:** the panel, alerts, telemetry, cache and multiple instances consume typed decisions, a consistent state per app and user (used, reserved, limit, renewal, degradation, active and pending timezone) and a reservation handle with reserve, settle and release. `comporta users forget` removes a user's limit state together with the user's records, see Operations.
 
 ### Limit policies
 
@@ -280,11 +280,44 @@ apps:
 - **Output cap:** generation output is capped by `max_tokens`; a higher value is lowered, and an OpenAI request without an output limit gets it inserted. The cap applies to both the requested model and the target.
 - **Unknown state:** a budget whose history cannot be proven is never relaxed by `warn` or `downgrade`. With `fail_mode: fail_open`, calls proceed from memory while limit state is unavailable, so the hard cap is not a guarantee during that time.
 
-**Safety trade-off:** downgrade and, later, fallback send the conversation to a different model, which can behave differently on safety, refusals and quality. Configuring `downgrade_to` means accepting that trade-off for the app. A lower price is never inferred from the model name: compare the prices of both models, and rely on the hard cap as the financial bound.
+**Safety trade-off:** downgrade and fallback send the conversation to a different model, which can behave differently on safety, refusals and quality. Configuring `downgrade_to` or `fallback` means accepting that trade-off for the app. A lower price is never inferred from the model name: compare the prices of both models, and rely on the hard cap as the financial bound.
 
 Every admission decided by a policy keeps the decision with its record: `PolicyOutcome` (`blocked`, `warned` or `downgraded`), the limit, scope, reason and renewal that triggered it, and the requested and used models, apart from the transport result, so a warned call that later failed upstream still shows its error. `warned` and `downgraded` events are written in the same transaction as the reservation, carry the request ID, app, limit and models but no user hash or content, and are removed by `comporta users forget` with the user's requests. A configuration reload that overtakes an admission prepares the request again on the new configuration (allowlist, output cap, sanitization, target and price) under the same request ID, at most three times before answering 503; a call already admitted keeps its model, body and price, and a stream in flight finishes even if the new cap is lower.
 
 [`examples/limit-policies.yaml`](examples/limit-policies.yaml) shows the three modes on the fake provider, without real credentials.
+
+### Fallback routing
+
+`fallback` lists up to four models an app tries, in order, when the model it sent cannot answer. Each attempt is one call: a model is never called twice for the same request, and there is no backoff between attempts.
+
+```yaml
+apps:
+  bot-discord:
+    allowed_models: [claude-sonnet-4-5, claude-haiku-4-5, ollama/qwen2.5]
+    fallback: [claude-sonnet-4-5, claude-haiku-4-5]
+```
+
+- **Where the chain starts:** after the model actually sent. A request for `claude-sonnet-4-5` continues with `claude-haiku-4-5`. A request for a model outside the chain tries the whole chain after it, so at most five models are sent per request. With `on_limit: downgrade`, the downgraded model is the starting point and the requested one is not tried.
+- **What triggers it:** HTTP 429, any 5xx including Anthropic's 529, a connection error or a provider timeout, while nothing has been written to the client. A stream falls back only on an error event the gateway recognizes (rate limit or overload) before its first event reaches the client; once any event was delivered, even a heartbeat or a `message_start` without text, the error is forwarded and no other model is tried. HTTP 400, 401, 403, 404 and 413, refusals inside valid answers, broken or oversized answers, `count_tokens` and every refusal decided by the gateway itself (budgets, rate limits, allowlist, sensitive data, loop guard, pause) never fall back.
+- **Same API format only:** a chain entry in another format than the endpoint is skipped: never sent, reserved or reported. `config validate` warns with `fallback_mixed_format` when a chain mixes formats and with `fallback_disabled` for each format whose requests have no alternative; an app whose chain only holds models of another format runs without fallback. Translating between formats is not implemented.
+- **Time:** a non-streaming request that can fall back has 120 seconds for all its attempts together, or less when `non_streaming_timeout` is lower, counted from admission. Streams keep the per-attempt header and idle timeouts. When the client leaves, the provider call ends at once and no other model is tried.
+- **What the client sees:** the answer of the model that responded, with its own `model` field, and `x-comporta-fallback: claude-sonnet-4-5->claude-haiku-4-5 (529)` listing every admitted transition (`A->B (529); B->C (timeout)`). Causes are `429`, the 5xx status, `connection` or `timeout`; model names are percent-escaped. Headers of failed attempts, `Retry-After` included, never reach the client, and a provider cannot send its own `x-comporta-*` headers.
+
+| `comporta_code` | Status | Cause |
+|---|---|---|
+| `fallback_exhausted` | 502 | Every eligible model failed: `all fallback models failed (claude-sonnet-4-5: 529, claude-haiku-4-5: timeout)` |
+| `fallback_deadline_exceeded` | 504 | The shared deadline ran out, with the causes seen so far |
+| `fallback_policy_target_exhausted` | 503 | The next attempt exceeded a budget and `on_limit: downgrade` requires a target that already failed in this request; it is not sent again |
+| Limit codes (`budget_exceeded`, `hard_cap_exceeded`, ...) | 429 | The next attempt does not fit a limit; fallback never goes around a protection |
+| `usage_storage_unavailable` | 503 | The result of the previous attempt could not be made durable; nothing else is sent |
+
+Without a chain, or without an alternative, the original error is returned unchanged.
+
+**Cost and limits:** every attempt is quoted with its own model's price, reserved before it is sent and settled before the next one is reserved; budgets, hard caps and `on_limit` apply to each attempt as to any call. A failed attempt whose provider reported no complete usage, including 429 and 529, is charged at its reservation, never as free. The request counts once for `requests_per_minute` and keeps its `max_concurrent` slot from the first attempt to the end; tokens per minute count each attempt at its own admission. A configuration reload in the middle of a chain does not change it: the next attempts keep the chain, prices and policy the request was admitted under.
+
+**Records and events:** each attempt has its own record. Later attempts have outcome `fallback`, the model they replaced and the cause; the policy outcome stays separate. Only the attempt that ended the request counts as a request in the daily totals, all of them count as attempts, cost and tokens, and when the gateway answered something else than that attempt's own result (an exhausted chain, a refusal) the record keeps both. Each admitted transition writes one `fallback` event, in the same transaction as the next attempt's reservation, with the app, the request ID, the attempt index, `from_model`, `to_model` and the cause, but no user hash or content. It means the next model was admitted, not that it answered. After a crash, attempts in flight are charged at their reservation and the last one admitted becomes the terminal one; nothing is sent again. `comporta users forget` and retention remove these records with the user's requests and keep the app totals.
+
+[`examples/fallback.yaml`](examples/fallback.yaml) runs a chain on the fake provider, without real credentials.
 
 ### Loop guard
 
@@ -485,7 +518,7 @@ These routes are what the future panel will use. Pauses and sessions are local t
 
 ## Fake provider
 
-`comporta fake-provider` imitates both APIs with synthetic, deterministic responses, for tests without keys or cost. It listens on `127.0.0.1:9090` by default. The scenario is chosen when it starts, and no request can change it: `success`, `rate-limit` (429), `overload` (529), `header-timeout`, `slow-stream`, `disconnect-midstream` and `agent-loop`, which answers every conversation with the same tool call, so a client that keeps sending back the same tool result reproduces an agent loop with growing context.
+`comporta fake-provider` imitates both APIs with synthetic, deterministic responses, for tests without keys or cost. It listens on `127.0.0.1:9090` by default. The scenario is chosen when it starts, and no request can change it: `success`, `rate-limit` (429), `overload` (529), `server-error` (500), `bad-request` (400), `header-timeout`, `slow-stream`, `disconnect-midstream`, `stream-error-before-chunk` (an overload error as the first stream event, 529 without streaming), `stream-error-after-chunk` (the same error after one event) and `agent-loop`, which answers every conversation with the same tool call, so a client that keeps sending back the same tool result reproduces an agent loop with growing context. `--model-scenario MODEL=SCENARIO`, repeatable, overrides the scenario for one model, so one fake plays a whole fallback chain: `comporta fake-provider --model-scenario fake-claude=overload` overloads `fake-claude` and answers every other model.
 
 ```yaml
 providers:

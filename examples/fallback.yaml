@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=../schema/comporta.schema.json
+#
+# A fallback chain against the fake provider, with no real credentials. Start
+# the fake provider with fake-claude overloaded:
+#
+#   comporta fake-provider --model-scenario fake-claude=overload
+#
+# then the gateway with `comporta serve --config examples/fallback.yaml`,
+# create a key with `comporta keys create chat` and send a request for
+# fake-claude. The answer comes from fake-haiku with the header
+# x-comporta-fallback: fake-claude->fake-haiku (529). Both attempts are
+# recorded and charged: the overloaded one at its reservation, since the
+# provider reported no usage. Prices are illustrative overrides.
+
+timezone: UTC
+data_dir: ./data-fallback
+
+providers:
+  fake:
+    api_format: anthropic
+    base_url: http://127.0.0.1:9090
+    models:
+      - fake-claude
+      - fake-haiku
+      - fake-sonnet
+
+pricing:
+  fake-claude: {input: 3.00, output: 15.00, cache_write: 3.75, cache_read: 0.30}
+  fake-haiku: {input: 1.00, output: 5.00, cache_write: 1.25, cache_read: 0.10}
+  fake-sonnet: {input: 3.00, output: 15.00, cache_write: 3.75, cache_read: 0.30}
+
+apps:
+  chat:
+    allowed_models: [fake-claude, fake-haiku, fake-sonnet]
+    fallback: [fake-claude, fake-haiku, fake-sonnet]
+    budget: {usd_per_day: 1.00}
