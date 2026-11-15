@@ -61,6 +61,7 @@ type fixtureOptions struct {
 	requireUser bool
 	gate        Gate
 	loop        *LoopStage
+	sensitive   *SensitiveStage
 	accounting  Accounting
 }
 
@@ -251,7 +252,7 @@ func newTestHandler(authHTTP *auth.HTTP, sink ResultSink, identity *useridentity
 	if options.logs != nil {
 		logger = slog.New(slog.NewJSONHandler(options.logs, nil))
 	}
-	return NewHandler(Options{Auth: authHTTP, Sink: sink, Hooks: options.hooks, Identity: identity, Logger: logger, Gate: options.gate, Loop: options.loop, Accounting: options.accounting})
+	return NewHandler(Options{Auth: authHTTP, Sink: sink, Hooks: options.hooks, Identity: identity, Logger: logger, Gate: options.gate, Loop: options.loop, Sensitive: options.sensitive, Accounting: options.accounting})
 }
 
 func startBenchUpstream(b *testing.B) string {

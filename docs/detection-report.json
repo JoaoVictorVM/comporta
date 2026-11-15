@@ -1,0 +1,211 @@
+{
+  "schema_version": 1,
+  "detector_revision": "2026.11-1",
+  "phone_table_revision": "anatel-ddd-2024",
+  "command": "go test ./internal/sensitivedata -run '^TestCorpusReport$' -count=1 -args -detection-report=../../docs/detection-report.json",
+  "corpus": {
+    "path": "internal/sensitivedata/testdata/corpus.jsonl",
+    "cases": 1639,
+    "bytes": 199225,
+    "sha256": "c960c9270cd7c04f486eae872df8d4e0130fea2725d953ad33933c98fafc84cd"
+  },
+  "method": [
+    "Each case is labeled for one category and is scanned with only that category in detect mode.",
+    "Occurrences: a predicted span counts as a true positive only when its start, end and category equal an expected span; counts are per occurrence, so a repeated value counts each time.",
+    "Documents: each case and its category form one binary classification of presence; false_positive_rate is FP/(FP+TN).",
+    "Overlaps are not resolved for counting: every valid candidate is counted in its own category, as in production summaries. Redaction keeps the longest span, with ties broken by secret, cpf, cnpj, card, email, phone, pix.",
+    "annotated_negatives counts the negative cases that carry a note (ambiguous shapes or out of scope forms) and how many of them raised an alert.",
+    "negative_documents_with_any_alert scans every negative case with all seven categories in detect mode.",
+    "A null ratio means its denominator is zero.",
+    "Positive secret cases are stored as templates and generated deterministically by the runner, so the repository holds no complete credential shape."
+  ],
+  "limitations": [
+    "The corpus is entirely synthetic; its rates are not an estimate of production traffic.",
+    "pix reports any canonical version 4 UUID as a random key candidate; nothing in the text proves a PIX registration, so UUIDs used as trace IDs are false positives.",
+    "A number that passes Luhn is reported as a card even when it is an order number; an 11-digit number with a valid area code is reported as a phone.",
+    "The alphanumeric CNPJ is not covered.",
+    "Names, addresses and other free-text personal data are not detected; there is no NER."
+  ],
+  "categories": [
+    {
+      "category": "cpf",
+      "positive_cases": 120,
+      "negative_cases": 115,
+      "occurrences": {
+        "expected": 130,
+        "predicted": 130,
+        "true_positives": 130,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "precision": 1,
+        "recall": 1
+      },
+      "documents": {
+        "true_positives": 120,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "true_negatives": 115,
+        "false_positive_rate": 0
+      },
+      "annotated_negatives": {
+        "cases": 0,
+        "alerted": 0
+      }
+    },
+    {
+      "category": "cnpj",
+      "positive_cases": 110,
+      "negative_cases": 120,
+      "occurrences": {
+        "expected": 110,
+        "predicted": 110,
+        "true_positives": 110,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "precision": 1,
+        "recall": 1
+      },
+      "documents": {
+        "true_positives": 110,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "true_negatives": 120,
+        "false_positive_rate": 0
+      },
+      "annotated_negatives": {
+        "cases": 10,
+        "alerted": 0
+      }
+    },
+    {
+      "category": "card",
+      "positive_cases": 120,
+      "negative_cases": 110,
+      "occurrences": {
+        "expected": 120,
+        "predicted": 132,
+        "true_positives": 120,
+        "false_positives": 12,
+        "false_negatives": 0,
+        "precision": 0.9090909090909091,
+        "recall": 1
+      },
+      "documents": {
+        "true_positives": 120,
+        "false_positives": 10,
+        "false_negatives": 0,
+        "true_negatives": 100,
+        "false_positive_rate": 0.09090909090909091
+      },
+      "annotated_negatives": {
+        "cases": 10,
+        "alerted": 10
+      }
+    },
+    {
+      "category": "email",
+      "positive_cases": 115,
+      "negative_cases": 113,
+      "occurrences": {
+        "expected": 115,
+        "predicted": 123,
+        "true_positives": 115,
+        "false_positives": 8,
+        "false_negatives": 0,
+        "precision": 0.9349593495934959,
+        "recall": 1
+      },
+      "documents": {
+        "true_positives": 115,
+        "false_positives": 8,
+        "false_negatives": 0,
+        "true_negatives": 105,
+        "false_positive_rate": 0.07079646017699115
+      },
+      "annotated_negatives": {
+        "cases": 8,
+        "alerted": 8
+      }
+    },
+    {
+      "category": "phone",
+      "positive_cases": 115,
+      "negative_cases": 125,
+      "occurrences": {
+        "expected": 115,
+        "predicted": 125,
+        "true_positives": 115,
+        "false_positives": 10,
+        "false_negatives": 0,
+        "precision": 0.92,
+        "recall": 1
+      },
+      "documents": {
+        "true_positives": 115,
+        "false_positives": 10,
+        "false_negatives": 0,
+        "true_negatives": 115,
+        "false_positive_rate": 0.08
+      },
+      "annotated_negatives": {
+        "cases": 10,
+        "alerted": 10
+      }
+    },
+    {
+      "category": "pix",
+      "positive_cases": 110,
+      "negative_cases": 120,
+      "occurrences": {
+        "expected": 110,
+        "predicted": 125,
+        "true_positives": 110,
+        "false_positives": 15,
+        "false_negatives": 0,
+        "precision": 0.88,
+        "recall": 1
+      },
+      "documents": {
+        "true_positives": 110,
+        "false_positives": 15,
+        "false_negatives": 0,
+        "true_negatives": 105,
+        "false_positive_rate": 0.125
+      },
+      "annotated_negatives": {
+        "cases": 15,
+        "alerted": 15
+      }
+    },
+    {
+      "category": "secret",
+      "positive_cases": 121,
+      "negative_cases": 125,
+      "occurrences": {
+        "expected": 121,
+        "predicted": 121,
+        "true_positives": 121,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "precision": 1,
+        "recall": 1
+      },
+      "documents": {
+        "true_positives": 121,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "true_negatives": 125,
+        "false_positive_rate": 0
+      },
+      "annotated_negatives": {
+        "cases": 5,
+        "alerted": 0
+      }
+    }
+  ],
+  "negative_documents_with_any_alert": {
+    "negative_documents": 828,
+    "alerted": 62,
+    "rate": 0.0748792270531401
+  }
+}

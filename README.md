@@ -2,9 +2,9 @@
 
 Open-source LLM gateway, in development.
 
-**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, and operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
+**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, sensitive data detection with redaction and blocking, and operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
 
-**Not implemented yet:** policies (including `max_tokens` caps and `allowed_models` enforcement on calls), fallback, cache, sensitive data detection, alerts, telemetry and the admin panel. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
+**Not implemented yet:** policies (including `max_tokens` caps and `allowed_models` enforcement on calls), fallback, cache, alerts, telemetry and the admin panel. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
 
 ## Commands
 
@@ -294,6 +294,73 @@ The per-minute variant reads `loop detected: more than 60 requests in 60s; ...`.
 **Records and events:** every cut request is stored with outcome `loop_cut`, attempt 0, status 429, zero cost and no reservation; it never enters the daily totals or the budgets. The first cut of an episode also writes one `loop_cut` event, in the same transaction, with the app, the user hash, the anonymous flag, the reason (`similar_requests` or `request_rate`), the count (11 or 61), the window and the cooldown in milliseconds. Retries in the same episode add records but no event. The event is announced to subscribers only after it is committed. Alert delivery for these events belongs to the alerts feature.
 
 **Memory only:** signatures and arrival times live in memory for at most their window and are never written to disk, logs, events or errors; a cut drops them at once. A restart clears all counters and cooldowns, so the guard complements budgets, which persist, and does not replace them. A configuration reload applies to the next request: disabling an app clears its state, including cooldowns; changing thresholds or windows discards the counts but keeps cooldowns already running; changing only the cooldown affects new cuts. `comporta users forget` clears the user's counters and cooldowns once the deletion has committed, and keeps them if it fails.
+
+### Sensitive data detection
+
+Comporta can look for personal data and credentials in the text of each request and count them, replace them before the provider sees them, or refuse the request. Everything happens in the gateway's memory: no external service, no extra dependency.
+
+```yaml
+apps:
+  support:
+    detection:
+      cpf: redact
+      cnpj: detect
+      card: redact
+      email: redact
+      phone: detect
+      pix: off
+      secret: block
+      rehydrate: true
+```
+
+Each category takes `off`, `detect` (count only), `redact` (replace before forwarding) or `block` (refuse the request). **Every category is `off` by default**, and `rehydrate` defaults to `false`. Detection stays off until the reference benchmark shows an added p95 under 5 ms on a 400 KB prompt, which has not been measured yet (see Performance below). We recommend turning it on explicitly: start with `detect` to see what your apps send, then move the categories you care about to `redact` or `block`. A reload changes only the requests that arrive after it; a request in progress keeps the policy it started with until its response is restored.
+
+**What is detected:**
+
+| Category | Rule | Not covered |
+|---|---|---|
+| `cpf` | 11 digits or `###.###.###-##`, both check digits, no repeated digit | A CPF glued to letters or to a longer number |
+| `cnpj` | 14 digits or `##.###.###/####-##`, both check digits | The alphanumeric CNPJ |
+| `card` | 13 to 19 digits, contiguous or in groups split by one kind of space or hyphen, Luhn | An order number that passes Luhn is reported as a card |
+| `email` | Local part up to 64 characters of letters, digits and `._%+-`, a domain of valid labels and a letter TLD | Quoted and internationalized addresses; DNS is not checked |
+| `phone` | Brazilian numbers: optional `+55`, a valid area code, 9 digits starting with 9 or 8 starting with 2 to 5, usual masks | Other countries; an 11-digit protocol number with a valid area code is reported as a phone |
+| `pix` | A canonical version 4 UUID | Any v4 UUID is a candidate: nothing in the text proves a PIX registration, so trace IDs are reported too |
+| `secret` | `sk-ant-` and `sk-` keys with 16 to 256 characters, AWS `AKIA` key IDs, GitHub `ghp_` and `github_pat_` tokens, structural JWTs (signature not verified), PEM private keys | Truncated keys, public keys and certificates |
+
+Free-text names and addresses are not detected; there is no NER-based detection. These rules are product heuristics, not proof that a value is real or belongs to anyone.
+
+**Where it looks:** in `POST /v1/messages`, `POST /v1/messages/count_tokens` and `POST /v1/chat/completions`, only the text a person or a tool wrote: Anthropic `system`, message content (strings and text blocks), `tool_use.input`, `tool_result` content and tool descriptions; OpenAI message content (strings and text parts, including `tool` messages), `function_call.arguments`, `tool_calls[].function.arguments` and function descriptions. Inside tool schemas only `description`, `enum`, `default` and `examples` are read, never property names. Tool arguments that hold JSON are opened and every string value is inspected; numbers, booleans and keys are not, so a CPF sent as a JSON number is not protected. Strings are read decoded, so `\u0040` counts as `@`, and fields are never joined: a number split across two messages is not found. Images, files, URLs, model names, roles, IDs, headers and unknown fields are never read. `GET /v1/models` is not inspected.
+
+**Redaction** replaces each value with a placeholder such as `[CPF_1_00112233445566778899aabb]`: the category, an index starting at 1 per category in order of appearance (the same value keeps its index), and a 96-bit random suffix chosen per request and checked against the text. The provider receives `customer CPF [CPF_1_...] wants to cancel`. Overlapping matches keep the longest span; ties go to secret, cpf, cnpj, card, email, phone, pix. In `detect` mode the body is forwarded byte for byte. The reservation is estimated from the larger of the original and the redacted body, and the final cost always comes from the provider's usage. The loop guard signs the request before redaction, so new placeholder suffixes do not hide a loop.
+
+**Blocking** refuses the whole request with HTTP 400 before any budget is reserved and before anything reaches the provider. The message names the category, or the kind of secret, and never the value:
+
+```json
+{"error":{"type":"invalid_request_error","message":"request contains a secret (anthropic_api_key); blocked by policy","comporta_code":"sensitive_data_blocked"}}
+```
+
+**Rehydration:** with `rehydrate: true`, the placeholders of the request are restored in successful non-streaming JSON answers: Anthropic text blocks and `tool_use.input`, OpenAI message content and tool call arguments. Usage, IDs, tool names, the model and unknown fields are left alone, a placeholder with another suffix stays as it is, and a restored value is never expanded again. Streams are relayed unchanged with the header `x-comporta-rehydration: unsupported-for-stream`, so a streaming client may see placeholders. Rehydration is not an output filter: personal data the model generates on its own is passed through.
+
+**Failures:** the scan has a 50 ms budget for reading and checking all fields, and limits of 4,096 candidates, 1 MiB of distinct values and 64 KiB per secret candidate. The 50 ms is a ceiling for one request, not a latency promise. When the scan fails (deadline, limit, internal panic) and some category of the app is in `redact` or `block`, the request is refused; with `detect` only, it is forwarded unchanged and a fixed warning is logged.
+
+| `comporta_code` | Status | Cause |
+|---|---|---|
+| `sensitive_data_blocked` | 400 | A category in `block` matched; no `Retry-After` |
+| `sensitive_data_scan_failed` | 503 | The scan failed while a category is in `redact` or `block` |
+| `usage_storage_unavailable` | 503 | The detection event or the refusal could not be recorded while a category is in `redact` or `block` |
+| `response_rehydration_failed` | 502 | The answer could not be restored safely (ambiguous JSON or over 64 MB); the generated usage is still charged |
+
+**Records and events:** values, positions, placeholders and hashes of values are never stored or logged. Each request with matches writes one `sensitive_data_detected` event before the request goes on, with the app, the user hash, the anonymous flag and a summary per category: `data_type`, `count`, `action` and, for secrets, `secret_kinds`. Its record carries the same summary. A refused request is stored with outcome `blocked`, attempt 0, zero cost and no reservation; a failed scan stores no counts, because they would be incomplete. `comporta users forget` and the identity key reset remove these events with the user's other rows.
+
+**Quality:** [`docs/detection-report.json`](docs/detection-report.json) holds the precision, recall and false positive rate of each detector on a synthetic labeled corpus of 1,639 cases, with its SHA-256, the detector revision and the exact command. Regenerate it with `scripts/detection-report.ps1`, or on any system with:
+
+```sh
+go test ./internal/sensitivedata -run '^TestCorpusReport$' -count=1 -args -detection-report=../../docs/detection-report.json
+```
+
+The test suite fails when the published report no longer matches the corpus and the rules. On the current corpus every positive case is found; the false positive rates per document are 0 for cpf, cnpj and secret, 9.1% for card, 7.1% for email, 8.0% for phone and 12.5% for pix, all of them on the ambiguous negatives the corpus labels on purpose (order numbers that pass Luhn, protocol numbers shaped like phones, file names like `foto@2x.png`, UUIDs used as trace IDs). The corpus is synthetic and was written knowing the rules, so these numbers describe the rules, not production traffic.
+
+**Performance:** on an Intel Core i5-9400F (6 cores) under Windows with Go 1.26.11, the scan alone takes about 0.9 ms on a 400 KB prompt without matches in detect mode, and about 7 ms on 400 KB packed with malformed or real candidates (`go test ./internal/sensitivedata -run XXX -bench .`). The end-to-end scenario in `tests/integration/sensitive_bench_test.go` sends the same 400,000-byte request, with one email and one CPF in it, sequentially to one gateway with every category `off` and then in `detect`, so detect also pays the synchronous commit of its event. Five repetitions of 1,000 requests per mode on that machine measured a p50 of about 17.5 ms off and 22.3 ms in detect, and p95 differences between -18 ms and +67 ms: the SQLite commits of that disk vary more than the scan costs. The worst p95 increase, 67 ms, is far from the 5 ms criterion, and this is not the reference benchmark, so the default stays `off`. Reproduce it with `COMPORTA_SENSITIVE_BENCH=1 go test ./tests/integration -run '^TestSensitiveLatencyScenario$' -count=1 -timeout 60m`; the defaults are five repetitions of 10,000 requests, and `COMPORTA_SENSITIVE_BENCH_OUT` writes the result as JSON.
 
 ### End users
 

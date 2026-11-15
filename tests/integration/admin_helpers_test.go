@@ -57,6 +57,12 @@ var tokenLine = regexp.MustCompile(`store it now\): ([0-9a-f]{64})`)
 
 func startServed(t testing.TB, fake fakeprovider.Options) *served {
 	t.Helper()
+	return startServedWith(t, fake, nil)
+}
+
+// startServedWith lets a test change the initial YAML before serve reads it.
+func startServedWith(t testing.TB, fake fakeprovider.Options, edit func(string) string) *served {
+	t.Helper()
 	t.Setenv("COMPORTA_INTEGRATION_KEY", providerSecret)
 	upstream := httptest.NewServer(fakeprovider.New(fake))
 	t.Cleanup(upstream.Close)
@@ -68,6 +74,9 @@ func startServed(t testing.TB, fake fakeprovider.Options) *served {
 	}
 	text := configText(upstream.URL, proxyPort, adminPort, "")
 	text = strings.Replace(text, "apps:\n", "pricing:\n  fake-claude: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}\n  fake-gpt: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}\napps:\n", 1)
+	if edit != nil {
+		text = edit(text)
+	}
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/JoaoVictorVM/comporta/internal/config"
+	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
+	"reflect"
 	"regexp"
 	"time"
 )
@@ -54,6 +56,9 @@ type Payload struct {
 	// millisecond.
 	WindowMS   int64 `json:"window_ms,omitempty"`
 	CooldownMS int64 `json:"cooldown_ms,omitempty"`
+	// Detections exist only on sensitive data events: categories, counts and the
+	// policy applied, never a value, a position or a placeholder.
+	Detections sensitivedata.Summary `json:"detections,omitempty"`
 }
 
 var eventID = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -70,8 +75,9 @@ type Event struct {
 	At        time.Time `json:"occurred_at"`
 	RequestID string    `json:"request_id,omitempty"`
 	App       string    `json:"app,omitempty"`
-	// UserHash and Anonymous name the pseudonymous subject of a loop cut and
-	// nothing else. They are a pair: both present or both absent.
+	// UserHash and Anonymous name the pseudonymous subject of a loop cut or of a
+	// sensitive data detection, and nothing else. They are a pair: both present or
+	// both absent. The subject is what lets users forget remove the event.
 	UserHash  string  `json:"user_hash,omitempty"`
 	Anonymous *bool   `json:"anonymous,omitempty"`
 	Payload   Payload `json:"payload"`
@@ -105,6 +111,36 @@ func (e Event) ValidateLoopCut() error {
 	}
 	if e.Type != LoopCut || e.UserHash == "" || e.RequestID == "" || e.Payload.Reason == "" || e.Payload.Count < 1 || e.Payload.WindowMS < 1 || e.Payload.CooldownMS < 1 {
 		return errors.New("invalid loop cut event")
+	}
+	return nil
+}
+
+// SensitiveScanID derives the event of one request's inspection, so a retried write
+// of the same inspection can never become a second event.
+func SensitiveScanID(requestID string) string {
+	id := sha256.Sum256([]byte("sensitive_scan:" + requestID))
+	return hex.EncodeToString(id[:16])
+}
+
+// NewSensitiveDetection builds the event of one complete inspection with matches.
+func NewSensitiveDetection(at time.Time, requestID, app, userHash string, anonymous bool, detections sensitivedata.Summary) Event {
+	return Event{
+		ID: SensitiveScanID(requestID), Type: SensitiveDataDetected, At: at.UTC(), RequestID: requestID, App: app,
+		UserHash: userHash, Anonymous: &anonymous, Payload: Payload{Detections: detections.Clone()},
+	}
+}
+
+// ValidateSensitive holds a new sensitive data event to its full contract. Validate
+// alone still reads older events of this type stored without a payload.
+func (e Event) ValidateSensitive() error {
+	if err := e.Validate(); err != nil {
+		return err
+	}
+	rest := e.Payload
+	rest.Detections = nil
+	if e.Type != SensitiveDataDetected || e.UserHash == "" || e.Anonymous == nil || e.RequestID == "" || e.App == "" ||
+		len(e.Payload.Detections) == 0 || !reflect.ValueOf(rest).IsZero() {
+		return errors.New("invalid sensitive data event")
 	}
 	return nil
 }
@@ -152,7 +188,7 @@ func (e Event) Validate() error {
 	switch e.Payload.ErrorCode {
 	case "", "provider_unreachable", "provider_timeout", "provider_redirect", "invalid_upstream_response", "provider_rate_limited", "provider_overloaded", "provider_error", "internal_error", "client_disconnected", "price_unknown", "pricing_overflow", "usage_storage_unavailable",
 		"rate_limited", "concurrency_exceeded", "budget_exceeded", "budget_reserved", "hard_cap_exceeded", "limits_unavailable", "app_paused", "user_maintenance",
-		"loop_detected", "loop_guard_unavailable":
+		"loop_detected", "loop_guard_unavailable", "sensitive_data_blocked", "sensitive_data_scan_failed", "response_rehydration_failed":
 	default:
 		return errors.New("invalid event error code")
 	}
@@ -240,10 +276,21 @@ func (e Event) validatePause() error {
 	return nil
 }
 
-// validateLoop keeps the subject and the loop metadata on loop cuts only.
+// validateLoop keeps the loop metadata on loop cuts, the detections on sensitive
+// data events, and the subject on those two types only.
 func (e Event) validateLoop() error {
 	hasSubject := e.UserHash != "" || e.Anonymous != nil
 	hasLoop := e.Payload.WindowMS != 0 || e.Payload.CooldownMS != 0
+	hasDetections := e.Payload.Detections != nil
+	if hasDetections && (e.Type != SensitiveDataDetected || e.Payload.Detections.Validate() != nil) {
+		return errors.New("invalid event payload")
+	}
+	if e.Type == SensitiveDataDetected {
+		if hasLoop || (hasSubject && (e.Anonymous == nil || !eventID.MatchString(e.UserHash) || e.App == "" || e.RequestID == "")) {
+			return errors.New("invalid sensitive data subject")
+		}
+		return nil
+	}
 	if e.Type != LoopCut {
 		if hasSubject || hasLoop {
 			return errors.New("invalid event payload")
@@ -276,6 +323,7 @@ func (e Event) Clone() Event {
 		paused := *e.Payload.Paused
 		e.Payload.Paused = &paused
 	}
+	e.Payload.Detections = e.Payload.Detections.Clone()
 	e.Payload.Changes = append([]config.Change(nil), e.Payload.Changes...)
 	for i := range e.Payload.Changes {
 		c := &e.Payload.Changes[i]

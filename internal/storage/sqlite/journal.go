@@ -48,6 +48,9 @@ func validate(r storage.Record) error {
 	default:
 		return storage.ErrInvalid
 	}
+	if r.Detections != nil && (len(r.Detections) == 0 || r.Detections.Validate() != nil) {
+		return storage.ErrInvalid
+	}
 	// Attempt 0 is a request refused locally before any attempt: it is terminal,
 	// costs nothing and never counts as a request in the generation totals. A
 	// loop cut is only ever attempt 0.

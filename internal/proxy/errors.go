@@ -47,6 +47,9 @@ const (
 	CodeUserMaintenance         Code = "user_maintenance"
 	CodeLoopDetected            Code = "loop_detected"
 	CodeLoopGuardUnavailable    Code = "loop_guard_unavailable"
+	CodeSensitiveDataBlocked    Code = "sensitive_data_blocked"
+	CodeSensitiveScanFailed     Code = "sensitive_data_scan_failed"
+	CodeRehydrationFailed       Code = "response_rehydration_failed"
 )
 
 // ErrorClass groups failures for internal decisions, such as a later fallback.

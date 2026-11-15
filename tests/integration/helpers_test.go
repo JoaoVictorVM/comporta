@@ -26,6 +26,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/metering"
 	"github.com/JoaoVictorVM/comporta/internal/pricing"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
+	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
 	"github.com/JoaoVictorVM/comporta/internal/server"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
 	"github.com/JoaoVictorVM/comporta/internal/storage/sqlite"
@@ -171,6 +172,9 @@ type gatewayOptions struct {
 	// replaces its clock.
 	loop      bool
 	loopClock loopguard.Clock
+	// sensitive adds the sensitive data inspection, as serve does; it needs
+	// metered.
+	sensitive bool
 }
 
 func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gatewayOptions) *gateway {
@@ -267,8 +271,12 @@ func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gat
 		stage = &proxy.LoopStage{Guard: guard, Source: manager, Recorder: accounting}
 		workers = append(workers, guard.Run)
 	}
+	var inspection *proxy.SensitiveStage
+	if options.sensitive && metered {
+		inspection = &proxy.SensitiveStage{Scanner: sensitivedata.NewScanner(), Recorder: accounting}
+	}
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), auth.NewGuard(nil, nil))
-	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results, Identity: identity, Hooks: hooks, Accounting: accountant, Loop: stage})
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results, Identity: identity, Hooks: hooks, Accounting: accountant, Loop: stage, Sensitive: inspection})
 	runtime, err := server.Open(context.Background(), server.Options{
 		Source:  manager,
 		Proxy:   server.ProxySurface(manager, handler),

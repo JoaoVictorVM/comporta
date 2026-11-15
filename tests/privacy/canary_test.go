@@ -178,6 +178,12 @@ func waitForPort(t *testing.T, port int) {
 
 func startLive(t *testing.T, scenario, extraListeners string) *liveGateway {
 	t.Helper()
+	return startLiveWith(t, scenario, extraListeners, nil)
+}
+
+// startLiveWith lets a test change the YAML before the processes start.
+func startLiveWith(t *testing.T, scenario, extraListeners string, edit func(string) string) *liveGateway {
+	t.Helper()
 	gateway := &liveGateway{t: t, dir: t.TempDir(), proxyPort: freePort(t)}
 	fakePort, adminPort := freePort(t), freePort(t)
 	gateway.adminPort = adminPort
@@ -211,6 +217,9 @@ listeners:
   proxy: {port: %[3]d}
   admin: {port: %[4]d}
 %[5]s`, fakePort, providerKeyEnv, gateway.proxyPort, adminPort, extraListeners)
+	if edit != nil {
+		text = edit(text)
+	}
 	if err := os.WriteFile(config, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
