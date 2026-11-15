@@ -20,6 +20,7 @@
     "internal/proxy/rehydration_test.go",
     "tests/integration/proxy_sensitive_test.go",
     "tests/integration/sensitive_admin_test.go",
+    "tests/integration/sensitive_bench_test.go",
     "tests/privacy/canary_sensitive_test.go"
   ],
   "parser_only_go_files": [

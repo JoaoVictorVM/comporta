@@ -67,18 +67,23 @@ func emailAt(s string, at int) (start, end int, ok bool) {
 	return start, end, true
 }
 
+// validDomain checks labels in place, without splitting: an @ storm must not
+// allocate per candidate.
 func validDomain(domain string) bool {
-	labels := strings.Split(domain, ".")
-	if len(labels) < 2 {
-		return false
-	}
-	for _, label := range labels {
+	labels, start := 0, 0
+	for i := 0; i <= len(domain); i++ {
+		if i < len(domain) && domain[i] != '.' {
+			continue
+		}
+		label := domain[start:i]
 		if label == "" || len(label) > maxLabel || label[0] == '-' || label[len(label)-1] == '-' {
 			return false
 		}
+		labels++
+		start = i + 1
 	}
-	tld := labels[len(labels)-1]
-	if len(tld) < 2 {
+	tld := domain[strings.LastIndexByte(domain, '.')+1:]
+	if labels < 2 || len(tld) < 2 {
 		return false
 	}
 	for i := range len(tld) {

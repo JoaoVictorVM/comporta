@@ -9,6 +9,10 @@ import (
 	"slices"
 )
 
+// DetectorRevision identifies the detection rules. It changes with any rule that
+// can change a result, so a published quality report names what it measured.
+const DetectorRevision = "2026.11-1"
+
 // Category is a kind of sensitive data. The declaration order is the order of every
 // summary.
 type Category uint8
