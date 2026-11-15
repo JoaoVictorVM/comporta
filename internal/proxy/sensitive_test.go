@@ -210,7 +210,7 @@ func TestToolArgumentsJSON(t *testing.T) {
 func TestUnicodeEscapedMatches(t *testing.T) {
 	recorder := &sensitiveRecorder{}
 	fx, upstream := sensitiveFixture(t, sensitiveSetup{settings: detectionSettings("email: redact"), recorder: recorder})
-	body := `{"model":"fake-claude","max_tokens":10,"messages":[{"role":"user","content":"para ana@example.org é \"isso\""}]}`
+	body := `{"model":"fake-claude","max_tokens":10,"messages":[{"role":"user","content":"para ana\u0040example\u002eorg \u00e9 \"isso\""}]}`
 	if response, answer := fx.post("/v1/messages", "anthropic", body); response.StatusCode != 200 {
 		t.Fatalf("status %d: %s", response.StatusCode, answer)
 	}
@@ -238,7 +238,7 @@ func TestControlsAndBinaryUntouched(t *testing.T) {
 }
 
 func TestDetectPreservesBytes(t *testing.T) {
-	body := `{"model":"fake-claude","max_tokens":10,"metadata":{"user_id":"u-1"},"messages":[{"role":"user","content":"para ana@example.org  e ` + testkit.DocumentID() + `"}],"x":1.50}`
+	body := `{"model":"fake-claude","max_tokens":10,"metadata":{"user_id":"u-1"},"messages":[{"role":"user","content":"para ana\u0040example.org  e ` + testkit.DocumentID() + `"}],"x":1.50}`
 	off, offUpstream := sensitiveFixture(t, sensitiveSetup{settings: detectionSettings("email: off")})
 	if response, _ := off.post("/v1/messages", "anthropic", body); response.StatusCode != 200 {
 		t.Fatal("off request failed")
@@ -252,7 +252,7 @@ func TestDetectPreservesBytes(t *testing.T) {
 	pseudonym := regexp.MustCompile(`"user_id":"[0-9a-f]+"`)
 	a := pseudonym.ReplaceAllString(upstreamBody(t, offUpstream), "")
 	b := pseudonym.ReplaceAllString(upstreamBody(t, detectUpstream), "")
-	if a != b {
+	if a != b || !strings.Contains(b, `ana\u0040example.org`) {
 		t.Fatalf("detect changed bytes:\n%s\n%s", a, b)
 	}
 	if len(recorder.published) != 1 || len(recorder.published[0]) != 2 {

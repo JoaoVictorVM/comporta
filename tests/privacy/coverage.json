@@ -16,12 +16,20 @@
     "tests/integration/limits_bootstrap_test.go",
     "tests/integration/proxy_loopguard_test.go",
     "internal/proxy/sensitive_test.go",
-    "internal/proxy/sensitive_handler_test.go"
+    "internal/proxy/sensitive_handler_test.go",
+    "internal/proxy/rehydration_test.go",
+    "tests/integration/proxy_sensitive_test.go",
+    "tests/integration/sensitive_admin_test.go",
+    "tests/privacy/canary_sensitive_test.go"
   ],
   "parser_only_go_files": [
     {
       "file": "internal/proxy/envelope_test.go",
       "reason": "Spelling cases for the parser and the signature. They call the parser directly and never reach a log, a sink, a provider or an error path."
+    },
+    {
+      "file": "internal/proxy/fuzz_test.go",
+      "reason": "Fuzz seeds for the content selection and the restoration of placeholders. They call the selection and the patches directly and never reach a log, a sink, a provider or an error path."
     }
   ],
   "instrumented_sdk_file": "tests/sdk/compatibility_test.py",
@@ -39,6 +47,7 @@
     "process/limits",
     "process/admin-operations",
     "process/loop-cut",
+    "process/sensitive-data",
     "pipeline/provider-receives-prompt",
     "pipeline/upstream-error-echo",
     "pipeline/stream-error-echo",
@@ -47,6 +56,8 @@
     "pipeline/timeout",
     "pipeline/client-disconnect",
     "pipeline/limits-degradation",
+    "pipeline/sensitive-panic",
+    "pipeline/sensitive-rehydration",
     "startup/keyfile-failure"
   ],
   "channels": [
@@ -71,6 +82,7 @@
     "Limit refusals, budget headers and degradation events carry configuration paths and categories, never a user hash or identifier",
     "Search and deletion call LookupHash for each app in history, including removed apps, and pick anonymous explicitly",
     "A storage-backed HistoryGuard replaces the filesystem guard before the database is created, and its reset keeps spending totals",
-    "Each channel above moves to covered when it exists, in the same change, and the suite then requires it"
+    "Each channel above moves to covered when it exists, in the same change, and the suite then requires it",
+    "Sensitive data events and records carry categories, counts, actions and secret kinds only; alerts and metrics project app, category, count and action, never the subject"
   ]
 }

@@ -1,11 +1,13 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/JoaoVictorVM/comporta/internal/auth"
+	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
 )
 
 func FuzzJSONSpansAndPatchPreservation(f *testing.F) {
@@ -108,6 +110,121 @@ func FuzzSafeErrorsAndHost(f *testing.F) {
 					t.Fatalf("input echoed: %s", payload)
 				}
 			}
+		}
+	})
+}
+
+func redactAll() sensitivedata.Policy {
+	policy := sensitivedata.Policy{Rehydrate: true}
+	for _, c := range sensitivedata.Categories() {
+		policy.Set(c, sensitivedata.ModeRedact)
+	}
+	return policy
+}
+
+// FuzzSensitivePatchesJSON checks that redaction always yields valid JSON whose
+// controls are unchanged, and that restoring the placeholders gives back exactly
+// the decoded text of every inspected field.
+func FuzzSensitivePatchesJSON(f *testing.F) {
+	for _, seed := range []string{
+		`{"model":"m","messages":[{"role":"user","content":"a@example.org"}]}`,
+		`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"x b@example.org"},{"type":"tool_use","id":"i","name":"n","input":{"k":["c@example.org",1]}}]}]}`,
+		`{"model":"m","messages":[{"role":"assistant","tool_calls":[{"function":{"name":"f","arguments":"{\"to\":\"d@example.org\"}"}}]}]}`,
+		`{"model":"m","system":"e@example.org","tools":[{"description":"f@example.org","input_schema":{"enum":["g@example.org"]}}],"messages":[]}`,
+	} {
+		f.Add([]byte(seed), true)
+		f.Add([]byte(seed), false)
+	}
+	scanner := sensitivedata.NewScanner()
+	f.Fuzz(func(t *testing.T, data []byte, anthropic bool) {
+		if len(data) > 1<<14 {
+			return
+		}
+		document, err := ParseDocument(data)
+		if err != nil {
+			return
+		}
+		format := auth.FormatOpenAI
+		if anthropic {
+			format = auth.FormatAnthropic
+		}
+		var originals []string
+		selection := &contentSelection{document: document, format: format}
+		outcome, err := scanner.Scan(context.Background(), redactAll(), func(emit sensitivedata.Emit) error {
+			return selection.run(func(text string) error {
+				originals = append(originals, text)
+				return emit(text)
+			})
+		})
+		if err != nil {
+			return
+		}
+		patches, err := selection.patches(outcome)
+		if err != nil {
+			t.Fatalf("patches: %v", err)
+		}
+		out := document.Apply(patches)
+		if !json.Valid(out) {
+			t.Fatalf("invalid JSON after redaction: %s", out)
+		}
+		after, err := ParseDocument(out)
+		if err != nil {
+			t.Fatalf("redacted body does not parse: %v", err)
+		}
+		for _, key := range []string{"model", "stream", "max_tokens"} {
+			a, okA := document.Path(key)
+			b, okB := after.Path(key)
+			if okA != okB || (okA && string(document.Bytes(a)) != string(after.Bytes(b))) {
+				t.Fatalf("control %s changed", key)
+			}
+		}
+		for i, original := range originals {
+			rewritten, changed := outcome.Rewritten(i)
+			if !changed {
+				continue
+			}
+			if restored, _ := outcome.Map().Restore(rewritten); restored != original {
+				t.Fatalf("field %d does not round trip", i)
+			}
+		}
+	})
+}
+
+// FuzzRehydrationJSON checks that restoration never produces invalid JSON and
+// never changes a response with no placeholder of this request.
+func FuzzRehydrationJSON(f *testing.F) {
+	scanner := sensitivedata.NewScanner()
+	outcome, err := scanner.Scan(context.Background(), redactAll(), func(emit sensitivedata.Emit) error { return emit("a\"b@example.org") })
+	if err != nil {
+		f.Fatal(err)
+	}
+	token, _ := outcome.Rewritten(0)
+	token = strings.TrimPrefix(token, "a\"")
+	for _, seed := range []string{
+		`{"content":[{"type":"text","text":"` + token + `"}]}`,
+		`{"choices":[{"message":{"content":"` + token + `","tool_calls":[{"function":{"arguments":"{\"x\":\"` + token + `\"}"}}]}}]}`,
+		`{"content":"x"}`, `{"choices":[1,{"message":[]}]}`,
+	} {
+		f.Add([]byte(seed), true)
+		f.Add([]byte(seed), false)
+	}
+	f.Fuzz(func(t *testing.T, data []byte, anthropic bool) {
+		if len(data) > 1<<14 || !json.Valid(data) {
+			return
+		}
+		format := auth.FormatOpenAI
+		if anthropic {
+			format = auth.FormatAnthropic
+		}
+		got, err := rehydrateResponse(format, data, outcome.Map(), maxResponseBytes)
+		if err != nil {
+			return
+		}
+		if !json.Valid(got) {
+			t.Fatalf("invalid JSON after restoration: %s", got)
+		}
+		if !strings.Contains(string(data), token[len(token)-25:]) && string(got) != string(data) {
+			t.Fatal("a response without placeholders changed")
 		}
 	})
 }

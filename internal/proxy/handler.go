@@ -442,6 +442,7 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 	current := &call{
 		handler: handler, w: o.w, format: o.format, envelope: envelope, attempt: o.attempt,
 		provider: name, clientCtx: r.Context(), upstreamCtx: upstreamCtx, cancelCause: cancelCause, writeLimit: idle,
+		restore: o.sensitive.restoring(),
 	}
 
 	target, err := upstreamURL(provider.BaseURL, o.route)

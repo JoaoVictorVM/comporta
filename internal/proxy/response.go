@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/auth"
+	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
 )
 
 const (
@@ -100,6 +101,9 @@ type call struct {
 	// writeLimit bounds each write to the client; for a stream it is also how long
 	// the provider may stay silent.
 	writeLimit time.Duration
+	// restore holds the reverse map of this request when its JSON answer must have
+	// placeholders restored; nil otherwise.
+	restore *sensitivedata.ReverseMap
 }
 
 // failBeforeCommit answers with an error and records it on the attempt.
@@ -176,6 +180,16 @@ func (c *call) serveNormal(response *http.Response) {
 	if rejection := c.handler.hooks.responseBody(c.upstreamCtx, c.envelope, body); rejection != nil {
 		c.failBeforeCommit(rejection.failure(), "")
 		return
+	}
+	// Usage and the hook saw the provider's own answer; the restored one only goes
+	// to the client. A failure here still settles the usage already read.
+	if c.restore != nil {
+		restored, err := rehydrateResponse(c.format, body, c.restore, maxResponseBytes)
+		if err != nil {
+			c.failBeforeCommit(rehydrationFailure(), "")
+			return
+		}
+		body = restored
 	}
 
 	copyResponseHeaders(c.w.Header(), response.Header)
