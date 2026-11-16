@@ -89,7 +89,7 @@ func TestCacheCannotBypassBudgetOrHardCap(t *testing.T) {
 			held := make(chan struct{})
 			go func() {
 				defer close(held)
-				request, _ := http.NewRequest(http.MethodPost, gw.proxyURL("/v1/messages"), strings.NewReader(`{"model":"fake-claude","max_tokens":4000,"messages":[{"role":"user","content":"hold"}],"stream":true}`))
+				request, _ := http.NewRequest(http.MethodPost, gw.proxyURL("/v1/messages"), strings.NewReader(`{"model":"fake-claude","max_tokens":4000,"messages":[{"role":"user","content":"`+testkit.Prompt("hold")+`"}],"stream":true}`))
 				request.Header.Set("Content-Type", "application/json")
 				request.Header.Set("X-Api-Key", key)
 				request.Header.Set("Anthropic-Version", "2023-06-01")

@@ -12,6 +12,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/responsecache"
 	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
+	"github.com/JoaoVictorVM/comporta/internal/testkit"
 )
 
 // cacheAccounting admits everything and confirms each conclusion, or fails it
@@ -29,6 +30,12 @@ func (a *cacheAccounting) Admit(context.Context, *config.Snapshot, *Envelope, st
 		a.results = append(a.results, result)
 		return a.fail
 	}}, nil
+}
+
+func (a *cacheAccounting) failWith(err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.fail = err
 }
 
 func (a *cacheAccounting) all() []AttemptResult {
@@ -56,9 +63,11 @@ func jsonReply(body string) http.HandlerFunc {
 	}
 }
 
-const (
-	cachedOpenAI   = `{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"fake-gpt","choices":[{"index":0,"message":{"role":"assistant","content":"oi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":1,"total_tokens":13}}`
-	zeroTempOpenAI = `{"model":"fake-gpt","messages":[{"role":"user","content":"oi"}],"temperature":0,"max_tokens":16}`
+const cachedOpenAI = `{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"fake-gpt","choices":[{"index":0,"message":{"role":"assistant","content":"oi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":1,"total_tokens":13}}`
+
+var (
+	cachePrompt    = testkit.Prompt("oi")
+	zeroTempOpenAI = `{"model":"fake-gpt","messages":[{"role":"user","content":"` + cachePrompt + `"}],"temperature":0,"max_tokens":16}`
 )
 
 func TestCacheJSONHitAndMiss(t *testing.T) {
@@ -94,9 +103,9 @@ func TestCacheDisabledByDefault(t *testing.T) {
 
 func TestCacheNeedsConfirmedConclusion(t *testing.T) {
 	fx, upstream, accounting, cache := cacheFixture(t, cacheSettings, jsonReply(cachedOpenAI))
-	accounting.fail = errors.New("storage down")
+	accounting.failWith(errors.New("storage down"))
 	fx.post("/v1/chat/completions", "openai", zeroTempOpenAI)
-	accounting.fail = nil
+	accounting.failWith(nil)
 	fx.post("/v1/chat/completions", "openai", zeroTempOpenAI)
 	if upstream.count() != 2 {
 		t.Fatal("a response whose result was not made durable is never stored")
@@ -151,7 +160,7 @@ func TestZeroTemperatureWithoutUnderflow(t *testing.T) {
 func TestTemperatureEligibility(t *testing.T) {
 	for _, temperature := range []string{`"temperature":0.7,`, `"temperature":-1,`, ``, `"temperature":null,`} {
 		fx, upstream, _, _ := cacheFixture(t, cacheSettings, jsonReply(cachedOpenAI))
-		body := `{"model":"fake-gpt",` + temperature + `"messages":[{"role":"user","content":"oi"}]}`
+		body := `{"model":"fake-gpt",` + temperature + `"messages":[{"role":"user","content":"` + cachePrompt + `"}]}`
 		fx.post("/v1/chat/completions", "openai", body)
 		response, _ := fx.post("/v1/chat/completions", "openai", body)
 		if upstream.count() != 2 || response.Header.Get(cacheHeader) != "" {
@@ -166,7 +175,7 @@ func TestUnknownFieldsAndHeadersPartitionCache(t *testing.T) {
 		zeroTempOpenAI,
 		strings.Replace(zeroTempOpenAI, `}`, `,"x_unknown":1}`, 1),
 		strings.Replace(zeroTempOpenAI, `"max_tokens":16`, `"max_tokens": 16`, 1),
-		strings.Replace(zeroTempOpenAI, `"oi"`, `"ola"`, 1),
+		strings.Replace(zeroTempOpenAI, cachePrompt, testkit.Prompt("ola"), 1),
 	}
 	for _, body := range variants {
 		fx.post("/v1/chat/completions", "openai", body)
@@ -177,7 +186,7 @@ func TestUnknownFieldsAndHeadersPartitionCache(t *testing.T) {
 
 	anthropicUpstream, server := startUpstream(t, jsonReply(`{"id":"msg","type":"message","content":[],"usage":{"input_tokens":3,"output_tokens":1}}`))
 	afx := newFixture(t, server.URL, fixtureOptions{listeners: cacheSettings, accounting: &cacheAccounting{}, cache: responsecache.New(responsecache.Options{})})
-	body := `{"model":"fake-claude","messages":[{"role":"user","content":"oi"}],"temperature":0,"max_tokens":16}`
+	body := `{"model":"fake-claude","messages":[{"role":"user","content":"` + cachePrompt + `"}],"temperature":0,"max_tokens":16}`
 	for _, version := range []string{"2023-06-01", "2023-01-01", "2023-06-01"} {
 		request := afx.request(http.MethodPost, "/v1/messages", "anthropic", body)
 		request.Header.Set("Anthropic-Version", version)
@@ -216,7 +225,7 @@ func TestSharedHashNeutralizesOnlyIdentity(t *testing.T) {
 	if sha256.Sum256(sent) != hashes[0] || hashes[0] == hashes[1] {
 		t.Fatal("RequestHash keeps hashing the effective body, pseudonym included")
 	}
-	fx.post("/v1/chat/completions", "openai", strings.Replace(withUser("carol"), `"oi"`, `"alice"`, 1))
+	fx.post("/v1/chat/completions", "openai", strings.Replace(withUser("carol"), cachePrompt, testkit.Prompt("alice"), 1))
 	if upstream.count() != 2 {
 		t.Fatal("anything other than the identity fields still partitions the cache")
 	}
@@ -242,7 +251,7 @@ func TestCacheUserIsolationByDefault(t *testing.T) {
 func TestStreamingUsageOptionsPartitionCache(t *testing.T) {
 	stream := deltaChunk + usageChunk + doneChunk
 	fx, upstream, _, _ := cacheFixture(t, cacheSettings, sseReply(stream))
-	plain := `{"model":"fake-gpt","messages":[{"role":"user","content":"oi"}],"temperature":0,"stream":true}`
+	plain := `{"model":"fake-gpt","messages":[{"role":"user","content":"` + cachePrompt + `"}],"temperature":0,"stream":true}`
 	asked := strings.Replace(plain, `"stream":true`, `"stream":true,"stream_options":{"include_usage":true}`, 1)
 	_, firstPlain := fx.post("/v1/chat/completions", "openai", plain)
 	hit, replayed := fx.post("/v1/chat/completions", "openai", plain)
@@ -271,7 +280,7 @@ func TestFailedDetectScanBypassesCache(t *testing.T) {
 		listeners: cacheSettings + detectionSettings("email: detect"), accounting: &cacheAccounting{}, cache: cache,
 		sensitive: &SensitiveStage{Scanner: sensitivedata.NewScanner(sensitivedata.WithLimits(tight)), Recorder: &sensitiveRecorder{}},
 	})
-	body := `{"model":"fake-claude","max_tokens":10,"temperature":0,"messages":[{"role":"user","content":"a@example.org b@example.org"}]}`
+	body := `{"model":"fake-claude","max_tokens":10,"temperature":0,"messages":[{"role":"user","content":"` + testkit.Prompt("a@example.org b@example.org") + `"}]}`
 	for range 2 {
 		if response, answer := fx.post("/v1/messages", "anthropic", body); response.StatusCode != 200 || response.Header.Get(cacheHeader) != "" {
 			t.Fatalf("%d %s", response.StatusCode, answer)

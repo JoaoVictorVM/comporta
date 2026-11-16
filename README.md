@@ -2,9 +2,9 @@
 
 Open-source LLM gateway, in development.
 
-**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, sensitive data detection with redaction and blocking, limit policies (block, downgrade and warn, allowed models and output caps), fallback routing across a chain of models of the same API format, and operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
+**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, sensitive data detection with redaction and blocking, limit policies (block, downgrade and warn, allowed models and output caps), fallback routing across a chain of models of the same API format, an exact-match response cache in memory, and operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
 
-**Not implemented yet:** cache, alerts, telemetry, the admin panel and fallback to a model of another API format. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
+**Not implemented yet:** alerts, telemetry, the admin panel and fallback to a model of another API format. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
 
 ## Commands
 
@@ -255,7 +255,7 @@ Every refusal before an attempt is stored as a blocked record with attempt 0, ze
 
 **Measured cost:** admission and settlement reuse the two synchronous `synchronous=FULL` commits that metering already made, now carrying the reservation. On the reference Windows machine, sequential non-streaming calls through the fake provider measured a p95 of 6.7 ms against 2.0 ms without metering and limits, and streaming time to first byte a p95 of 3.6 ms against 2.6 ms. The coordinator alone takes about 27 µs per reserve and settle. The sustained load target of 200 requests per second for 5 minutes was not measured in this release.
 
-**For later features:** the panel, alerts, telemetry, cache and multiple instances consume typed decisions, a consistent state per app and user (used, reserved, limit, renewal, degradation, active and pending timezone) and a reservation handle with reserve, settle and release. `comporta users forget` removes a user's limit state together with the user's records, see Operations.
+**For later features:** the panel, alerts, telemetry and multiple instances consume typed decisions, a consistent state per app and user (used, reserved, limit, renewal, degradation, active and pending timezone) and a reservation handle with reserve, settle and release. `comporta users forget` removes a user's limit state together with the user's records, see Operations.
 
 ### Limit policies
 
@@ -318,6 +318,36 @@ Without a chain, or without an alternative, the original error is returned uncha
 **Records and events:** each attempt has its own record. Later attempts have outcome `fallback`, the model they replaced and the cause; the policy outcome stays separate. Only the attempt that ended the request counts as a request in the daily totals, all of them count as attempts, cost and tokens, and when the gateway answered something else than that attempt's own result (an exhausted chain, a refusal) the record keeps both. Each admitted transition writes one `fallback` event, in the same transaction as the next attempt's reservation, with the app, the request ID, the attempt index, `from_model`, `to_model` and the cause, but no user hash or content. It means the next model was admitted, not that it answered. After a crash, attempts in flight are charged at their reservation and the last one admitted becomes the terminal one; nothing is sent again. `comporta users forget` and retention remove these records with the user's requests and keep the app totals.
 
 [`examples/fallback.yaml`](examples/fallback.yaml) runs a chain on the fake provider, without real credentials.
+
+### Response cache
+
+The response cache answers a repeated deterministic request from memory, without calling the provider. It is off by default and enabled per app.
+
+```yaml
+cache:
+  max_bytes: 256000000          # default and maximum, decimal bytes, shared by every app
+apps:
+  support:
+    cache:
+      enabled: true
+      ttl_seconds: 600          # 1 to 3600, default 600
+      shared_across_users: false
+```
+
+- **What is cached:** only `POST /v1/messages` and `POST /v1/chat/completions` with `temperature` present and equal to zero. Absent, `null` or any other value is never cached. `0` and `0.0` are both zero, but they are different requests.
+- **Exact match:** an entry is reused only for the same app, the same end user (or the anonymous bucket of the app), the same provider, model, route and stream flag, the same protocol headers such as `anthropic-version`, and the same body bytes after the gateway's own changes. Field order, whitespace, unknown fields, tools, images and `stream_options` all count: reordering a JSON object is a miss. There is no semantic matching.
+- **What is replayed:** the successful answer exactly as the client first received it, with status 200, its content type and `x-comporta-cache: hit`. A stream is replayed event by event in its original order, terminal included (`[DONE]` or `message_stop`), and the SDK reads it as a normal stream. The usage chunk is only present when the client asked for it. Only an answer that finished with a confirmed terminal, complete usage and no error, and whose record was made durable, is stored; errors, cut streams and answers from a later model of a fallback chain never are. Miss and bypass add no header.
+- **Usage shown versus usage charged:** the replayed body keeps its original ids, timestamps and `usage`, so SDKs keep working. That usage belongs to the call that filled the cache. The hit itself consumes nothing: it is recorded with outcome `cached`, cost 0 and zero tokens, its reservation is released, and a `cached` event is written next to `request_completed`. `cache_read_tokens` and `cache_write_tokens` still mean the provider's own prompt caching.
+- **Protections still apply:** the cache is read after authentication, pauses, deletion barriers, sensitive data inspection, the loop guard, the limit policy and the reservation. A hit counts for `requests_per_minute` and the loop guard and holds its `max_concurrent` slot until the replay ends. A budget or hard cap that cannot reserve the request refuses it even when the answer is cached: the cache never goes around a limit. With `on_limit: downgrade` the answer is stored under the model actually sent, and the response headers come from the current request.
+- **Sensitive data:** a request whose content was redacted is never read from nor stored in the cache, with or without `rehydrate`, and neither is one whose inspection could not finish. `detect` alone, or a `redact` rule that found nothing, does not prevent caching.
+- **`shared_across_users`:** lets any user of the same app receive an entry filled by another user, never across apps. The identity fields the gateway writes are left out of the match, but the answer itself may have been influenced by the first user, by their content or by a provider that echoes the user field. Enable it only for outputs that are not personal.
+- **Memory:** one LRU across all apps, bounded by `max_bytes`. The budget counts the stored bytes, the captures in progress, replays still reading an evicted entry and a fixed overhead per entry and event; it is not a limit on the process memory. A single answer above 16 MB, or one that does not fit the free budget, is still delivered but not kept. Concurrent misses of the same request each call the provider.
+- **Expiry and invalidation:** the TTL starts when the answer is stored, and a hit never extends it. Any applied reload empties the cache, whatever changed; a rejected or unchanged reload keeps it. Lowering `max_bytes` evicts at once what is not being replayed. `comporta users forget` empties every app the user had state in, shared entries included, and a capture that started before it is discarded.
+- **Restart:** the cache lives in memory only. Nothing is written to the data directory, logs, events or the database, and every start begins empty.
+
+**Hit rate:** for an app and a period, the number of generation requests recorded with outcome `cached` divided by all generation requests recorded, counting each request once (the terminal attempt, plus refusals before admission). It describes the real traffic in the retained records and is not an estimate of money saved.
+
+[`examples/response-cache.yaml`](examples/response-cache.yaml) shows default isolation and a shared app on the fake provider, without real credentials.
 
 ### Loop guard
 
@@ -491,7 +521,7 @@ $ comporta users forget user_42
 deleted 16 rows; unlinked 4 rows kept for app totals; cleared 2 in-memory counters
 ```
 
-The ID is pseudonymized for every app with any state, including apps removed from the YAML, and is never stored or logged by the gateway (it stays in your shell history). New requests of that user get 503 `user_maintenance` for the duration; requests already running are given up to 10 seconds to finish and reach accounting, otherwise the command fails with 409 and deletes nothing. Then one transaction deletes the user's request records, daily totals, events, user budgets and reservation items, and unlinks the user from reservations, rate events, the limit ledger and the checkpoint. App totals, app budgets and app rate limits do not change. A locked database is retried for 10 seconds; after that the answer is `deletion failed; no records were removed`. A user without records gets `no records found for this user ID` with exit code 0. `anonymous` names a user called anonymous, never the anonymous bucket.
+The ID is pseudonymized for every app with any state, including apps removed from the YAML, and is never stored or logged by the gateway (it stays in your shell history). New requests of that user get 503 `user_maintenance` for the duration; requests already running are given up to 10 seconds to finish and reach accounting, otherwise the command fails with 409 and deletes nothing. Then one transaction deletes the user's request records, daily totals, events, user budgets and reservation items, and unlinks the user from reservations, rate events, the limit ledger and the checkpoint. The response cache of every app involved is emptied as well. App totals, app budgets and app rate limits do not change. A locked database is retried for 10 seconds; after that the answer is `deletion failed; no records were removed`. A user without records gets `no records found for this user ID` with exit code 0. `anonymous` names a user called anonymous, never the anonymous bucket.
 
 Deletion is logical: it does not overwrite old SQLite pages, backups or disks. It does not ban the user: new traffic creates new history. If the connection drops after the request was sent, the CLI reports an unknown outcome; the command is safe to repeat.
 

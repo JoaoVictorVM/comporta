@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/JoaoVictorVM/comporta/internal/responsecache"
+	"github.com/JoaoVictorVM/comporta/internal/testkit"
 )
 
 // benchmarkCache measures the gateway alone: the provider answers at once, so
@@ -23,7 +24,7 @@ func benchmarkCache(b *testing.B, settings string, body string, reply http.Handl
 		text := body
 		if distinct {
 			i++
-			text = strings.Replace(body, `"oi"`, fmt.Sprintf(`"oi %d"`, i), 1)
+			text = strings.Replace(body, cachePrompt, testkit.Prompt(fmt.Sprintf("oi %d", i)), 1)
 		}
 		request, _ := http.NewRequest(http.MethodPost, fx.server.URL+"/v1/chat/completions", strings.NewReader(text))
 		request.Header.Set("Content-Type", "application/json")
@@ -43,7 +44,7 @@ func BenchmarkCacheMissJSON(b *testing.B) {
 }
 
 func BenchmarkCacheReplaySSE(b *testing.B) {
-	body := `{"model":"fake-gpt","messages":[{"role":"user","content":"oi"}],"temperature":0,"stream":true}`
+	body := `{"model":"fake-gpt","messages":[{"role":"user","content":"` + cachePrompt + `"}],"temperature":0,"stream":true}`
 	stream := sseReply(strings.Repeat(deltaChunk, 50) + usageChunk + doneChunk)
 	b.Run("provider", func(b *testing.B) { benchmarkCache(b, "", body, stream, false) })
 	b.Run("replay", func(b *testing.B) { benchmarkCache(b, cacheSettings, body, stream, false) })
