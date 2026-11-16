@@ -104,17 +104,51 @@ type call struct {
 	// restore holds the reverse map of this request when its JSON answer must have
 	// placeholders restored; nil otherwise.
 	restore *sensitivedata.ReverseMap
+	// hold keeps a failure before commit for the operation to decide on, since
+	// another model may still answer. held is that failure.
+	hold bool
+	held *heldFailure
 }
 
-// failBeforeCommit answers with an error and records it on the attempt.
+// heldFailure is an answer not written yet: the failure, its Retry-After and
+// the upstream headers that would go with it. Nothing of it reaches the
+// client unless it becomes the final answer.
+type heldFailure struct {
+	failure    Failure
+	retryAfter string
+	header     http.Header
+	writeLimit time.Duration
+}
+
+// failBeforeCommit answers with an error and records it on the attempt, or
+// holds it when the operation may still fall back.
 func (c *call) failBeforeCommit(failure Failure, retryAfter string) {
+	c.failWithHeaders(failure, retryAfter, nil)
+}
+
+func (c *call) failWithHeaders(failure Failure, retryAfter string, header http.Header) {
 	c.attempt.fail(failure)
-	if retryAfter != "" {
-		c.w.Header().Set("Retry-After", retryAfter)
+	held := &heldFailure{failure: failure, retryAfter: retryAfter, header: header, writeLimit: c.writeLimit}
+	if c.hold {
+		c.held = held
+		return
 	}
-	c.w.prepareWrite(c.writeLimit)
-	WriteFailure(c.w, c.format, failure)
-	c.attempt.markClientByte(failure.Status)
+	held.write(c.w, c.format, c.attempt)
+}
+
+// write answers with the held failure, upstream headers included.
+func (h *heldFailure) write(w *trackedWriter, format auth.Format, a *attempt) {
+	for name, values := range h.header {
+		for _, value := range values {
+			w.Header().Add(name, value)
+		}
+	}
+	if h.retryAfter != "" {
+		w.Header().Set("Retry-After", h.retryAfter)
+	}
+	w.prepareWrite(h.writeLimit)
+	WriteFailure(w, format, h.failure)
+	a.markClientByte(h.failure.Status)
 }
 
 // readFailure classifies an error while reading the provider's body.
@@ -141,10 +175,11 @@ func (c *call) serveUpstreamError(response *http.Response) {
 			retryAfter = value
 		}
 	}
+	header := http.Header{}
 	if failure.Code != CodeProviderRedirect && failure.Code != CodeInvalidUpstreamResponse {
-		copyResponseHeaders(c.w.Header(), response.Header)
+		copyResponseHeaders(header, response.Header)
 	}
-	c.failBeforeCommit(failure, retryAfter)
+	c.failWithHeaders(failure, retryAfter, header)
 }
 
 // serveNormal buffers the response, up to a limit, because a limit breach or invalid

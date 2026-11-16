@@ -54,6 +54,9 @@ func validate(r storage.Record) error {
 	if err := r.ValidatePolicy(); err != nil {
 		return err
 	}
+	if err := r.ValidateFallback(); err != nil || !category.MatchString(r.TerminalErrorCode) {
+		return storage.ErrInvalid
+	}
 	// A downgraded transport outcome only exists when the policy downgraded.
 	if r.Outcome == "downgraded" && r.PolicyOutcome != "downgraded" {
 		return storage.ErrInvalid
@@ -235,7 +238,7 @@ func sameAdmission(a, b storage.Record) bool {
 	qa, _ := json.Marshal(a.Quote)
 	qb, _ := json.Marshal(b.Quote)
 	return a.RequestID == b.RequestID && a.AttemptIndex == b.AttemptIndex && a.AppName == b.AppName && a.UserHash == b.UserHash && a.Anonymous == b.Anonymous && a.Operation == b.Operation && a.Provider == b.Provider && a.ModelRequested == b.ModelRequested && a.ModelUsed == b.ModelUsed && a.StartedAt.Equal(b.StartedAt) && a.Day == b.Day && a.Timezone == b.Timezone && a.ReservedCost == b.ReservedCost && string(qa) == string(qb) &&
-		a.PolicyOutcome == b.PolicyOutcome && a.PolicyLimitName == b.PolicyLimitName
+		a.PolicyOutcome == b.PolicyOutcome && a.PolicyLimitName == b.PolicyLimitName && a.FallbackFrom == b.FallbackFrom && a.FallbackCause == b.FallbackCause
 }
 
 func (s *Store) Commit(ctx context.Context, records []storage.Record) error {
@@ -246,6 +249,12 @@ func (s *Store) Commit(ctx context.Context, records []storage.Record) error {
 		return databaseError(err)
 	}
 	defer tx.Rollback()
+	// Only a database of an earlier release, read in tests before its
+	// migration, lacks the sessions table.
+	sessions, err := hasTable(ctx, tx, "request_operations")
+	if err != nil {
+		return err
+	}
 	var notifications []events.Event
 	for _, r := range records {
 		if err = validate(r); err != nil {
@@ -257,7 +266,7 @@ func (s *Store) Commit(ctx context.Context, records []storage.Record) error {
 			return storage.ErrInvalid
 		}
 		inserted := false
-		if err = commitRecord(ctx, tx, r, &inserted); err != nil {
+		if err = commitRecord(ctx, tx, r, sessions, &inserted); err != nil {
 			return err
 		}
 		if inserted {
@@ -278,7 +287,29 @@ func (s *Store) Commit(ctx context.Context, records []storage.Record) error {
 	return nil
 }
 
-func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, inserted *bool) error {
+func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, sessions bool, inserted *bool) error {
+	// The session of a request that fell back decides which attempt is terminal.
+	// A recovered record takes that role; a live one must already carry it.
+	var op operationRow
+	if r.AttemptIndex > 0 && sessions {
+		var err error
+		if op, err = readOperation(ctx, tx, r.RequestID); err != nil {
+			return err
+		}
+		count, err := op.requestCount(r.AttemptIndex, r.RequestCount)
+		if err != nil {
+			return err
+		}
+		if r.Recovered && count != r.RequestCount {
+			r.RequestCount = count
+			if count == 0 {
+				r.TerminalErrorCode, r.TerminalStatus = "", nil
+			}
+		}
+		if r.RequestCount != count {
+			return storage.ErrConflict
+		}
+	}
 	data, _ := json.Marshal(r)
 	quote, _ := json.Marshal(r.Quote)
 	var old string
@@ -312,7 +343,10 @@ func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, inserted *b
 		if err = decodeRecord(exact.String, &expected); err != nil {
 			return err
 		}
+		// The journal holds the attempt's own result. Whether it ended the logical
+		// request is decided afterwards, so the role fields come from the record.
 		expected.Recovered = r.Recovered
+		expected.RequestCount, expected.TerminalErrorCode, expected.TerminalStatus = r.RequestCount, r.TerminalErrorCode, r.TerminalStatus
 		canonical, _ := json.Marshal(expected)
 		if string(canonical) != string(data) {
 			return storage.ErrConflict
@@ -320,6 +354,11 @@ func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, inserted *b
 	}
 	if err = insertRequest(ctx, tx, r, string(data), string(quote)); err != nil {
 		return err
+	}
+	if op.exists && r.AttemptIndex == op.last {
+		if err = closeOperation(ctx, tx, r); err != nil {
+			return err
+		}
 	}
 	for _, scope := range []string{"app", "user"} {
 		subject := ""
@@ -418,7 +457,7 @@ func (s *Store) Recover(ctx context.Context, now time.Time) error {
 			r.Cost = r.ReservedCost
 			r.UsageMissing = true
 			r.Recovered = true
-			if r.Outcome != "downgraded" {
+			if r.Outcome != "downgraded" && r.Outcome != "fallback" {
 				r.Outcome = "ok"
 			}
 			r.RequestCount = 1

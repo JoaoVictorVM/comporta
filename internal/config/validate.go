@@ -334,6 +334,34 @@ func validateFallback(app *App, path string, cfg *Config, owners map[string]stri
 			Message: "fallback chain mixes API formats; entries in another format are not eligible until cross-provider translation exists",
 		})
 	}
+	if len(app.Fallback) == 0 {
+		return
+	}
+	// A request can only fall back to a chain entry of its own format other than
+	// the model it was sent to. A format whose requests never have one runs
+	// without fallback, which is said once per format.
+	allowed := map[APIFormat]int{}
+	for _, model := range app.AllowedModels {
+		if owner, declared := owners[model]; declared {
+			allowed[cfg.Providers[owner].APIFormat]++
+		}
+	}
+	chained := map[APIFormat]bool{}
+	for _, model := range app.Fallback {
+		if owner, declared := owners[model]; declared && slices.Contains(app.AllowedModels, model) {
+			chained[cfg.Providers[owner].APIFormat] = true
+		}
+	}
+	for _, format := range []APIFormat{FormatAnthropic, FormatOpenAI} {
+		if allowed[format] == 0 || (chained[format] && allowed[format] > 1) {
+			continue
+		}
+		position := d.positions[chainPath]
+		warnings.add(Diagnostic{
+			Code: CodeFallbackDisabled, Path: chainPath, Line: position.Line, Column: position.Column,
+			Message: "fallback chain has no alternative for " + string(format) + " requests; fallback is disabled for that format",
+		})
+	}
 }
 
 func validateHardCap(budget Budget, hardCap *Budget, path string, derive bool, d *decoder) {

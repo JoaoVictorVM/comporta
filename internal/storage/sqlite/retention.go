@@ -27,6 +27,14 @@ func (s *Store) Retain(ctx context.Context, cutoff time.Time) error {
 			}
 		}
 	}
+	// A session is history once its terminal attempt was materialized; an
+	// active one still protects attempts whose role is undecided.
+	s.mu.Lock()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM request_operations WHERE state='closed' AND materialized=1 AND finished_at < ?`, cutoff.UnixMicro())
+	s.mu.Unlock()
+	if err != nil {
+		return databaseError(err)
+	}
 	return nil
 }
 

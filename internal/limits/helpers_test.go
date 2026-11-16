@@ -24,7 +24,7 @@ type memStore struct {
 	seq          int64
 	reservations map[handleKey]*storage.Reservation
 	ledger       []storage.LedgerEntry
-	rates        map[string]*storage.RateEvent
+	rates        map[handleKey]*storage.RateEvent
 	checkpoint   *storage.LimitCheckpoint
 	buckets      map[bucketKey]storage.BudgetBucket
 	daily        []storage.Daily
@@ -37,7 +37,7 @@ type memStore struct {
 }
 
 func newMemStore() *memStore {
-	return &memStore{reservations: map[handleKey]*storage.Reservation{}, rates: map[string]*storage.RateEvent{}, buckets: map[bucketKey]storage.BudgetBucket{}, results: map[handleKey]*storage.Record{}}
+	return &memStore{reservations: map[handleKey]*storage.Reservation{}, rates: map[handleKey]*storage.RateEvent{}, buckets: map[bucketKey]storage.BudgetBucket{}, results: map[handleKey]*storage.Record{}}
 }
 
 func (s *memStore) commit(r storage.Reservation) (int64, error) {
@@ -55,7 +55,7 @@ func (s *memStore) commit(r storage.Reservation) (int64, error) {
 	s.reservations[key] = &copied
 	if r.Rate != nil {
 		rate := *r.Rate
-		s.rates[r.RequestID] = &rate
+		s.rates[handleKey{r.RequestID, r.AttemptIndex}] = &rate
 	}
 	s.seq++
 	entry := storage.LedgerEntry{Seq: s.seq, RequestID: r.RequestID, AttemptIndex: r.AttemptIndex, Transition: storage.TransitionAdmit, OccurredAt: r.AdmittedAt, AppName: r.AppName}
@@ -108,7 +108,7 @@ func (s *memStore) SettleReservation(_ context.Context, st storage.Settlement) (
 	if st.Transition == storage.TransitionRelease {
 		r.State = storage.ReservationReleased
 	}
-	if rate := s.rates[r.RequestID]; rate != nil && st.RateTokens != nil {
+	if rate := s.rates[handleKey{r.RequestID, r.AttemptIndex}]; rate != nil && st.RateTokens != nil {
 		tokens := *st.RateTokens
 		rate.ActualTokens = &tokens
 		rate.Active = false

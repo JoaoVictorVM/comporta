@@ -70,6 +70,9 @@ type Handle struct {
 	state      string
 	finished   bool
 	degraded   bool
+	// op is the logical request this attempt belongs to, which holds the
+	// concurrency slot instead of the attempt. Nil for a plain admission.
+	op *Session
 }
 
 // Degraded reports whether the attempt was admitted while limits were degraded
@@ -285,10 +288,13 @@ func (m *Manager) Evaluate(p Policy, r Request) (Decision, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	civil, elapsed := m.now()
-	return m.evaluate(p, r, civil, elapsed, m.zoneFor(p, civil))
+	return m.evaluate(p, r, civil, elapsed, m.zoneFor(p, civil), false)
 }
 
-func (m *Manager) evaluate(p Policy, r Request, civil time.Time, now time.Duration, tz string) (Decision, error) {
+// evaluate checks every limit of one attempt. A continuation is a later
+// attempt of a logical request already counted per minute and already holding
+// its concurrency slot: only tokens and budgets apply to it.
+func (m *Manager) evaluate(p Policy, r Request, civil time.Time, now time.Duration, tz string, continuation bool) (Decision, error) {
 	if r.EstimatedTokens < 0 || r.ReservedCost < 0 || r.Subject.Hash == "" || r.Subject.App != p.App {
 		return Decision{}, ErrIntegrity
 	}
@@ -301,7 +307,7 @@ func (m *Manager) evaluate(p Policy, r Request, civil time.Time, now time.Durati
 	}
 	for _, s := range subjects {
 		limit := p.set(s.scope()).rate(RequestsPerMinute)
-		if limit <= 0 {
+		if limit <= 0 || continuation {
 			continue
 		}
 		w := m.window(s, now)
@@ -344,7 +350,7 @@ func (m *Manager) evaluate(p Policy, r Request, civil time.Time, now time.Durati
 	}
 	for _, s := range subjects {
 		limit := p.set(s.scope()).rate(MaxConcurrent)
-		if limit <= 0 {
+		if limit <= 0 || continuation {
 			continue
 		}
 		if current := m.concurrent[s]; current+1 > limit {
@@ -438,19 +444,32 @@ func (m *Manager) Reserve(p Policy, r Request, commit func(storage.Reservation) 
 // frozen in the reservation that commit makes durable, and a repeat of the same
 // request returns that same selection.
 func (m *Manager) ReserveSelect(p Policy, r Request, candidates []Candidate, commit func(storage.Reservation, Selection) (int64, error)) (*Handle, Decision, Selection, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.reserveLocked(p, r, candidates, commit, nil)
+}
+
+// reserveLocked admits one attempt. With op, the attempt belongs to a logical
+// request: the first one takes the concurrency slot for the whole operation,
+// and a later one is a continuation under the policy and generation captured
+// at the first admission.
+func (m *Manager) reserveLocked(p Policy, r Request, candidates []Candidate, commit func(storage.Reservation, Selection) (int64, error), op *Session) (*Handle, Decision, Selection, error) {
 	if len(candidates) == 0 || len(candidates) > 2 || candidates[0].ID != CandidateOriginal || candidates[0].Unavailable ||
 		(len(candidates) == 2 && candidates[1].ID != CandidateDowngrade) {
 		return nil, Decision{}, Selection{}, ErrIntegrity
 	}
 	r.EstimatedTokens, r.ReservedCost = candidates[0].EstimatedTokens, candidates[0].ReservedCost
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.observeGeneration(p, r.Generation); err != nil {
-		return nil, Decision{}, Selection{}, err
+	continuation := op != nil && r.AttemptIndex > 1
+	// A continuation keeps its generation, so a reload in the middle of a chain
+	// never mixes policies; new operations still meet the current generation.
+	if !continuation {
+		if err := m.observeGeneration(p, r.Generation); err != nil {
+			return nil, Decision{}, Selection{}, err
+		}
 	}
 	key := handleKey{r.RequestID, r.AttemptIndex}
 	if existing := m.handles[key]; existing != nil {
-		if existing.asked == r && slices.Equal(existing.candidates, candidates) {
+		if existing.asked == r && slices.Equal(existing.candidates, candidates) && existing.op == op {
 			return existing, Decision{Allowed: true, Degraded: existing.degraded}, existing.selection, nil
 		}
 		return nil, Decision{}, Selection{}, ErrConflict
@@ -476,7 +495,7 @@ func (m *Manager) ReserveSelect(p Policy, r Request, candidates []Candidate, com
 	picked, err := choose(p, candidates[0], target, func(c Candidate) (Decision, error) {
 		asked := r
 		asked.EstimatedTokens, asked.ReservedCost = c.EstimatedTokens, c.ReservedCost
-		return m.evaluate(p, asked, civil, elapsed, tz)
+		return m.evaluate(p, asked, civil, elapsed, tz, continuation)
 	})
 	if err != nil {
 		return nil, Decision{Degraded: degraded}, Selection{}, err
@@ -500,8 +519,8 @@ func (m *Manager) ReserveSelect(p Policy, r Request, candidates []Candidate, com
 		return nil, decision, Selection{}, err
 	}
 	h := &Handle{key: key, request: chosen, asked: r, candidates: slices.Clone(candidates), selection: picked.selection,
-		app: p.App, items: reservation.Items, state: storage.ReservationReserved, degraded: degraded}
-	if err := m.applyAdmission(h, elapsed, civil, seq); err != nil {
+		app: p.App, items: reservation.Items, state: storage.ReservationReserved, degraded: degraded, op: op}
+	if err := m.applyAdmission(h, elapsed, civil, seq, !continuation); err != nil {
 		m.markDegraded(civil, "integrity")
 		return nil, decision, Selection{}, err
 	}
@@ -546,14 +565,14 @@ func (m *Manager) buildReservation(p Policy, r Request, civil time.Time, tz stri
 			}
 		}
 	}
-	if r.AttemptIndex == 1 {
-		res.Rate = &storage.RateEvent{RequestID: r.RequestID, AppName: p.App, Subject: r.Subject.Hash, Anonymous: r.Subject.Anonymous,
-			AdmittedAt: civil, EstimatedTokens: tokens, Active: true}
-	}
+	// Every attempt carries its tokens at its own admission instant; only the
+	// first one is also the request counted per minute.
+	res.Rate = &storage.RateEvent{RequestID: r.RequestID, AttemptIndex: r.AttemptIndex, AppName: p.App, Subject: r.Subject.Hash, Anonymous: r.Subject.Anonymous,
+		AdmittedAt: civil, EstimatedTokens: tokens, Active: true}
 	return res, nil
 }
 
-func (m *Manager) applyAdmission(h *Handle, elapsed time.Duration, civil time.Time, seq int64) error {
+func (m *Manager) applyAdmission(h *Handle, elapsed time.Duration, civil time.Time, seq int64, slot bool) error {
 	var failure error
 	for _, item := range h.items {
 		b := m.bucket(keyFor(h.app, item))
@@ -566,18 +585,18 @@ func (m *Manager) applyAdmission(h *Handle, elapsed time.Duration, civil time.Ti
 		b.dirty = true
 	}
 	subjects := []Subject{h.request.Subject.appSubject(), h.request.Subject}
-	if h.request.AttemptIndex == 1 {
-		tokens := int64(0)
-		if h.request.Operation == OperationGeneration {
-			tokens = h.request.EstimatedTokens
-		}
-		h.event = &rateEvent{requestID: h.request.RequestID, at: elapsed, civil: civil, tokens: tokens, active: true}
-		for _, s := range subjects {
-			m.window(s, elapsed).add(h.event)
-		}
+	tokens := int64(0)
+	if h.request.Operation == OperationGeneration {
+		tokens = h.request.EstimatedTokens
 	}
+	h.event = &rateEvent{requestID: h.request.RequestID, at: elapsed, civil: civil, tokens: tokens, active: true, request: h.request.AttemptIndex <= 1}
 	for _, s := range subjects {
-		m.concurrent[s]++
+		m.window(s, elapsed).add(h.event)
+	}
+	if slot {
+		for _, s := range subjects {
+			m.concurrent[s]++
+		}
 	}
 	m.handles[h.key] = h
 	m.seq = max(m.seq, seq)
@@ -591,7 +610,15 @@ func (m *Manager) finish(h *Handle) {
 		return
 	}
 	h.finished = true
-	for _, s := range []Subject{h.request.Subject.appSubject(), h.request.Subject} {
+	if h.op != nil {
+		// The slot belongs to the logical request and ends with CloseSession.
+		return
+	}
+	m.releaseSlot(h.request.Subject)
+}
+
+func (m *Manager) releaseSlot(subject Subject) {
+	for _, s := range []Subject{subject.appSubject(), subject} {
 		if m.concurrent[s] > 0 {
 			m.concurrent[s]--
 		}

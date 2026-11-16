@@ -156,7 +156,7 @@
             "cooldown": {"$ref": "#/$defs/duration", "description": "Default: 120s."}
           }
         },
-        "fallback": {"$ref": "#/$defs/models", "maxItems": 4, "description": "Ordered fallback chain of allowed models. Default: empty."},
+        "fallback": {"$ref": "#/$defs/models", "maxItems": 4, "description": "Ordered fallback chain of allowed models of the same API format, tried after 429, 5xx, connection errors or timeouts before anything reaches the client. Default: empty."},
         "cache": {
           "type": "object",
           "additionalProperties": false,

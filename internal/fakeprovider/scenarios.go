@@ -20,6 +20,16 @@ const (
 	// ScenarioAgentLoop answers every conversation with the same tool call, the
 	// shape of an agent stuck repeating one step. AgentLoop is its client side.
 	ScenarioAgentLoop Scenario = "agent-loop"
+	// ScenarioServerError answers 500 and ScenarioBadRequest 400, the two sides
+	// of the fallback triggers.
+	ScenarioServerError Scenario = "server-error"
+	ScenarioBadRequest  Scenario = "bad-request"
+	// ScenarioStreamErrorBeforeChunk sends an overload error as the first event
+	// of a stream, before anything could reach a client; a normal request gets
+	// a 529. ScenarioStreamErrorAfterChunk sends one event first, so the error
+	// can only be forwarded.
+	ScenarioStreamErrorBeforeChunk Scenario = "stream-error-before-chunk"
+	ScenarioStreamErrorAfterChunk  Scenario = "stream-error-after-chunk"
 )
 
 // Scenarios lists every valid scenario.
@@ -27,6 +37,7 @@ func Scenarios() []Scenario {
 	return []Scenario{
 		ScenarioSuccess, ScenarioRateLimit, ScenarioOverload,
 		ScenarioHeaderTimeout, ScenarioSlowStream, ScenarioDisconnectMidstream, ScenarioAgentLoop,
+		ScenarioServerError, ScenarioBadRequest, ScenarioStreamErrorBeforeChunk, ScenarioStreamErrorAfterChunk,
 	}
 }
 

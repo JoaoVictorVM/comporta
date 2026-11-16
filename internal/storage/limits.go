@@ -48,10 +48,12 @@ type LimitQuote struct {
 	PolicyOutcome string `json:"policy_outcome,omitempty"`
 }
 
-// RateEvent is one admitted logical request in the sliding windows of its app
-// and user.
+// RateEvent is one admitted attempt in the sliding windows of its app and
+// user. Attempt 1 is also the logical request counted per minute; later
+// attempts of the same request only carry their tokens.
 type RateEvent struct {
 	RequestID       string
+	AttemptIndex    int
 	AppName         string
 	Subject         string
 	Anonymous       bool

@@ -51,6 +51,12 @@ const (
 	CodeSensitiveDataBlocked    Code = "sensitive_data_blocked"
 	CodeSensitiveScanFailed     Code = "sensitive_data_scan_failed"
 	CodeRehydrationFailed       Code = "response_rehydration_failed"
+	// Terminal answers of a request that fell back: every eligible model
+	// failed, the shared deadline ran out, or the on_limit policy requires a
+	// model that already failed in the same request.
+	CodeFallbackExhausted             Code = "fallback_exhausted"
+	CodeFallbackDeadlineExceeded      Code = "fallback_deadline_exceeded"
+	CodeFallbackPolicyTargetExhausted Code = "fallback_policy_target_exhausted"
 )
 
 // ErrorClass groups failures for internal decisions, such as a later fallback.

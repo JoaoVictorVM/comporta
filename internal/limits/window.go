@@ -4,8 +4,9 @@ import "time"
 
 const slidingSpan = 60 * time.Second
 
-// rateEvent is one admitted logical request. One event is shared by the app
-// window and the user window.
+// rateEvent is one admitted attempt. One event is shared by the app window and
+// the user window. Only the first attempt of a logical request counts as a
+// request per minute; every attempt counts its own tokens at its admission.
 type rateEvent struct {
 	requestID string
 	at        time.Duration // monotonic elapsed of the admission
@@ -13,6 +14,7 @@ type rateEvent struct {
 	tokens    int64 // estimate while active, real total after settlement
 	active    bool
 	settled   bool
+	request   bool
 }
 
 // slidingWindow holds events admitted in the last 60 seconds, plus events that
@@ -42,7 +44,9 @@ func (w *slidingWindow) prune(now time.Duration) {
 			break
 		}
 		drop++
-		w.count--
+		if e.request {
+			w.count--
+		}
 		w.tokens -= e.tokens
 		if e.active {
 			w.overdue[e] = struct{}{}
@@ -56,7 +60,9 @@ func (w *slidingWindow) prune(now time.Duration) {
 
 func (w *slidingWindow) add(e *rateEvent) {
 	w.events = append(w.events, e)
-	w.count++
+	if e.request {
+		w.count++
+	}
 	w.tokens += e.tokens
 	if e.active {
 		w.activeTokens += e.tokens
@@ -91,10 +97,18 @@ func (w *slidingWindow) empty() bool { return len(w.events) == 0 && len(w.overdu
 // more request to fit under the limit.
 func (w *slidingWindow) requestRetry(limit int64, now time.Duration) time.Duration {
 	need := w.count - limit + 1
-	if need <= 0 || need > int64(len(w.events)) {
+	if need <= 0 {
 		return 0
 	}
-	return w.events[need-1].at + slidingSpan - now
+	for _, e := range w.events {
+		if !e.request {
+			continue
+		}
+		if need--; need == 0 {
+			return e.at + slidingSpan - now
+		}
+	}
+	return 0
 }
 
 // tokenRetry is how long until settled tokens leave the window and make room.

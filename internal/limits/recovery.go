@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/config"
@@ -67,8 +68,13 @@ func (m *Manager) Recover(ctx context.Context, snapshot *config.Snapshot) error 
 		event    *rateEvent
 		subjects []Subject
 	}
-	active := map[string]recovering{}
-	for _, e := range state.RateEvents {
+	active := map[handleKey]recovering{}
+	// Logical requests and later attempts come from two tables; the windows
+	// need them in admission order.
+	rates := slices.Clone(state.RateEvents)
+	slices.SortStableFunc(rates, func(a, b storage.RateEvent) int { return a.AdmittedAt.Compare(b.AdmittedAt) })
+	for _, e := range rates {
+		attempt := max(e.AttemptIndex, 1)
 		age := effective.Sub(e.AdmittedAt)
 		if age < 0 {
 			age = 0
@@ -77,7 +83,7 @@ func (m *Manager) Recover(ctx context.Context, snapshot *config.Snapshot) error 
 		if e.ActualTokens != nil {
 			tokens = *e.ActualTokens
 		}
-		event := &rateEvent{requestID: e.RequestID, at: elapsed - age, civil: e.AdmittedAt, tokens: tokens, active: e.Active, settled: !e.Active}
+		event := &rateEvent{requestID: e.RequestID, at: elapsed - age, civil: e.AdmittedAt, tokens: tokens, active: e.Active, settled: !e.Active, request: attempt == 1}
 		subjects := []Subject{{App: e.AppName}}
 		if e.Subject != "" {
 			subjects = append(subjects, Subject{App: e.AppName, Hash: e.Subject, Anonymous: e.Anonymous})
@@ -91,7 +97,7 @@ func (m *Manager) Recover(ctx context.Context, snapshot *config.Snapshot) error 
 			w.add(event)
 		}
 		if e.Active {
-			active[e.RequestID] = recovering{event, subjects}
+			active[handleKey{e.RequestID, attempt}] = recovering{event, subjects}
 		}
 	}
 	for _, w := range m.windows {
@@ -105,9 +111,7 @@ func (m *Manager) Recover(ctx context.Context, snapshot *config.Snapshot) error 
 				Operation: Operation(r.Quote.Operation), EstimatedTokens: r.Quote.EstimatedTokens, ReservedCost: r.Quote.ReservedCost, Generation: r.Quote.Generation},
 			selection: Selection{Candidate: CandidateID(r.Quote.Candidate), Model: r.Quote.Model, Outcome: PolicyOutcome(r.Quote.PolicyOutcome)},
 		}
-		if r.AttemptIndex == 1 {
-			h.event = active[r.RequestID].event
-		}
+		h.event = active[handleKey{r.RequestID, r.AttemptIndex}].event
 		transition, usage := recoveredUsage(r, open.Result)
 		st := h.settlement(transition, usage, effective)
 		seq, err := m.store.SettleReservation(ctx, st)

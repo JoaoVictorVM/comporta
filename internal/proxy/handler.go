@@ -227,6 +227,17 @@ type operation struct {
 	downgraded bool
 	// sensitive holds the reverse map of this request until the operation ends.
 	sensitive *sensitiveState
+	// session is the accounting of a request that may fall back to other
+	// models; concluded reports whether the last attempt's result is durable.
+	session     AccountingSession
+	concludeErr error
+	// terminal is the answer written by the gateway when it differs from the
+	// last attempt's own, such as an exhausted chain.
+	terminal *Failure
+	// index is the attempt being sent; deadline, when set, is shared by every
+	// attempt of a non-streaming request that may fall back.
+	index    int
+	deadline time.Time
 }
 
 // finish publishes the attempt and keeps a panic to this request. It is the one
@@ -248,6 +259,11 @@ func (o *operation) finish() {
 	}
 	if o.attempt != nil {
 		o.attempt.finish()
+	}
+	// The last concluded attempt becomes the terminal one, and the concurrency
+	// slot of the logical request is freed, whatever ended it.
+	if o.session != nil {
+		o.session.Close(o.terminal)
 	}
 	// Whatever ended the operation, its original values stop being referenced here.
 	o.sensitive.release()
@@ -356,6 +372,9 @@ func (o *operation) serve(r *http.Request) {
 			}
 		}
 		o.completion = admission.Complete
+		if session := o.session; session != nil {
+			o.completion = func(result AttemptResult) { o.concludeErr = session.Conclude(result) }
+		}
 		applyBudgetHeaders(o.w.Header(), admission.Budget)
 	}
 	choice, ok := plan.selected(admission)
@@ -372,7 +391,140 @@ func (o *operation) serve(r *http.Request) {
 		o.w.Header().Set(downgradedFromHeader, envelope.ModelRequested)
 	}
 	o.downgraded = choice.downgraded
-	o.send(r, choice.envelope, choice.providerName, choice.provider, choice.body, listeners)
+	app, _ := o.snapshot.App(choice.envelope.AppName)
+	chain := o.fallbackChain(app, choice.envelope, choice.envelope.ModelEffective)
+	// Later attempts need their own durable reservation, which only a session
+	// provides; without accounting there is nothing to reserve.
+	if len(chain) == 0 || (o.handler.accounting != nil && o.session == nil) {
+		o.send(r, choice.envelope, choice.providerName, choice.provider, choice.body, listeners, false)
+		return
+	}
+	o.fallback(r, plan, app, choice, chain, listeners)
+}
+
+// fallback sends the request to one model at a time until one answers, a
+// failure is not eligible, the chain ends, the shared deadline passes or the
+// client leaves. A failure is only held while nothing was written to the
+// client; once anything is committed, no other model is tried.
+func (o *operation) fallback(r *http.Request, plan *preparation, app config.App, current chosen, chain []string, listeners config.Listeners) {
+	if !current.envelope.Stream {
+		o.deadline = fallbackDeadlineAt(o.admission, listeners.NonStreamingTimeout)
+	}
+	sent := map[string]bool{}
+	considered := map[string]bool{}
+	var failed []failedSend
+	var transitions []transition
+	for index := 1; ; index++ {
+		o.index = index
+		model := current.envelope.ModelEffective
+		sent[model] = true
+		held := o.send(r, current.envelope, current.providerName, current.provider, current.body, listeners, true)
+		if held == nil {
+			return
+		}
+		next := ""
+		for _, candidate := range chain {
+			if !sent[candidate] && !considered[candidate] {
+				next = candidate
+				break
+			}
+		}
+		cause, eligible := fallbackCause(o.attempt.result)
+		if !eligible || (next == "" && len(transitions) == 0) {
+			held.write(o.w, o.format, o.attempt)
+			return
+		}
+		if r.Context().Err() != nil {
+			o.attempt.clientGone()
+			return
+		}
+		failed = append(failed, failedSend{model: model, cause: cause})
+		if !o.deadline.IsZero() && !o.handler.now().Before(o.deadline) {
+			o.answerTerminal(fallbackDeadline(o.deadline.Sub(o.admission), failed), held.writeLimit, true)
+			return
+		}
+		if next == "" || index >= maxAttempts {
+			o.answerTerminal(fallbackExhausted(failed), held.writeLimit, true)
+			return
+		}
+		// The failed attempt's result is made durable and settled before anything
+		// else is reserved or sent.
+		o.attempt.finish()
+		if o.concludeErr != nil {
+			o.answerTerminal(Failure{http.StatusServiceUnavailable, CodeUsageStorageUnavailable, ClassInternal, "usage storage unavailable"}, held.writeLimit, false)
+			return
+		}
+		considered[next] = true
+		choice, rejection := o.continueWith(r, plan, app, next, model, cause, sent)
+		if rejection != nil {
+			failure := rejection.failure()
+			o.terminal = &failure
+			o.reject(rejection)
+			return
+		}
+		transitions = append(transitions, transition{from: model, to: choice.envelope.ModelEffective, cause: cause})
+		if value, ok := fallbackHeaderValue(transitions); ok {
+			o.w.Header().Set(fallbackHeader, value)
+		}
+		if choice.downgraded && o.w.Header().Get(downgradedFromHeader) == "" {
+			o.w.Header().Set(downgradedFromHeader, next)
+		}
+		o.downgraded = choice.downgraded
+		current = choice
+	}
+}
+
+// answerTerminal writes an answer of the gateway itself. attached is false
+// when the last attempt already ended, so the answer belongs to the request
+// alone.
+func (o *operation) answerTerminal(failure Failure, writeLimit time.Duration, attached bool) {
+	o.terminal = &failure
+	o.w.prepareWrite(writeLimit)
+	WriteFailure(o.w, o.format, failure)
+	if attached {
+		o.attempt.markClientByte(failure.Status)
+	}
+}
+
+// continueWith prepares the next model from the request already capped,
+// pseudonymized and inspected, and admits it with its own quote. The policy
+// applies to it as to any attempt, but never sends a model that already failed.
+func (o *operation) continueWith(r *http.Request, plan *preparation, app config.App, model, from, cause string, sent map[string]bool) (chosen, *Rejection) {
+	request, err := plan.request.withModel(model)
+	if err != nil {
+		return chosen{}, asRejection(internalFailure())
+	}
+	name, provider, failure := o.resolveProvider(model)
+	if failure != nil {
+		return chosen{}, asRejection(*failure)
+	}
+	out := chosen{envelope: request.envelope, body: request.effectiveBody(), providerName: name, provider: provider}
+	if o.session == nil {
+		return out, nil
+	}
+	candidates := []Candidate{{ID: CandidateOriginal, Model: model, ProviderName: name, Provider: provider, BodySizeEffective: request.envelope.BodySizeEffective}}
+	var target *target
+	if _, policy := o.handler.accounting.(PolicyAccounting); policy {
+		if target = o.policyTarget(plan.request, app, model, sent); target != nil {
+			c := Candidate{ID: CandidateDowngrade, Model: target.model, ProviderName: target.providerName, Provider: target.provider, Unavailable: target.unavailable}
+			if target.request != nil {
+				c.BodySizeEffective = target.request.envelope.BodySizeEffective
+			}
+			candidates = append(candidates, c)
+		}
+	}
+	admission, rejection := o.session.Continue(r.Context(), request.envelope, candidates, from, cause)
+	if rejection != nil {
+		return chosen{}, rejection
+	}
+	applyBudgetHeaders(o.w.Header(), admission.Budget)
+	if admission.Selected != CandidateDowngrade {
+		return out, nil
+	}
+	if target == nil || target.request == nil {
+		return chosen{}, asRejection(internalFailure())
+	}
+	return chosen{envelope: target.request.envelope, body: target.effective, providerName: target.providerName, provider: target.provider, downgraded: true}, nil
 }
 
 // reject answers a refusal unless the client already left.
@@ -445,10 +597,29 @@ func (o *operation) reprepare(r *http.Request, body []byte, identity keys.Identi
 }
 
 func (o *operation) admit(ctx context.Context, plan *preparation) (Admission, *Rejection) {
+	if sessions, ok := o.handler.accounting.(SessionAccounting); ok && o.mayFallBack(plan) {
+		session, admission, rejection := sessions.AdmitSession(ctx, o.snapshot, plan.request.envelope, plan.candidates())
+		o.session = session
+		return admission, rejection
+	}
 	if policy, ok := o.handler.accounting.(PolicyAccounting); ok {
 		return policy.AdmitCandidates(ctx, o.snapshot, plan.request.envelope, plan.candidates())
 	}
 	return o.handler.accounting.Admit(ctx, o.snapshot, plan.request.envelope, plan.providerName, plan.provider)
+}
+
+// mayFallBack reports whether any model this request could be sent to has a
+// later eligible model. Requests that never fall back keep the plain admission.
+func (o *operation) mayFallBack(plan *preparation) bool {
+	envelope := plan.request.envelope
+	app, ok := o.snapshot.App(envelope.AppName)
+	if !ok {
+		return false
+	}
+	if len(o.fallbackChain(app, envelope, envelope.ModelEffective)) > 0 {
+		return true
+	}
+	return plan.target != nil && plan.target.request != nil && len(o.fallbackChain(app, envelope, plan.target.model)) > 0
 }
 
 // readBody applies the size limit and the same total deadline as the rest of the
@@ -506,9 +677,12 @@ func (o *operation) resolveProvider(model string) (string, config.Provider, *Fai
 	return name, provider, nil
 }
 
-func (o *operation) send(r *http.Request, envelope *Envelope, name string, provider config.Provider, body []byte, listeners config.Listeners) {
+// send makes one attempt. With hold, a failure before anything reached the
+// client is returned instead of written, for the operation to decide on.
+func (o *operation) send(r *http.Request, envelope *Envelope, name string, provider config.Provider, body []byte, listeners config.Listeners, hold bool) *heldFailure {
 	handler := o.handler
 	o.attempt = newAttempt(envelope, name, o.admission, handler.now, handler.sink, handler.logger)
+	o.attempt.result.AttemptIndex = max(o.index, 1)
 	o.attempt.complete = o.completion
 	o.attempt.result.NotSent = true
 
@@ -516,8 +690,12 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 	var cancelDeadline context.CancelFunc = func() {}
 	idle := listeners.StreamingIdleTimeout
 	if !envelope.Stream {
-		ctx, cancelDeadline = context.WithDeadline(ctx, o.admission.Add(listeners.NonStreamingTimeout))
-		idle = time.Until(o.admission.Add(listeners.NonStreamingTimeout))
+		deadline := o.admission.Add(listeners.NonStreamingTimeout)
+		if !o.deadline.IsZero() {
+			deadline = o.deadline
+		}
+		ctx, cancelDeadline = context.WithDeadline(ctx, deadline)
+		idle = time.Until(deadline)
 	}
 	defer cancelDeadline()
 	upstreamCtx, cancelCause := context.WithCancelCause(ctx)
@@ -526,13 +704,13 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 	current := &call{
 		handler: handler, w: o.w, format: o.format, envelope: envelope, attempt: o.attempt,
 		provider: name, clientCtx: r.Context(), upstreamCtx: upstreamCtx, cancelCause: cancelCause, writeLimit: idle,
-		restore: o.sensitive.restoring(),
+		restore: o.sensitive.restoring(), hold: hold,
 	}
 
 	target, err := upstreamURL(provider.BaseURL, o.route)
 	if err != nil {
 		current.failBeforeCommit(internalFailure(), "")
-		return
+		return current.held
 	}
 	secret, hasSecret := o.snapshot.ProviderAPIKey(name)
 	var connected atomic.Bool
@@ -542,7 +720,7 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 	request, err := newUpstreamRequest(traced, target, r.Header, o.format, secret, hasSecret, envelope.Stream, body)
 	if err != nil {
 		current.failBeforeCommit(internalFailure(), "")
-		return
+		return current.held
 	}
 	transport, release := handler.transports.acquire(o.snapshot, name, provider)
 	defer release()
@@ -552,7 +730,7 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 	if err != nil {
 		if r.Context().Err() != nil {
 			o.attempt.clientGone()
-			return
+			return nil
 		}
 		failure := classifyTransportError(err, connected.Load(), name)
 		if o.downgraded && failure.Code == CodeProviderTimeout {
@@ -562,7 +740,7 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 			failure = Failure{http.StatusBadGateway, CodeProviderUnreachable, ClassConnection, "provider " + name + " is unreachable"}
 		}
 		current.failBeforeCommit(failure, "")
-		return
+		return current.held
 	}
 	defer func() { _ = response.Body.Close() }()
 	o.attempt.markUpstreamHeaders(response.StatusCode)
@@ -577,5 +755,7 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 	}
 	if !current.attempt.result.Committed && r.Context().Err() != nil {
 		o.attempt.clientGone()
+		return nil
 	}
+	return current.held
 }

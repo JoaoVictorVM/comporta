@@ -14,6 +14,8 @@ var userLimitQueries = []string{
 	`SELECT count(*) FROM limit_reservations WHERE subject<>''`,
 	`SELECT count(*) FROM limit_reservation_items WHERE scope='user'`,
 	`SELECT count(*) FROM limit_rate_events WHERE subject<>''`,
+	`SELECT count(*) FROM limit_attempt_rate_events WHERE subject<>''`,
+	`SELECT count(*) FROM request_operations WHERE subject<>''`,
 	`SELECT count(*) FROM limit_ledger WHERE payload_json LIKE '%"scope":"user"%'`,
 	`SELECT count(*) FROM limit_checkpoints WHERE metadata_json LIKE '%"scope":"user"%'`,
 }
@@ -56,6 +58,8 @@ func unlinkLimitSubjectsCounted(ctx context.Context, tx *sql.Tx, app, subject st
 		{`DELETE FROM limit_reservation_items WHERE ` + itemFilter, itemArgs, &counts.items},
 		{`UPDATE limit_reservations SET subject='',anonymous=0 WHERE ` + reservations, args, &counts.unlinked},
 		{`UPDATE limit_rate_events SET subject='',anonymous=0 WHERE ` + reservations, args, &counts.unlinked},
+		{`UPDATE limit_attempt_rate_events SET subject='',anonymous=0 WHERE ` + reservations, args, &counts.unlinked},
+		{`UPDATE request_operations SET subject='',anonymous=0 WHERE ` + reservations, args, &counts.unlinked},
 	}
 	if !all {
 		steps = append(steps, struct {

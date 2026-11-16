@@ -369,6 +369,19 @@ func (s *Store) forgetOnce(ctx context.Context, subjects []storage.SubjectRef) (
 		if err = forgetJournal(ctx, tx, subject, &counts.Journal); err != nil {
 			return counts, err
 		}
+		// A session still active has attempts whose usage is in transit; a closed
+		// one is only metadata of requests deleted below.
+		var active int64
+		if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM request_operations WHERE app_name=? AND subject=? AND anonymous=0 AND state='active'`, subject.App, subject.Hash).Scan(&active); err != nil {
+			return counts, wrap(err)
+		}
+		if active > 0 {
+			return counts, storage.BusyError{Reason: "fallback session still active in storage"}
+		}
+		var operations int64
+		if err = exec(`DELETE FROM request_operations WHERE app_name=? AND subject=? AND anonymous=0`, &operations, subject.App, subject.Hash); err != nil {
+			return counts, err
+		}
 		if err = exec(`DELETE FROM events WHERE (app_name=? AND user_hash=? AND anonymous=0) OR request_id IN (SELECT request_id FROM requests WHERE app_name=? AND user_hash=? AND anonymous=0)`, &counts.Events, subject.App, subject.Hash, subject.App, subject.Hash); err != nil {
 			return counts, err
 		}

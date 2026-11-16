@@ -188,6 +188,39 @@ func TestFallbackRules(t *testing.T) {
 	}
 }
 
+func TestFallbackWarningsByFormat(t *testing.T) {
+	chain := func(allowed, entries string) []Diagnostic {
+		text := replaced(t, baseYAML, "allowed_models: [model-a, model-b]", "allowed_models: ["+allowed+"]\n    fallback: ["+entries+"]")
+		return requireValid(t, text).Warnings()
+	}
+	// One format with an alternative: nothing to say.
+	if warnings := chain("model-a, model-b", "model-b"); len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %+v", warnings)
+	}
+	// The only allowed model of the format is its only chain entry: requests of
+	// that format have nowhere else to go.
+	if warnings := chain("model-a", "model-a"); !hasDiagnostic(warnings, CodeFallbackDisabled, "apps.bot.fallback") {
+		t.Fatalf("chain without alternative: %+v", warnings)
+	}
+	// A chain with entries of another format only disables fallback for the
+	// format left without entries, and says so once per format.
+	warnings := chain("model-a, model-b, local/model", "local/model")
+	disabled := 0
+	for _, w := range warnings {
+		if w.Code == CodeFallbackDisabled {
+			disabled++
+			if !strings.Contains(w.Message, "anthropic") && !strings.Contains(w.Message, "openai") {
+				t.Fatalf("format not named: %+v", w)
+			}
+		}
+	}
+	if disabled != 2 || !hasDiagnostic(warnings, CodeFallbackMixedFormat, "apps.bot.fallback") {
+		t.Fatalf("mixed chain warnings: %+v", warnings)
+	}
+	// An invalid chain still fails validation instead of being ignored.
+	requireDiagnostic(t, replaced(t, baseYAML, "  bot:\n", "  bot:\n    fallback: [model-a, model-a]\n"), CodeInvalidValue, "apps.bot.fallback[1]")
+}
+
 func TestAlertAndTelemetryRules(t *testing.T) {
 	channel := func(body string) string {
 		return baseYAML + "alerts:\n  channels:\n    ops:\n" + body

@@ -184,6 +184,13 @@ func startLive(t *testing.T, scenario, extraListeners string) *liveGateway {
 // startLiveWith lets a test change the YAML before the processes start.
 func startLiveWith(t *testing.T, scenario, extraListeners string, edit func(string) string) *liveGateway {
 	t.Helper()
+	return startLiveFake(t, []string{"--scenario", scenario}, extraListeners, edit)
+}
+
+// startLiveFake passes its own arguments to the fake provider, such as a
+// scenario per model.
+func startLiveFake(t *testing.T, fakeArgs []string, extraListeners string, edit func(string) string) *liveGateway {
+	t.Helper()
 	gateway := &liveGateway{t: t, dir: t.TempDir(), proxyPort: freePort(t)}
 	fakePort, adminPort := freePort(t), freePort(t)
 	gateway.adminPort = adminPort
@@ -226,7 +233,7 @@ listeners:
 	gateway.key = gateway.createKey(config, "bot")
 	gateway.strictKey = gateway.createKey(config, "strict")
 	gateway.limitedKey = gateway.createKey(config, "limited")
-	gateway.start("fake-provider", "--port", fmt.Sprint(fakePort), "--scenario", scenario)
+	gateway.start(append([]string{"fake-provider", "--port", fmt.Sprint(fakePort)}, fakeArgs...)...)
 	waitForPort(t, fakePort)
 	gateway.start("serve", "--config", config)
 	waitForPort(t, gateway.proxyPort)

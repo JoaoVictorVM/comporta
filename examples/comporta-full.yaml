@@ -97,9 +97,13 @@ apps:
       similar_window: 30s
       requests_per_minute: 60
       cooldown: 120s
+    # Tried in order after an overload, a 5xx, a 429, a connection error or a
+    # timeout, before the first stream event. A request for claude-sonnet-4-6
+    # continues with claude-haiku-4-5; gpt-5-mini requests have no same-format
+    # alternative, so config validate says fallback is off for them.
     fallback:
+      - claude-sonnet-4-6
       - claude-haiku-4-5
-      - gpt-5-mini
     cache:
       enabled: true
       ttl_seconds: 600

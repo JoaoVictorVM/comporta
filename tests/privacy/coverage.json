@@ -23,7 +23,12 @@
     "tests/integration/sensitive_bench_test.go",
     "tests/privacy/canary_sensitive_test.go",
     "internal/proxy/policy_test.go",
-    "internal/proxy/output_limit_test.go"
+    "internal/proxy/output_limit_test.go",
+    "internal/proxy/fallback_test.go",
+    "internal/proxy/fallback_stream_test.go",
+    "tests/integration/proxy_fallback_test.go",
+    "tests/integration/limits_fallback_test.go",
+    "tests/privacy/canary_fallback_test.go"
   ],
   "parser_only_go_files": [
     {
@@ -52,6 +57,7 @@
     "process/loop-cut",
     "process/sensitive-data",
     "process/limit-policies",
+    "process/fallback",
     "pipeline/provider-receives-prompt",
     "pipeline/upstream-error-echo",
     "pipeline/stream-error-echo",
