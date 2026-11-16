@@ -11,6 +11,7 @@ import (
 
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/responsecache"
+	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
 )
 
 // cacheAccounting admits everything and confirms each conclusion, or fails it
@@ -258,5 +259,25 @@ func TestStreamingUsageOptionsPartitionCache(t *testing.T) {
 	_, replayedUsage := fx.post("/v1/chat/completions", "openai", asked)
 	if upstream.count() != 2 || replayedUsage != withUsage {
 		t.Fatal("the usage chunk the client asked for is replayed")
+	}
+}
+
+func TestFailedDetectScanBypassesCache(t *testing.T) {
+	tight := sensitivedata.DefaultLimits()
+	tight.MaxCandidates = 1
+	upstream, server := startUpstream(t, formatReply)
+	cache := responsecache.New(responsecache.Options{})
+	fx := newFixture(t, server.URL, fixtureOptions{
+		listeners: cacheSettings + detectionSettings("email: detect"), accounting: &cacheAccounting{}, cache: cache,
+		sensitive: &SensitiveStage{Scanner: sensitivedata.NewScanner(sensitivedata.WithLimits(tight)), Recorder: &sensitiveRecorder{}},
+	})
+	body := `{"model":"fake-claude","max_tokens":10,"temperature":0,"messages":[{"role":"user","content":"a@example.org b@example.org"}]}`
+	for range 2 {
+		if response, answer := fx.post("/v1/messages", "anthropic", body); response.StatusCode != 200 || response.Header.Get(cacheHeader) != "" {
+			t.Fatalf("%d %s", response.StatusCode, answer)
+		}
+	}
+	if upstream.count() != 2 || cache.Stats().Entries != 0 {
+		t.Fatal("a scan that could not finish never reads nor feeds the cache")
 	}
 }
