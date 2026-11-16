@@ -19,6 +19,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/metering"
 	"github.com/JoaoVictorVM/comporta/internal/pricing"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
+	"github.com/JoaoVictorVM/comporta/internal/responsecache"
 	"github.com/JoaoVictorVM/comporta/internal/runtimecontrol"
 	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
 	"github.com/JoaoVictorVM/comporta/internal/server"
@@ -113,14 +114,21 @@ func newServeCommand(out streams) *cobra.Command {
 			// The scanner is stateless and its detectors are built once; each request
 			// reads its own policy from the snapshot it captured.
 			sensitive := &proxy.SensitiveStage{Scanner: sensitivedata.NewScanner(), Recorder: accounting}
+			// One cache serves the proxy, the admin deletion and its own maintenance.
+			// It lives in memory only: every start begins empty and nothing of it
+			// is ever written to the data directory.
+			cache := responsecache.New(responsecache.Options{MaxBytes: manager.Capture().Cache().MaxBytes})
+			cacheWorker := func(ctx context.Context) error {
+				return cache.Run(ctx, func() responsecache.Settings { return responsecache.FromSnapshot(manager.Capture()) })
+			}
 			adminAPI := admin.NewHandler(admin.HandlerOptions{
 				Credential: credential, Logger: logger,
 				Service: admin.NewService(admin.ServiceOptions{
 					Control: control, Source: manager, Identity: identity, History: store,
-					Metering: accounting, Limits: coordinator, Loop: guard, Usage: store, Logger: logger,
+					Metering: accounting, Limits: coordinator, Loop: guard, Cache: cache, Usage: store, Logger: logger,
 				}),
 			})
-			if err := runGateway(command.Context(), logger, manager, keyManager, identity, accounting, control, loop, sensitive, adminAPI, configEvents.Run, coordinator.Run, guard.Run); err != nil {
+			if err := runGateway(command.Context(), logger, manager, keyManager, identity, accounting, control, loop, sensitive, cache, adminAPI, configEvents.Run, coordinator.Run, guard.Run, cacheWorker); err != nil {
 				return err
 			}
 			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -142,16 +150,17 @@ func newServeCommand(out streams) *cobra.Command {
 	return command
 }
 
-func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service, accounting *metering.Service, gate proxy.Gate, loop *proxy.LoopStage, sensitive *proxy.SensitiveStage, adminAPI http.Handler, configWorker, limitsWorker, loopWorker server.Worker) error {
+func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service, accounting *metering.Service, gate proxy.Gate, loop *proxy.LoopStage, sensitive *proxy.SensitiveStage, cache *responsecache.Cache, adminAPI http.Handler, configWorker, limitsWorker, loopWorker, cacheWorker server.Worker) error {
 	guard := auth.NewGuard(nil, logger)
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), guard)
-	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Identity: identity, Logger: logger, Accounting: accounting, Gate: gate, Loop: loop, Sensitive: sensitive, Source: manager})
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Identity: identity, Logger: logger, Accounting: accounting, Gate: gate, Loop: loop, Sensitive: sensitive, Source: manager, Cache: cache})
 	defer handler.Close()
+	defer cache.Close()
 	gateway, err := server.Open(ctx, server.Options{
 		Source:  manager,
 		Proxy:   server.ProxySurface(manager, handler),
 		Admin:   server.AdminSurfaceWith(manager, adminAPI),
-		Workers: []server.Worker{manager.Run, keyManager.Run, accounting.Run, configWorker, limitsWorker, loopWorker},
+		Workers: []server.Worker{manager.Run, keyManager.Run, accounting.Run, configWorker, limitsWorker, loopWorker, cacheWorker},
 		Logger:  logger,
 	})
 	if err != nil {

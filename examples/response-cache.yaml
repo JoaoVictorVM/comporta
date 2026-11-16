@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=../schema/comporta.schema.json
+#
+# The response cache against the fake provider, with no real credentials.
+# Start the fake provider with `comporta fake-provider`, then the gateway with
+# `comporta serve --config examples/response-cache.yaml`, create a key with
+# `comporta keys create support` and send the same request twice with
+# "temperature": 0. The second answer carries x-comporta-cache: hit, never
+# reaches the provider and is recorded with outcome cached and cost 0.
+# Requests without temperature 0 are never cached. Prices are illustrative
+# overrides.
+
+timezone: UTC
+data_dir: ./data-cache
+
+providers:
+  fake:
+    api_format: anthropic
+    base_url: http://127.0.0.1:9090
+    models: [fake-claude]
+
+pricing:
+  fake-claude: {input: 3.00, output: 15.00, cache_write: 3.75, cache_read: 0.30}
+
+# One memory budget shared by every app, in decimal bytes. 256000000 is both
+# the default and the maximum. Nothing of the cache is ever written to disk.
+cache:
+  max_bytes: 64000000
+
+apps:
+  # Default isolation: an entry only serves the same end user of the same app.
+  support:
+    allowed_models: [fake-claude]
+    budget: {usd_per_day: 1.00}
+    cache:
+      enabled: true
+      ttl_seconds: 300           # 1 to 3600; counted from when the answer was stored
+
+  # Shared entries: any user of this app may receive an answer produced for
+  # another one. Enable it only when outputs never depend on who asked.
+  faq:
+    allowed_models: [fake-claude]
+    cache:
+      enabled: true
+      ttl_seconds: 3600
+      shared_across_users: true

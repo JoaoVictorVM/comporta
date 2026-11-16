@@ -78,7 +78,7 @@ def binary(tmp_path_factory):
 
 
 class Gateway:
-    def __init__(self, binary, scenario):
+    def __init__(self, binary, scenario, cache=False):
         self.dir = tempfile.mkdtemp(prefix="comporta-sdk-")
         self.fake_port, self.proxy_port, self.admin_port = free_port(), free_port(), free_port()
         self.processes = []
@@ -102,7 +102,7 @@ pricing:
 apps:
   sdk-tests:
     allowed_models: [fake-claude, fake-gpt]
-listeners:
+{"    cache:" + chr(10) + "      enabled: true" + chr(10) if cache else ""}listeners:
   proxy: {{port: {self.proxy_port}}}
   admin: {{port: {self.admin_port}}}
 """,
@@ -150,8 +150,8 @@ listeners:
 def make_gateway(binary):
     started = []
 
-    def make(scenario="success"):
-        gateway = Gateway(binary, scenario)
+    def make(scenario="success", cache=False):
+        gateway = Gateway(binary, scenario, cache)
         started.append(gateway)
         return gateway
 
@@ -305,3 +305,40 @@ def test_blocked_endpoint_returns_404(gateway):
         urllib.request.urlopen(request, timeout=5)
     assert caught.value.code == 404
     assert b"endpoint not allowed by Comporta" in caught.value.read()
+
+
+def test_cached_openai_stream(make_gateway):
+    client = make_gateway(cache=True).openai()
+    messages = [{"role": "user", "content": prompt("cached")}]
+    for stream in (False, True):
+        answers = []
+        for expected in (None, "hit"):
+            raw = client.chat.completions.with_raw_response.create(model="fake-gpt", messages=messages, temperature=0, stream=stream)
+            assert raw.headers.get("x-comporta-cache") == expected
+            parsed = raw.parse()
+            if stream:
+                chunks = list(parsed)
+                assert all(chunk.usage is None for chunk in chunks), "the client did not ask for the usage chunk"
+                answers.append("".join(chunk.choices[0].delta.content or "" for chunk in chunks if chunk.choices))
+            else:
+                answers.append(parsed.choices[0].message.content)
+                assert parsed.usage.total_tokens == 12, "the replay keeps the stored usage for the SDK"
+        assert answers[0] == answers[1] != ""
+
+
+def test_cached_anthropic_stream(make_gateway):
+    client = make_gateway(cache=True).anthropic()
+    messages = [{"role": "user", "content": prompt("cached")}]
+    texts = []
+    for expected in (None, "hit"):
+        with client.messages.stream(model="fake-claude", max_tokens=32, messages=messages, extra_body={"temperature": 0}) as stream:
+            assert stream.response.headers.get("x-comporta-cache") == expected
+            texts.append("".join(stream.text_stream))
+            final = stream.get_final_message()
+        assert final.stop_reason == "end_turn"
+    assert texts == ["Olá mundo", "Olá mundo"]
+    first = client.messages.with_raw_response.create(model="fake-claude", max_tokens=32, messages=messages, extra_body={"temperature": 0})
+    second = client.messages.with_raw_response.create(model="fake-claude", max_tokens=32, messages=messages, extra_body={"temperature": 0})
+    assert first.headers.get("x-comporta-cache") is None
+    assert second.headers.get("x-comporta-cache") == "hit"
+    assert second.parse().content[0].text == first.parse().content[0].text == "Olá"

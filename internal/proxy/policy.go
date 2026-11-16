@@ -66,7 +66,7 @@ func (p *prepared) withModel(model string) (*prepared, error) {
 	}
 	envelope := *p.envelope
 	envelope.ModelEffective = model
-	out := &prepared{envelope: &envelope, document: p.document, patches: append(slices.Clone(p.patches), patch)}
+	out := &prepared{envelope: &envelope, document: p.document, patches: append(slices.Clone(p.patches), patch), uncacheable: p.uncacheable}
 	out.refreshHashes()
 	return out, nil
 }
@@ -133,6 +133,7 @@ func (p *preparation) candidates() []Candidate {
 
 // chosen is what the operation sends after admission.
 type chosen struct {
+	request      *prepared
 	envelope     *Envelope
 	body         []byte
 	providerName string
@@ -145,11 +146,11 @@ type chosen struct {
 // as the original.
 func (p *preparation) selected(a Admission) (chosen, bool) {
 	if a.Selected != CandidateDowngrade {
-		return chosen{envelope: p.request.envelope, body: p.effective, providerName: p.providerName, provider: p.provider}, true
+		return chosen{request: p.request, envelope: p.request.envelope, body: p.effective, providerName: p.providerName, provider: p.provider}, true
 	}
 	t := p.target
 	if t == nil || t.request == nil {
 		return chosen{}, false
 	}
-	return chosen{envelope: t.request.envelope, body: t.effective, providerName: t.providerName, provider: t.provider, downgraded: true}, true
+	return chosen{request: t.request, envelope: t.request.envelope, body: t.effective, providerName: t.providerName, provider: t.provider, downgraded: true}, true
 }

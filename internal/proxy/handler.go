@@ -17,6 +17,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/keys"
+	"github.com/JoaoVictorVM/comporta/internal/responsecache"
 	"github.com/JoaoVictorVM/comporta/internal/runtimecontrol"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
@@ -100,6 +101,9 @@ type Options struct {
 	// Source supplies the configuration in force when accounting reports that a
 	// reload overtook an admission. Without it such a request gets a 503.
 	Source SnapshotSource
+	// Cache replays exact responses for apps that enable it. It is only used
+	// together with Accounting, which records the hit and ends its reservation.
+	Cache *responsecache.Cache
 }
 
 // Handler serves the fixed routes.
@@ -116,6 +120,7 @@ type Handler struct {
 	logger     *slog.Logger
 	now        func() time.Time
 	source     SnapshotSource
+	cache      *responsecache.Cache
 }
 
 // NewHandler returns a Handler.
@@ -124,6 +129,7 @@ func NewHandler(options Options) *Handler {
 		accounting: options.Accounting, gate: options.Gate, source: options.Source,
 		auth: options.Auth, transports: options.Transports, sink: options.Sink,
 		hooks: options.Hooks, loop: options.Loop, sensitive: options.Sensitive, identity: options.Identity, logger: options.Logger, now: options.Now,
+		cache: options.Cache,
 	}
 	if handler.transports == nil {
 		handler.transports = NewTransportPool(nil, nil)
@@ -228,9 +234,13 @@ type operation struct {
 	// sensitive holds the reverse map of this request until the operation ends.
 	sensitive *sensitiveState
 	// session is the accounting of a request that may fall back to other
-	// models; concluded reports whether the last attempt's result is durable.
+	// models. concluded reports that the last attempt's result went through a
+	// conclusion that answers, and concludeErr whether it failed to be durable.
 	session     AccountingSession
+	concluded   bool
 	concludeErr error
+	// cache is set when the request may read and feed the response cache.
+	cache *cacheState
 	// terminal is the answer written by the gateway when it differs from the
 	// last attempt's own, such as an exhausted chain.
 	terminal *Failure
@@ -265,6 +275,9 @@ func (o *operation) finish() {
 	if o.session != nil {
 		o.session.Close(o.terminal)
 	}
+	// Still before the ticket is released: a deletion that drains this request
+	// purges the cache after any publication of it.
+	o.publishCapture(value != nil)
 	// Whatever ended the operation, its original values stop being referenced here.
 	o.sensitive.release()
 	// The completion is in the accounting queue by now, which is what a deletion
@@ -372,8 +385,11 @@ func (o *operation) serve(r *http.Request) {
 			}
 		}
 		o.completion = admission.Complete
+		if conclude := admission.Conclude; conclude != nil {
+			o.completion = func(result AttemptResult) { o.concludeErr, o.concluded = conclude(result), true }
+		}
 		if session := o.session; session != nil {
-			o.completion = func(result AttemptResult) { o.concludeErr = session.Conclude(result) }
+			o.completion = func(result AttemptResult) { o.concludeErr, o.concluded = session.Conclude(result), true }
 		}
 		applyBudgetHeaders(o.w.Header(), admission.Budget)
 	}
@@ -392,6 +408,13 @@ func (o *operation) serve(r *http.Request) {
 	}
 	o.downgraded = choice.downgraded
 	app, _ := o.snapshot.App(choice.envelope.AppName)
+	if state := o.cacheFor(r, app, choice); state != nil {
+		if lease := state.lookup(); lease != nil {
+			o.replay(r, choice, lease, listeners)
+			return
+		}
+		o.cache = state
+	}
 	chain := o.fallbackChain(app, choice.envelope, choice.envelope.ModelEffective)
 	// Later attempts need their own durable reservation, which only a session
 	// provides; without accounting there is nothing to reserve.
@@ -422,6 +445,10 @@ func (o *operation) fallback(r *http.Request, plan *preparation, app config.App,
 		if held == nil {
 			return
 		}
+		// Only a first attempt that succeeds is stored: a later model never
+		// answers under the key of the one that failed.
+		o.cache.abort()
+		o.cache = nil
 		next := ""
 		for _, candidate := range chain {
 			if !sent[candidate] && !considered[candidate] {
@@ -498,7 +525,7 @@ func (o *operation) continueWith(r *http.Request, plan *preparation, app config.
 	if failure != nil {
 		return chosen{}, asRejection(*failure)
 	}
-	out := chosen{envelope: request.envelope, body: request.effectiveBody(), providerName: name, provider: provider}
+	out := chosen{request: request, envelope: request.envelope, body: request.effectiveBody(), providerName: name, provider: provider}
 	if o.session == nil {
 		return out, nil
 	}
@@ -524,7 +551,7 @@ func (o *operation) continueWith(r *http.Request, plan *preparation, app config.
 	if target == nil || target.request == nil {
 		return chosen{}, asRejection(internalFailure())
 	}
-	return chosen{envelope: target.request.envelope, body: target.effective, providerName: target.providerName, provider: target.provider, downgraded: true}, nil
+	return chosen{request: target.request, envelope: target.request.envelope, body: target.effective, providerName: target.providerName, provider: target.provider, downgraded: true}, nil
 }
 
 // reject answers a refusal unless the client already left.
@@ -705,6 +732,9 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 		handler: handler, w: o.w, format: o.format, envelope: envelope, attempt: o.attempt,
 		provider: name, clientCtx: r.Context(), upstreamCtx: upstreamCtx, cancelCause: cancelCause, writeLimit: idle,
 		restore: o.sensitive.restoring(), hold: hold,
+	}
+	if o.index <= 1 {
+		current.cache = o.cache
 	}
 
 	target, err := upstreamURL(provider.BaseURL, o.route)

@@ -117,6 +117,14 @@ func Completion(requestID string, index int, at time.Time, app, outcome string, 
 	return Event{ID: hex.EncodeToString(id[:16]), Type: RequestCompleted, At: at, RequestID: requestID, App: app, Payload: Payload{AttemptIndex: index, Outcome: outcome, Cost: cost, UsageMissing: missing}}
 }
 
+// CacheHit builds the event of an attempt answered from the response cache.
+// Its ID is stable, so a retried materialization never duplicates it. It
+// carries no key and no content.
+func CacheHit(requestID string, index int, at time.Time, app string) Event {
+	id := sha256.Sum256([]byte(fmt.Sprintf("cached:%s:%d", requestID, index)))
+	return Event{ID: hex.EncodeToString(id[:16]), Type: Cached, At: at, RequestID: requestID, App: app, Payload: Payload{AttemptIndex: index, Outcome: "cached"}}
+}
+
 type Event struct {
 	ID        string    `json:"event_id"`
 	Type      Type      `json:"type"`

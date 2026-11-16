@@ -55,6 +55,13 @@ type LoopMaintenance interface {
 	Apps() []string
 }
 
+// CachePurge is the response cache seen by a deletion. It purges whole apps:
+// entries keep no record of whose content they hold, and a shared entry may
+// come from any user of the app.
+type CachePurge interface {
+	PurgeApps(apps []string)
+}
+
 // ServiceOptions configures the operational services.
 type ServiceOptions struct {
 	Control  *runtimecontrol.Control
@@ -64,7 +71,9 @@ type ServiceOptions struct {
 	Metering Metering
 	Limits   LimitMaintenance
 	// Loop is optional: without it there is no loop state to clear.
-	Loop   LoopMaintenance
+	Loop LoopMaintenance
+	// Cache is optional: without it there is no cached content to purge.
+	Cache  CachePurge
 	Usage  storage.UsageQueryStore
 	Logger *slog.Logger
 	Now    func() time.Time
@@ -81,6 +90,7 @@ type Service struct {
 	metering Metering
 	limits   LimitMaintenance
 	loop     LoopMaintenance
+	cache    CachePurge
 	usage    storage.UsageQueryStore
 	logger   *slog.Logger
 	now      func() time.Time
@@ -93,7 +103,7 @@ type Service struct {
 func NewService(options ServiceOptions) *Service {
 	s := &Service{
 		control: options.Control, source: options.Source, identity: options.Identity, history: options.History,
-		metering: options.Metering, limits: options.Limits, loop: options.Loop, usage: options.Usage, logger: options.Logger, now: options.Now, prepare: options.PrepareTimeout,
+		metering: options.Metering, limits: options.Limits, loop: options.Loop, cache: options.Cache, usage: options.Usage, logger: options.Logger, now: options.Now, prepare: options.PrepareTimeout,
 		cursorKey: newCursorKey(),
 	}
 	if s.prepare <= 0 {
@@ -232,6 +242,13 @@ func (s *Service) Forget(ctx context.Context, id string) (ForgetResult, error) {
 		result.Cleared = cleared
 		return err
 	})
+	// Under the barrier, with the user's requests drained: no capture of theirs
+	// is still running, and the epoch keeps captures of other users that began
+	// earlier from filling these apps again. Purging after a failure is only
+	// extra misses.
+	if s.cache != nil {
+		s.cache.PurgeApps(apps)
+	}
 	switch {
 	case err == nil:
 		// Only after the history committed, and still under the barrier: a

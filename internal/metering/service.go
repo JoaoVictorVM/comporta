@@ -228,9 +228,8 @@ func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 			<-s.slots
 			return reject(503, "usage_storage_unavailable", storage.ErrUnavailable.Error())
 		}
-		var once sync.Once
-		q := base.quote
-		return proxy.Admission{Complete: func(result proxy.AttemptResult) { once.Do(func() { s.complete(r, q, nil, result) }) }}, nil, false
+		complete, conclude := s.completion(r, base.quote, nil)
+		return proxy.Admission{Complete: complete, Conclude: conclude}, nil, false
 	}
 	policy, ok := limits.PolicyFor(snapshot, e.AppName)
 	if !ok {
@@ -304,9 +303,10 @@ func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 		*open = session{service: s, snapshot: snapshot, op: op, first: admitted, current: admitted, quote: q, handle: handle}
 		return proxy.Admission{Budget: budgetHeaders(decision), Selected: proxy.CandidateID(sel.Candidate), Policy: proxy.PolicyOutcome(sel.Outcome)}, nil, false
 	}
-	var once sync.Once
+	complete, conclude := s.completion(admitted, q, handle)
 	return proxy.Admission{
-		Complete: func(result proxy.AttemptResult) { once.Do(func() { s.complete(admitted, q, handle, result) }) },
+		Complete: complete,
+		Conclude: conclude,
 		Budget:   budgetHeaders(decision),
 		Selected: proxy.CandidateID(sel.Candidate),
 		Policy:   proxy.PolicyOutcome(sel.Outcome),
@@ -378,10 +378,28 @@ func optional[T any](v proxy.Optional[T]) *T {
 	return &x
 }
 
-func (s *Service) complete(r storage.Record, q pricing.Quote, handle *limits.Handle, result proxy.AttemptResult) {
-	if r, ok, _ := s.conclude(r, q, handle, result); ok {
-		s.enqueue(r)
+// completion returns the two ways of ending an admitted attempt. Both share
+// one conclusion: whichever runs first decides it, and a repeat reports that
+// first answer without concluding again.
+func (s *Service) completion(r storage.Record, q pricing.Quote, handle *limits.Handle) (func(proxy.AttemptResult), func(proxy.AttemptResult) error) {
+	var once sync.Once
+	err := errNotConcluded
+	conclude := func(result proxy.AttemptResult) error {
+		once.Do(func() {
+			record, ok, failed := s.conclude(r, q, handle, result)
+			if ok {
+				s.enqueue(record)
+			}
+			switch {
+			case failed != nil:
+				err = failed
+			case ok:
+				err = nil
+			}
+		})
+		return err
 	}
+	return func(result proxy.AttemptResult) { _ = conclude(result) }, conclude
 }
 
 // conclude prices the result and makes it durable together with the
@@ -406,7 +424,18 @@ func (s *Service) conclude(r storage.Record, q pricing.Quote, handle *limits.Han
 		v := max(0, result.ClientTTFB.Value.Microseconds())
 		r.ClientTTFB = &v
 	}
-	if result.NotSent {
+	cached := cacheHit(result)
+	if result.CacheHit && !cached {
+		s.logger.Error("inconsistent cache result; recorded without the cache marker")
+		result.CacheHit = false
+	}
+	if cached {
+		// A replay consumed nothing new: the usage shown in the stored payload
+		// belongs to the call that filled the cache, never to this request.
+		var input, output, write, read int64
+		r.Input, r.Output, r.CacheWrite, r.CacheRead = &input, &output, &write, &read
+		r.Cost, r.Outcome, r.UsageMissing, r.EstimateExceeded = 0, "cached", false, false
+	} else if result.NotSent {
 		r.Cost = 0
 		r.Outcome = "blocked"
 	} else if result.Operation == proxy.OperationCountTokens {
@@ -480,6 +509,9 @@ func (s *Service) finish(ctx context.Context, r storage.Record, handle *limits.H
 		defer cancel()
 		return s.limitStore.CompleteSettled(write, r, st)
 	}
+	if cacheHit(result) {
+		return s.limits.Release(handle, limits.ReleaseCache, persist)
+	}
 	if result.NotSent {
 		return s.limits.Release(handle, limits.ReleaseNotSent, persist)
 	}
@@ -494,6 +526,13 @@ func (s *Service) finish(ctx context.Context, r storage.Record, handle *limits.H
 		}
 	}
 	return s.limits.Settle(handle, usage, persist)
+}
+
+// cacheHit accepts the marker only on a generation answered without any
+// upstream exchange; a real call is never turned into a free one.
+func cacheHit(result proxy.AttemptResult) bool {
+	return result.CacheHit && result.NotSent && result.Operation == proxy.OperationGeneration &&
+		!result.UpstreamStatus.Known && !result.UpstreamHeaders.Known && !result.UpstreamTTFB.Known
 }
 
 func (s *Service) warnStorage(err error) {

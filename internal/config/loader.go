@@ -659,7 +659,7 @@ func (d *decoder) decodeRoot(root *yaml.Node) Config {
 	}
 	if node, ok := fields["cache"]; ok {
 		cache := d.fields(node, "cache", "max_bytes")
-		d.optPositive(cache, "max_bytes", "cache", &cfg.Cache.MaxBytes)
+		d.optRange(cache, "max_bytes", "cache", 1, 256_000_000, &cfg.Cache.MaxBytes)
 	}
 	if node, ok := fields["alerts"]; ok {
 		d.decodeAlerts(node, &cfg.Alerts)

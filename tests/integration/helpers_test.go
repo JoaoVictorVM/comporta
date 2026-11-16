@@ -26,6 +26,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/metering"
 	"github.com/JoaoVictorVM/comporta/internal/pricing"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
+	"github.com/JoaoVictorVM/comporta/internal/responsecache"
 	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
 	"github.com/JoaoVictorVM/comporta/internal/server"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
@@ -88,6 +89,7 @@ type gateway struct {
 	accounting *metering.Service
 	limits     *limits.Manager
 	loop       *loopguard.Manager
+	cache      *responsecache.Cache
 	userHeader string
 	handler    *proxy.Handler
 	t          testing.TB
@@ -175,6 +177,9 @@ type gatewayOptions struct {
 	// sensitive adds the sensitive data inspection, as serve does; it needs
 	// metered.
 	sensitive bool
+	// cache adds the response cache and its maintenance, as serve does.
+	cache      bool
+	cacheClock func() time.Time
 }
 
 func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gatewayOptions) *gateway {
@@ -275,8 +280,15 @@ func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gat
 	if options.sensitive && metered {
 		inspection = &proxy.SensitiveStage{Scanner: sensitivedata.NewScanner(), Recorder: accounting}
 	}
+	var cache *responsecache.Cache
+	if options.cache {
+		cache = responsecache.New(responsecache.Options{MaxBytes: manager.Capture().Cache().MaxBytes, Now: options.cacheClock})
+		workers = append(workers, func(ctx context.Context) error {
+			return cache.Run(ctx, func() responsecache.Settings { return responsecache.FromSnapshot(manager.Capture()) })
+		})
+	}
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), auth.NewGuard(nil, nil))
-	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results, Identity: identity, Hooks: hooks, Accounting: accountant, Loop: stage, Sensitive: inspection, Source: manager})
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results, Identity: identity, Hooks: hooks, Accounting: accountant, Loop: stage, Sensitive: inspection, Source: manager, Cache: cache})
 	runtime, err := server.Open(context.Background(), server.Options{
 		Source:  manager,
 		Proxy:   server.ProxySurface(manager, handler),
@@ -302,7 +314,7 @@ func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gat
 		}
 	})
 	return &gateway{
-		usage: usage, accounting: accounting, limits: coordinator, loop: guard,
+		usage: usage, accounting: accounting, limits: coordinator, loop: guard, cache: cache,
 		handler: handler, t: t, path: path, dir: dir, config: manager, store: store, keyManager: keyManager,
 		runtime: runtime, identity: identity, results: results, upstream: upstream, requests: requests, baseYAML: text,
 	}
