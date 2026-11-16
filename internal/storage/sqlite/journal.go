@@ -271,6 +271,9 @@ func (s *Store) Commit(ctx context.Context, records []storage.Record) error {
 		}
 		if inserted {
 			notifications = append(notifications, eventFor(r))
+			if r.Outcome == "cached" && r.AttemptIndex > 0 {
+				notifications = append(notifications, cachedEvent(r))
+			}
 		}
 	}
 	var pendingCount int
@@ -378,6 +381,13 @@ func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, sessions bo
 	if err != nil {
 		return databaseError(err)
 	}
+	if r.Outcome == "cached" {
+		hit := cachedEvent(r)
+		payload, _ := json.Marshal(hit.Payload)
+		if _, err = tx.ExecContext(ctx, `INSERT INTO events(event_id,type,occurred_at,request_id,attempt_index,app_name,payload_json) VALUES(?,'cached',?,?,?,?,?)`, hit.ID, r.FinishedAt.UnixMicro(), r.RequestID, r.AttemptIndex, r.AppName, string(payload)); err != nil {
+			return databaseError(err)
+		}
+	}
 	_, err = tx.ExecContext(ctx, `DELETE FROM metering_journal WHERE request_id=? AND attempt_index=?`, r.RequestID, r.AttemptIndex)
 	if err != nil {
 		return databaseError(err)
@@ -429,6 +439,10 @@ func completionEvent(r storage.Record) events.Event {
 	e.Payload.ErrorClass = r.ErrorClass
 	e.Payload.ErrorCode = r.ErrorCode
 	return e
+}
+
+func cachedEvent(r storage.Record) events.Event {
+	return events.CacheHit(r.RequestID, r.AttemptIndex, r.FinishedAt, r.AppName)
 }
 
 func value(p *int64) int64 {
