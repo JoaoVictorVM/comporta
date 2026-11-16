@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/auth"
+	"github.com/JoaoVictorVM/comporta/internal/responsecache"
 	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
 )
 
@@ -108,6 +109,8 @@ type call struct {
 	// another model may still answer. held is that failure.
 	hold bool
 	held *heldFailure
+	// cache captures what this attempt delivers, when it may be stored.
+	cache *cacheState
 }
 
 // heldFailure is an answer not written yet: the failure, its Retry-After and
@@ -227,6 +230,11 @@ func (c *call) serveNormal(response *http.Response) {
 		body = restored
 	}
 
+	// Requests whose content was redacted never capture, so this is the
+	// provider's validated answer and never a restored one.
+	if c.restore == nil {
+		c.cache.capture(responsecache.KindJSON, response.Header.Get("Content-Type"), body)
+	}
 	copyResponseHeaders(c.w.Header(), response.Header)
 	c.w.Header().Set("Content-Type", response.Header.Get("Content-Type"))
 	c.w.Header().Set("Content-Length", strconv.Itoa(len(body)))
@@ -341,7 +349,13 @@ func (c *call) relayEvent(event sseEvent, state *streamState, header http.Header
 		c.endStream(rejection.failure())
 		return false
 	}
-	return c.writeEvent(event.Raw, header)
+	if !c.writeEvent(event.Raw, header) {
+		return false
+	}
+	// Copied after the client got it, so capturing never delays an event, and
+	// before the parser reuses the buffer behind Raw.
+	c.cache.capture(responsecache.KindSSE, header.Get("Content-Type"), event.Raw)
+	return true
 }
 
 func (c *call) writeEvent(raw []byte, header http.Header) bool {

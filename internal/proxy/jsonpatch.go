@@ -155,6 +155,9 @@ type Patch struct {
 	// is a property of the patch and not of its position, because two insertions at
 	// the end of the same object share a position.
 	transportOnly bool
+	// identity marks a patch that writes the pseudonym, which a cache shared
+	// across users must neutralize in its digest.
+	identity bool
 }
 
 // SetMember builds the patch that sets a key of an object: it replaces only the

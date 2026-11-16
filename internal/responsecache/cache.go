@@ -226,3 +226,14 @@ func (c *Cache) Stats() Stats {
 	defer c.mu.Unlock()
 	return Stats{Entries: len(c.index), UsedBytes: c.used, MaxBytes: c.max, Leases: c.leases, Builders: c.builders}
 }
+
+// Observe advances the cache to generation when it is newer than the one in
+// force, invalidating every entry. A publication checks it first, so a capture
+// that overlapped a reload is discarded.
+func (c *Cache) Observe(generation int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.closed {
+		c.observe(generation)
+	}
+}

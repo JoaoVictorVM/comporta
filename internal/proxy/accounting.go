@@ -13,6 +13,10 @@ import (
 // that ends it, and the budget headers it may expose.
 type Admission struct {
 	Complete func(AttemptResult)
+	// Conclude, when set, replaces Complete and reports whether the result was
+	// made durable together with the end of its reservation. Without it the
+	// proxy cannot know, and treats the conclusion as unconfirmed.
+	Conclude func(AttemptResult) error
 	Budget   *BudgetHeaders
 	// Selected is the only candidate that may be sent; empty means the original.
 	Selected CandidateID

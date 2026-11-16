@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -152,7 +153,32 @@ type prepared struct {
 	envelope *Envelope
 	document *Document
 	patches  []Patch
+	// uncacheable is set when the inspection changed the content or could not
+	// finish: such a request never reads nor feeds the response cache.
+	uncacheable bool
 }
+
+// sharedRequestHash is the digest of the effective body with every pseudonym
+// the gateway wrote replaced by a fixed marker, for apps whose users share
+// cache entries. Everything else, unknown fields and prompt text included,
+// stays as sent. RequestHash itself is left untouched.
+func (p *prepared) sharedRequestHash() [32]byte {
+	pseudonym := []byte(p.envelope.Identity.Hash().Hex())
+	semantic := make([]Patch, 0, len(p.patches))
+	for _, patch := range p.patches {
+		if patch.transportOnly {
+			continue
+		}
+		if patch.identity {
+			patch.Text = bytes.ReplaceAll(patch.Text, pseudonym, []byte(sharedIdentityMarker))
+		}
+		semantic = append(semantic, patch)
+	}
+	return sha256.Sum256(p.document.Apply(semantic))
+}
+
+// sharedIdentityMarker only ever enters a digest; no body sent anywhere holds it.
+const sharedIdentityMarker = "comporta-shared-cache-identity"
 
 func (p *prepared) effectiveBody() []byte { return p.document.Apply(p.patches) }
 

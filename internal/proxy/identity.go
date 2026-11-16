@@ -36,6 +36,9 @@ func (p *prepared) applyIdentity(service *useridentity.Service, route Route, sna
 	if failure != nil {
 		return failure
 	}
+	for i := range patches {
+		patches[i].identity = true
+	}
 	p.patches = append(p.patches, patches...)
 	envelope.Identity = identity
 	envelope.rawUser = ""

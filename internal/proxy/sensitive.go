@@ -138,6 +138,7 @@ func (s *SensitiveStage) inspect(ctx context.Context, snapshot *config.Snapshot,
 		}
 		if !policy.Protective() {
 			logger.Warn("sensitive data scan incomplete; request forwarded unchanged", "request_id", envelope.RequestID)
+			request.uncacheable = true
 			return nil, nil
 		}
 		return nil, s.cut(ctx, snapshot, envelope, SensitiveCut{At: at, Status: http.StatusServiceUnavailable, Code: CodeSensitiveScanFailed, Class: ClassInternal}, sensitiveScanFailed())
@@ -162,6 +163,7 @@ func (s *SensitiveStage) inspect(ctx context.Context, snapshot *config.Snapshot,
 	}
 	request.patches = append(request.patches, patches...)
 	request.refreshHashes()
+	request.uncacheable = true
 	state := &sensitiveState{}
 	if policy.Rehydrate && !envelope.Stream {
 		state.reverse = outcome.Map()

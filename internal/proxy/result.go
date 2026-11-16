@@ -47,6 +47,10 @@ type AttemptResult struct {
 	// Detections is the safe summary of the request's inspection, shared by every
 	// attempt of the request.
 	Detections sensitivedata.Summary
+	// CacheHit marks an answer replayed from the response cache. Only the replay
+	// stage sets it, always with NotSent: nothing reached a provider and nothing
+	// new was consumed.
+	CacheHit bool
 }
 
 // ResultSink receives each result once. The default keeps nothing; it is not a
