@@ -34,7 +34,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "max_bytes": {"$ref": "#/$defs/positiveInteger", "description": "Total memory ceiling for the response cache. Default: 256000000."}
+        "max_bytes": {"type": "integer", "minimum": 1, "maximum": 256000000, "description": "Memory budget of the response cache, in decimal bytes, shared by every app. Default and maximum: 256000000."}
       }
     },
     "alerts": {"$ref": "#/$defs/alerts"},

@@ -205,3 +205,18 @@ apps:
 		t.Fatal("app lookup must be exact")
 	}
 }
+
+func TestCacheCapacityBounds(t *testing.T) {
+	if cfg := requireValid(t, baseYAML).cfg; cfg.Cache.MaxBytes != 256_000_000 {
+		t.Fatalf("default cache budget: %d", cfg.Cache.MaxBytes)
+	}
+	for _, value := range []string{"1", "256000000"} {
+		cfg := requireValid(t, baseYAML+"cache:\n  max_bytes: "+value+"\n").cfg
+		if fmt.Sprint(cfg.Cache.MaxBytes) != value {
+			t.Fatalf("max_bytes %s loaded as %d", value, cfg.Cache.MaxBytes)
+		}
+	}
+	for _, value := range []string{"0", "256000001", "99999999999999999999", "-1"} {
+		requireDiagnostic(t, baseYAML+"cache:\n  max_bytes: "+value+"\n", CodeInvalidValue, "cache.max_bytes")
+	}
+}
