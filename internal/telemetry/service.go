@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -103,7 +104,7 @@ func New(options Options) *Service {
 		s.now = time.Now
 	}
 	if s.version == "" {
-		s.version = "dev"
+		s.version = buildVersion()
 	}
 	if s.exporter == nil {
 		s.exporter = newOTLPExporter
@@ -112,6 +113,15 @@ func New(options Options) *Service {
 	s.metricsEnabled.Store(true)
 	s.registry.MustRegister(collector{s})
 	return s
+}
+
+// buildVersion is the module version stamped by the Go toolchain, or "dev"
+// for a local build.
+func buildVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
 }
 
 // MetricsEnabled reports whether /metrics is exposed by the configuration in

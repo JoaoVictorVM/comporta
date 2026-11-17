@@ -18,18 +18,25 @@ import (
 // otelOn enables tracing; the exporter of the tests never reaches the URL.
 const otelOn = "telemetry:\n  otel_enabled: true\n  otel_endpoint: http://127.0.0.1:4318\n"
 
-// traces records the spans and endpoints of a test gateway's exporters.
+// traces records the spans of a test gateway, one in-memory exporter per
+// provider the telemetry creates, kept after the provider shuts down.
 type traces struct {
-	*tracetest.InMemoryExporter
 	mu        sync.Mutex
 	endpoints []string
+	exporters []*tracetest.InMemoryExporter
 }
+
+type keptExporter struct{ *tracetest.InMemoryExporter }
+
+func (keptExporter) Shutdown(context.Context) error { return nil }
 
 func (x *traces) exporterFor(endpoint string) (sdktrace.SpanExporter, error) {
 	x.mu.Lock()
+	defer x.mu.Unlock()
+	exporter := tracetest.NewInMemoryExporter()
 	x.endpoints = append(x.endpoints, endpoint)
-	x.mu.Unlock()
-	return x.InMemoryExporter, nil
+	x.exporters = append(x.exporters, exporter)
+	return keptExporter{exporter}, nil
 }
 
 func (x *traces) created() []string {
@@ -38,9 +45,27 @@ func (x *traces) created() []string {
 	return append([]string(nil), x.endpoints...)
 }
 
+// GetSpans returns what every provider exported so far.
+func (x *traces) GetSpans() tracetest.SpanStubs {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	var out tracetest.SpanStubs
+	for _, e := range x.exporters {
+		out = append(out, e.GetSpans()...)
+	}
+	return out
+}
+
+// spansOf returns what the n-th provider exported.
+func (x *traces) spansOf(n int) tracetest.SpanStubs {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return x.exporters[n].GetSpans()
+}
+
 // observed adds telemetry to the options and returns where its spans go.
 func observed(options *gatewayOptions) *traces {
-	x := &traces{InMemoryExporter: tracetest.NewInMemoryExporter()}
+	x := &traces{}
 	options.telemetry = &telemetry.Options{Exporter: x.exporterFor}
 	return x
 }

@@ -261,9 +261,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "metrics_enabled": {"type": "boolean", "description": "Default: true."},
-        "otel_enabled": {"type": "boolean", "description": "Default: false. When true, otel_endpoint is required."},
-        "otel_endpoint": {"type": "string", "description": "Absolute HTTP(S) URL without credentials, query or fragment."}
+        "metrics_enabled": {"type": "boolean", "description": "Default: true. Exposes GET /metrics on the admin listener, behind the admin token; when false it answers 404 and stops counting, keeping the values counted so far."},
+        "otel_enabled": {"type": "boolean", "description": "Default: false. When true, otel_endpoint is required and every proxy request produces one trace exported over OTLP/HTTP protobuf."},
+        "otel_endpoint": {"type": "string", "description": "Base URL of an OTLP/HTTP receiver, without credentials, query or fragment; /v1/traces is appended unless the path already ends with it. Plain http is only accepted for localhost, loopback or private IP literals and single-label service names such as http://jaeger:4318; use https otherwise."}
       }
     }
   }

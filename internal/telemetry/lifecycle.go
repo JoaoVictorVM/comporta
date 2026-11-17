@@ -8,12 +8,11 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/config"
 )
 
-const (
-	// shutdownLimit bounds the whole telemetry shutdown.
-	shutdownLimit = 5 * time.Second
-	// maxProviders is the current provider plus one draining.
-	maxProviders = 2
-)
+// shutdownLimit bounds the whole telemetry shutdown. Tests shorten it.
+var shutdownLimit = 5 * time.Second
+
+// maxProviders is the current provider plus one draining.
+const maxProviders = 2
 
 // Reconcile applies the telemetry settings of a snapshot once per
 // generation. Requests already observing keep the provider they began with;
@@ -64,7 +63,7 @@ func (s *Service) Reconcile(snapshot *config.Snapshot) {
 	for len(s.draining)+s.active() > maxProviders {
 		oldest := s.draining[0]
 		s.draining = s.draining[1:]
-		oldest.retired.Store(true)
+		oldest.retire(DropReloadRetired)
 		retired = append(retired, oldest)
 	}
 	s.mu.Unlock()
@@ -173,6 +172,9 @@ func (s *Service) Close() {
 		providers = append(providers, s.current)
 	}
 	s.current, s.draining = nil, nil
+	for _, p := range providers {
+		p.retire(DropShutdownTimeout)
+	}
 	s.mu.Unlock()
 	for _, p := range providers {
 		s.shutdownProvider(p, DropShutdownTimeout)

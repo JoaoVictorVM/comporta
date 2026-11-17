@@ -80,6 +80,8 @@ type traceProvider struct {
 	sessions int
 	draining bool
 	retired  atomic.Bool
+	// lost is the drop reason of spans its sessions end after retirement.
+	lost     string
 	stopping atomic.Bool
 }
 
@@ -94,6 +96,15 @@ type traceSession struct {
 }
 
 func (t *traceSession) live() bool { return t != nil && !t.provider.retired.Load() }
+
+// retire stops a provider's sessions from producing spans. The caller holds
+// the service lock.
+func (p *traceProvider) retire(reason string) {
+	if !p.retired.Load() {
+		p.lost = reason
+		p.retired.Store(true)
+	}
+}
 
 func (s *Service) openSession(op *Op) *traceSession {
 	s.mu.Lock()
@@ -176,6 +187,11 @@ func (t *traceSession) finishAttempt(a *Attempt, end AttemptEnd, input Optional[
 	if a.span == nil {
 		return
 	}
+	// A retired provider no longer hands spans to its processor.
+	if !t.live() {
+		a.op.s.dropSpans(t.provider.lost, 1)
+		return
+	}
 	attrs := []attribute.KeyValue{keyOutcome.String(string(end.Result))}
 	if input.Known {
 		attrs = append(attrs, semconv.GenAIUsageInputTokensKey.Int64(input.Value))
@@ -209,6 +225,14 @@ func errorTypeOr(value, fallback string) string {
 // category or a configured name.
 func (t *traceSession) end(o *Op, end RequestEnd, outcome Outcome) {
 	if t == nil {
+		return
+	}
+	if !t.live() {
+		lost := 1
+		if t.gen != nil {
+			lost++
+		}
+		o.s.dropSpans(t.provider.lost, lost)
 		return
 	}
 	o.mu.Lock()
@@ -295,6 +319,9 @@ type queueProcessor struct {
 	stopReason string
 	deadline   context.Context
 	once       sync.Once
+	// abort ends an export still running when the shutdown deadline passes.
+	abort       context.Context
+	cancelAbort context.CancelFunc
 }
 
 func newQueueProcessor(exporter sdktrace.SpanExporter, options QueueOptions, res *resource.Resource, dropped func(string, int), failed func()) *queueProcessor {
@@ -303,6 +330,7 @@ func newQueueProcessor(exporter sdktrace.SpanExporter, options QueueOptions, res
 		queue: make(chan sdktrace.ReadOnlySpan, options.Size), flush: make(chan chan struct{}),
 		stop: make(chan struct{}), done: make(chan struct{}), deadline: context.Background(),
 	}
+	p.abort, p.cancelAbort = context.WithCancel(context.Background())
 	go p.run()
 	return p
 }
@@ -342,7 +370,7 @@ func (p *queueProcessor) run() {
 	batch := make([]sdktrace.ReadOnlySpan, 0, p.options.Batch)
 	send := func() {
 		if len(batch) > 0 {
-			p.export(context.Background(), batch)
+			p.export(p.abort, batch)
 			batch = batch[:0]
 		}
 	}
@@ -445,7 +473,14 @@ func (p *queueProcessor) Shutdown(ctx context.Context) error {
 		case <-p.done:
 		case <-ctx.Done():
 			err = ctx.Err()
+			// The export in flight is abandoned; what remains is counted.
+			p.cancelAbort()
+			select {
+			case <-p.done:
+			case <-time.After(100 * time.Millisecond):
+			}
 		}
+		p.cancelAbort()
 		if shutdownErr := p.exporter.Shutdown(ctx); err == nil {
 			err = shutdownErr
 		}
