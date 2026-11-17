@@ -47,7 +47,7 @@ func (c *clock) Advance(d time.Duration) {
 }
 
 type env struct {
-	t        *testing.T
+	t        testing.TB
 	dir      string
 	path     string
 	manager  *config.Manager
@@ -58,7 +58,7 @@ type env struct {
 	exporter []string
 }
 
-func newEnv(t *testing.T, telemetry string, options ...func(*Options)) *env {
+func newEnv(t testing.TB, telemetry string, options ...func(*Options)) *env {
 	t.Helper()
 	e := &env{t: t, dir: t.TempDir(), clock: &clock{now: time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)}, exported: tracetest.NewInMemoryExporter()}
 	e.path = filepath.Join(e.dir, "comporta.yaml")

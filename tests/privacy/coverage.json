@@ -31,6 +31,7 @@
     "tests/privacy/canary_fallback_test.go",
     "tests/integration/proxy_telemetry_test.go",
     "tests/integration/config_telemetry_test.go",
+    "tests/integration/limits_telemetry_test.go",
     "tests/privacy/canary_telemetry_test.go",
     "internal/proxy/cache_test.go",
     "internal/proxy/cache_bench_test.go",

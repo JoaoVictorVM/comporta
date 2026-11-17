@@ -82,7 +82,15 @@ func TestQueueOverflowIsReported(t *testing.T) {
 	t.Cleanup(func() { shutdownLimit = 5 * time.Second })
 	exporter := &stuckExporter{}
 	e := newEnv(t, otelOn, withExporter(exporter, QueueOptions{Size: 4, Batch: 1, FlushInterval: time.Hour, ExportTimeout: time.Hour}))
-	for range 20 {
+	simpleRequest(e)
+	// The first span is taken by the export that never ends; the queue holds
+	// the rest.
+	for deadline := time.Now().Add(5 * time.Second); exporter.calls.Load() == 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the export never started")
+		}
+	}
+	for range 19 {
 		if took := simpleRequest(e); took > 100*time.Millisecond {
 			t.Fatalf("a full queue held a request for %v", took)
 		}
@@ -92,8 +100,6 @@ func TestQueueOverflowIsReported(t *testing.T) {
 	if got := dropped(out, DropQueueFull); got != 40-5 {
 		t.Fatalf("queue_full = %d\n%s", got, out)
 	}
-	shutdownLimit = 100 * time.Millisecond
-	t.Cleanup(func() { shutdownLimit = 5 * time.Second })
 }
 
 func TestReloadBoundsProviders(t *testing.T) {
