@@ -128,14 +128,14 @@ func newServeCommand(out streams) *cobra.Command {
 			cacheWorker := func(ctx context.Context) error {
 				return cache.Run(ctx, func() responsecache.Settings { return responsecache.FromSnapshot(manager.Capture()) })
 			}
-			adminAPI := admin.NewHandler(admin.HandlerOptions{
+			adminHandler := admin.NewHandler(admin.HandlerOptions{
 				Credential: credential, Logger: logger,
 				Service: admin.NewService(admin.ServiceOptions{
 					Control: control, Source: manager, Identity: identity, History: store,
 					Metering: accounting, Limits: coordinator, Loop: guard, Cache: cache, Usage: store, Logger: logger,
 				}),
 			})
-			if err := runGateway(command.Context(), logger, manager, keyManager, identity, accounting, control, loop, sensitive, cache, observer, adminAPI, configEvents.Run, coordinator.Run, guard.Run, cacheWorker, observer.Run, eventsWorker); err != nil {
+			if err := runGateway(command.Context(), logger, manager, keyManager, identity, accounting, control, loop, sensitive, cache, observer, adminHandler, adminHandler.Metrics(observer), configEvents.Run, coordinator.Run, guard.Run, cacheWorker, observer.Run, eventsWorker); err != nil {
 				return err
 			}
 			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -157,7 +157,7 @@ func newServeCommand(out streams) *cobra.Command {
 	return command
 }
 
-func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service, accounting *metering.Service, gate proxy.Gate, loop *proxy.LoopStage, sensitive *proxy.SensitiveStage, cache *responsecache.Cache, observer *telemetry.Service, adminAPI http.Handler, extra ...server.Worker) error {
+func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service, accounting *metering.Service, gate proxy.Gate, loop *proxy.LoopStage, sensitive *proxy.SensitiveStage, cache *responsecache.Cache, observer *telemetry.Service, adminAPI, metrics http.Handler, extra ...server.Worker) error {
 	guard := auth.NewGuard(nil, logger)
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), guard)
 	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Identity: identity, Logger: logger, Accounting: accounting, Gate: gate, Loop: loop, Sensitive: sensitive, Source: manager, Cache: cache, Telemetry: observer})
@@ -166,7 +166,7 @@ func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manage
 	gateway, err := server.Open(ctx, server.Options{
 		Source:  manager,
 		Proxy:   server.ProxySurface(manager, handler),
-		Admin:   server.AdminSurfaceWith(manager, adminAPI),
+		Admin:   server.AdminSurfaceWithMetrics(manager, adminAPI, metrics),
 		Workers: append([]server.Worker{manager.Run, keyManager.Run, accounting.Run}, extra...),
 		Logger:  logger,
 	})

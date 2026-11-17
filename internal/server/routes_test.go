@@ -139,3 +139,60 @@ func TestRefusalIsDeliveredWithUnreadBody(t *testing.T) {
 		t.Fatal("the request reached the handler")
 	}
 }
+
+// metricsRecorder stands for the scrape handler and counts what reaches it.
+type metricsRecorder struct{ hits atomic.Int64 }
+
+func (m *metricsRecorder) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	m.hits.Add(1)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("comporta_requests_total 1\n"))
+}
+
+func startMetricsSurfaces(t *testing.T) (*Runtime, *routeRecorder, *metricsRecorder) {
+	t.Helper()
+	manager, _ := newManager(t, portsConfig(t, "  allowed_hosts: [comporta]\n"))
+	routes, metrics := &routeRecorder{}, &metricsRecorder{}
+	rt, _ := startRuntime(t, Options{Source: manager, Proxy: ProxySurface(manager, routes), Admin: AdminSurfaceWithMetrics(manager, okHandler(), metrics)})
+	return rt, routes, metrics
+}
+
+func TestMetricsOnlyOnAdminListener(t *testing.T) {
+	rt, routes, metrics := startMetricsSurfaces(t)
+	for _, target := range []string{"/metrics", "/metrics/", "/v1/metrics"} {
+		if status := statusOf(rawRequest(t, rt.ProxyAddr(), call("GET", target))); status != "404" {
+			t.Errorf("proxy %s: status %s", target, status)
+		}
+	}
+	if routes.hits.Load() != 0 || metrics.hits.Load() != 0 {
+		t.Fatal("the proxy listener reached a handler")
+	}
+	reply := rawRequest(t, rt.AdminAddr(), call("GET", "/metrics"))
+	if statusOf(reply) != "200" || !strings.Contains(reply, "comporta_requests_total") || metrics.hits.Load() != 1 {
+		t.Fatalf("admin scrape: %s", reply)
+	}
+}
+
+func TestMetricsHostAndPathValidation(t *testing.T) {
+	rt, _, metrics := startMetricsSurfaces(t)
+	for _, refused := range [][2]string{
+		{"POST", "/metrics"}, {"HEAD", "/metrics"}, {"PUT", "/metrics"}, {"GET", "/metrics?format=json"}, {"GET", "/metrics/"},
+		{"GET", "/Metrics"}, {"GET", "/%6detrics"}, {"GET", "//metrics"}, {"GET", "/metrics/../metrics"}, {"GET", "/admin/../metrics"},
+	} {
+		if status := statusOf(rawRequest(t, rt.AdminAddr(), call(refused[0], refused[1]))); status != "404" && status != "400" {
+			t.Errorf("%v: status %s", refused, status)
+		}
+	}
+	if got := metrics.hits.Load(); got != 0 {
+		t.Fatalf("a refused target reached the scrape %d times", got)
+	}
+	// The Host allowlist runs first, the same as for the admin API.
+	reply := rawRequest(t, rt.AdminAddr(), "GET /metrics HTTP/1.1\r\nHost: attacker.example\r\nConnection: close\r\n\r\n")
+	if statusOf(reply) != "421" || metrics.hits.Load() != 0 {
+		t.Fatalf("foreign host: %s", reply)
+	}
+	reply = rawRequest(t, rt.AdminAddr(), "GET /metrics HTTP/1.1\r\nHost: comporta:8081\r\nConnection: close\r\n\r\n")
+	if statusOf(reply) != "200" {
+		t.Fatalf("service name host: %s", reply)
+	}
+}

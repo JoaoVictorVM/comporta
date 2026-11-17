@@ -50,12 +50,26 @@ func AdminSurface(source SnapshotSource) http.Handler {
 // only here, under its own prefix, behind the same Host checks as the proxy;
 // healthz stays public and carries no operational data.
 func AdminSurfaceWith(source SnapshotSource, api http.Handler) http.Handler {
+	return AdminSurfaceWithMetrics(source, api, nil)
+}
+
+// MetricsPath is the Prometheus scrape route. It exists only on the admin
+// listener and only as GET on this exact target, without a query.
+const MetricsPath = "/metrics"
+
+// AdminSurfaceWithMetrics adds the scrape route to the admin listener. The
+// Host checks run before it, as for every other admin route.
+func AdminSurfaceWithMetrics(source SnapshotSource, api, metrics http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := admit(w, r, source); !ok {
 			return
 		}
 		if api != nil && strings.HasPrefix(r.RequestURI, adminPrefix) {
 			api.ServeHTTP(w, r)
+			return
+		}
+		if metrics != nil && r.Method == http.MethodGet && r.RequestURI == MetricsPath {
+			metrics.ServeHTTP(w, r)
 			return
 		}
 		if r.Method != http.MethodGet || r.RequestURI != "/healthz" {
