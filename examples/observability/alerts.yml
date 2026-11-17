@@ -1,0 +1,39 @@
+# Example alerting rules. They are recommended operational defaults, editable
+# here, not blocking policies: Comporta enforces limits on its own. Without an
+# Alertmanager they show up as firing in Prometheus only. A ratio over a
+# period without traffic is NaN, which never fires.
+groups:
+  - name: comporta
+    interval: 15s
+    rules:
+      - alert: ComportaUpstreamErrorRate
+        expr: |
+          (
+            sum by (app, provider) (increase(comporta_upstream_attempts_total{result=~"server_error|transport_error"}[5m]))
+            /
+            sum by (app, provider) (increase(comporta_upstream_attempts_total[5m]))
+          ) > 0.05
+          and on (app, provider)
+          sum by (app, provider) (increase(comporta_upstream_attempts_total[5m])) >= 20
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5% of the attempts of {{ $labels.app }} to {{ $labels.provider }} failed upstream over 5 minutes"
+
+      - alert: ComportaRequestLatencyP95High
+        expr: |
+          histogram_quantile(0.95, sum by (app, le) (rate(comporta_request_duration_seconds_bucket[5m]))) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 request duration of {{ $labels.app }} above 10 seconds over 5 minutes"
+
+      - alert: ComportaBudgetAbove90Percent
+        expr: comporta_budget_used_ratio > 0.9
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.app }} spent more than 90% of its {{ $labels.dimension }} {{ $labels.kind }} ({{ $labels.scope }})"

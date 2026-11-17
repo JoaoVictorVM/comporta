@@ -18,7 +18,7 @@ tasks:
   validate:
     desc: Validate every example without secrets
     cmds:
-      - for file in examples/*.yaml; do go run ./cmd/comporta config validate "$file" || exit 1; done
+      - for file in examples/*.yaml examples/observability/comporta-*.yaml; do go run ./cmd/comporta config validate "$file" || exit 1; done
 
   fmt:
     desc: Format the code
@@ -60,9 +60,14 @@ tasks:
       - '{{if eq OS "windows"}}.venv/Scripts/python{{else}}.venv/bin/python{{end}} -m pytest tests/sdk/compatibility_test.py -q'
 
   test-container:
-    desc: Build the image and verify compose, hardening, key persistence and privacy. Needs Docker and ports 8080 and 8081 free
+    desc: Build the image and verify compose, hardening, key persistence, privacy and the observability profile. Needs Docker and ports 8080, 8081, 3000, 9090 and 16686 free
     cmds:
-      - go test -tags container -timeout 15m ./tests/integration -run 'Compose|Container'
+      - go test -tags container -timeout 40m ./tests/integration -run 'Compose|Container|Observability'
+
+  test-alerts:
+    desc: Run the unit tests of the example alerting rules with promtool, in the pinned Prometheus image
+    cmds:
+      - docker run --rm --entrypoint promtool -w /rules -v "{{.ROOT_DIR}}/examples/observability:/rules:ro" prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 test rules alerts_test.yml
 
   vuln:
     desc: Scan dependencies for known vulnerabilities

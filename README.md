@@ -2,9 +2,9 @@
 
 Open-source LLM gateway, in development.
 
-**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, sensitive data detection with redaction and blocking, limit policies (block, downgrade and warn, allowed models and output caps), fallback routing across a chain of models of the same API format, an exact-match response cache in memory, and operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
+**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, sensitive data detection with redaction and blocking, limit policies (block, downgrade and warn, allowed models and output caps), fallback routing across a chain of models of the same API format, an exact-match response cache in memory, operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API, and observability: Prometheus metrics on the admin listener, optional OpenTelemetry traces and a Compose profile with Prometheus, Grafana and Jaeger. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
 
-**Not implemented yet:** alerts, telemetry, the admin panel and fallback to a model of another API format. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
+**Not implemented yet:** alerts, the admin panel and fallback to a model of another API format. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
 
 ## Commands
 
@@ -255,7 +255,7 @@ Every refusal before an attempt is stored as a blocked record with attempt 0, ze
 
 **Measured cost:** admission and settlement reuse the two synchronous `synchronous=FULL` commits that metering already made, now carrying the reservation. On the reference Windows machine, sequential non-streaming calls through the fake provider measured a p95 of 6.7 ms against 2.0 ms without metering and limits, and streaming time to first byte a p95 of 3.6 ms against 2.6 ms. The coordinator alone takes about 27 µs per reserve and settle. The sustained load target of 200 requests per second for 5 minutes was not measured in this release.
 
-**For later features:** the panel, alerts, telemetry and multiple instances consume typed decisions, a consistent state per app and user (used, reserved, limit, renewal, degradation, active and pending timezone) and a reservation handle with reserve, settle and release. `comporta users forget` removes a user's limit state together with the user's records, see Operations.
+**For later features:** the panel, alerts and multiple instances consume typed decisions, a consistent state per app and user (used, reserved, limit, renewal, degradation, active and pending timezone) and a reservation handle with reserve, settle and release. `comporta users forget` removes a user's limit state together with the user's records, see Operations.
 
 ### Limit policies
 
@@ -545,6 +545,16 @@ Requests and answers are JSON (at most 16 KiB, `Content-Type: application/json`,
 Requests authenticated with the session cookie must send a matching `Origin` on every POST and DELETE. IDs never go in a URL. Counts and money in usage answers are decimal strings. Usage cursors are signed with a per-process key and stop working after a restart. Sessions live in memory and end on restart.
 
 These routes are what the future panel will use. Pauses and sessions are local to one gateway process: keeping them consistent across several instances belongs to multi-instance support, not delivered yet.
+
+## Observability
+
+`GET /metrics` on the admin listener exposes Prometheus metrics behind the admin token: requests by app, model and outcome, latency and TTFB, upstream attempts, estimated cost and tokens, blocks, cache hits, fallbacks and budget ratios. With `telemetry.otel_enabled`, each proxy request becomes one OpenTelemetry trace with a span per pipeline stage, sent over OTLP/HTTP. Neither carries content, user IDs or user hashes, and both follow reloads.
+
+```sh
+curl -H "Authorization: Bearer $COMPORTA_ADMIN_TOKEN" http://127.0.0.1:8081/metrics
+```
+
+`docker compose --profile observability up` adds Prometheus, Grafana with the Comporta dashboard and Jaeger, after a short preparation of the admin token and a Grafana password in private files. See [docs/observability.md](docs/observability.md) for the settings, the metric catalog, the trace structure, the preparation and the limits.
 
 ## Fake provider
 

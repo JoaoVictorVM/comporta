@@ -4,3 +4,7 @@
 __pycache__/
 .pytest_cache/
 .venv/
+
+# Private files of the observability profile, if kept at their default paths
+/.comporta-metrics-token
+/.grafana-admin-password

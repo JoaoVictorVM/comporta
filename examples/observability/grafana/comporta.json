@@ -1,0 +1,1104 @@
+{
+  "uid": "comporta-overview",
+  "title": "Comporta",
+  "description": "Requests, latency, estimated cost, tokens, blocks, cache, fallbacks, budgets and telemetry health of one Comporta gateway.",
+  "tags": [
+    "comporta"
+  ],
+  "timezone": "browser",
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "10s",
+      "30s",
+      "1m",
+      "5m"
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "app",
+        "label": "App",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "comporta-prometheus"
+        },
+        "query": {
+          "query": "label_values(comporta_requests_total, app)",
+          "refId": "app"
+        },
+        "definition": "label_values(comporta_requests_total, app)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "sort": 1,
+        "hide": 0
+      },
+      {
+        "name": "model",
+        "label": "Model",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "comporta-prometheus"
+        },
+        "query": {
+          "query": "label_values(comporta_requests_total{app=~\"$app\"}, model)",
+          "refId": "model"
+        },
+        "definition": "label_values(comporta_requests_total{app=~\"$app\"}, model)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "sort": 1,
+        "hide": 0
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Requests (since start)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(comporta_requests_total{app=~\"$app\",model=~\"$model\"})",
+          "legendFormat": "",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "description": "Logical requests counted by this gateway process. A fallback is one request with several attempts."
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Estimated cost in range (USD)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(increase(comporta_cost_microusd_total{app=~\"$app\",model=~\"$model\"}[$__range])) / 1000000",
+          "legendFormat": "",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "description": "Estimated cost confirmed by the metering in the selected time range, all attempts included. SQLite stays the source of record."
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Estimated cost since start (USD)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(comporta_cost_microusd_total{app=~\"$app\",model=~\"$model\"}) / 1000000",
+          "legendFormat": "",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "description": "Counters restart at zero with the process."
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Cache hits (since start)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(comporta_cache_hits_total{app=~\"$app\",model=~\"$model\"})",
+          "legendFormat": "",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Fallbacks (since start)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(comporta_fallbacks_total{app=~\"$app\"})",
+          "legendFormat": "",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Blocks (since start)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(comporta_blocks_total{app=~\"$app\"})",
+          "legendFormat": "",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Requests/s by app and outcome",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (app, outcome) (rate(comporta_requests_total{app=~\"$app\",model=~\"$model\"}[1m]))",
+          "legendFormat": "{{app}} {{outcome}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Logical requests per second over 1 minute windows."
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Upstream attempts/s by provider and result",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (provider, result) (rate(comporta_upstream_attempts_total{app=~\"$app\",model=~\"$model\"}[1m]))",
+          "legendFormat": "{{provider}} {{result}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Attempts actually sent to a provider. Fallback retries appear here, not as requests."
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Request duration p50 / p95",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(comporta_request_duration_seconds_bucket{app=~\"$app\"}[5m])))",
+          "legendFormat": "p50",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(comporta_request_duration_seconds_bucket{app=~\"$app\"}[5m])))",
+          "legendFormat": "p95",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "From the route handler until the request ended, streaming included."
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Time to first byte p95",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(comporta_ttfb_seconds_bucket{app=~\"$app\",model=~\"$model\"}[5m])))",
+          "legendFormat": "{{model}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Until the first content reached the client. Requests that delivered nothing have no TTFB."
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Estimated cost (USD per minute)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (app, model) (rate(comporta_cost_microusd_total{app=~\"$app\",model=~\"$model\"}[1m])) * 60 / 1000000",
+          "legendFormat": "{{app}} {{model}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Estimated cost confirmed by the metering, every attempt included."
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Tokens/s by direction",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (direction) (rate(comporta_tokens_total{app=~\"$app\",model=~\"$model\"}[1m]))",
+          "legendFormat": "{{direction}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Input, output, cache read and cache write are disjoint categories."
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Blocks by type and scope",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (type, scope) (increase(comporta_blocks_total{app=~\"$app\"}[1m]))",
+          "legendFormat": "{{type}} ({{scope}})",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Terminal refusals per minute by their primary reason."
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Cache hits and fallbacks",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 28,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (app) (increase(comporta_cache_hits_total{app=~\"$app\",model=~\"$model\"}[1m]))",
+          "legendFormat": "hits {{app}}",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "B",
+          "expr": "sum by (app, cause) (increase(comporta_fallbacks_total{app=~\"$app\"}[1m]))",
+          "legendFormat": "fallback {{app}} {{cause}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Per minute. A fallback counts the transition, even when the next model also fails."
+    },
+    {
+      "id": 15,
+      "type": "bargauge",
+      "title": "Budget used and reserved",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 28,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "max by (app, scope, dimension, kind) (comporta_budget_used_ratio{app=~\"$app\"})",
+          "legendFormat": "used {{app}} {{scope}} {{dimension}} {{kind}}",
+          "range": false,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "B",
+          "expr": "max by (app, scope, dimension, kind) (comporta_budget_reserved_ratio{app=~\"$app\"})",
+          "legendFormat": "reserved {{app}} {{scope}} {{dimension}} {{kind}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.75
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "description": "user_max is the largest ratio of any single user in the current window, never a sum."
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Telemetry health",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (component, reason) (increase(comporta_telemetry_failures_total[5m]))",
+          "legendFormat": "failure {{component}} {{reason}}",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "B",
+          "expr": "sum by (reason) (increase(comporta_telemetry_dropped_spans_total[5m]))",
+          "legendFormat": "dropped spans {{reason}}",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "C",
+          "expr": "sum by (family) (increase(comporta_telemetry_label_overflow_total[5m]))",
+          "legendFormat": "overflow {{family}}",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "D",
+          "expr": "increase(comporta_event_notifications_lost_total[5m])",
+          "legendFormat": "event notifications lost",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "E",
+          "expr": "max by (app) (comporta_limit_state_unavailable{app=~\"$app\"})",
+          "legendFormat": "limit state unavailable {{app}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Problems of the telemetry itself. Unavailable limit state withholds the budget ratios instead of showing zero."
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Operational events by type",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "comporta-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 36,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "comporta-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (type) (increase(comporta_events_total[5m]))",
+          "legendFormat": "{{type}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Best effort diagnostics from the event bus; not a financial counter."
+    }
+  ]
+}

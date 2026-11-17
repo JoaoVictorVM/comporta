@@ -1,0 +1,34 @@
+# Optional override to evaluate the observability profile without a paid
+# provider: the built-in fake provider runs from the same image at a fixed
+# private address of the Compose network, since plain http upstreams must be
+# IP literals. Use it with examples/observability/comporta-fake.yaml:
+#
+#   COMPORTA_CONFIG=./examples/observability/comporta-fake.yaml \
+#   docker compose -f compose.yaml -f examples/observability/compose.fake-provider.yaml \
+#     --profile observability up
+services:
+  fake-provider:
+    profiles: [observability]
+    image: comporta:local
+    build: .
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command: ["fake-provider", "--bind", "0.0.0.0", "--port", "9090"]
+    networks:
+      default:
+        ipv4_address: 172.31.250.10
+
+  comporta:
+    depends_on:
+      - fake-provider
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24

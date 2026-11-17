@@ -1,0 +1,72 @@
+# Unit tests of alerts.yml: promtool test rules alerts_test.yml
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  # 2 of every 12 attempts fail upstream, well above 5% and 20 attempts.
+  - interval: 15s
+    input_series:
+      - series: 'comporta_upstream_attempts_total{app="bot",provider="anthropic",model="claude",result="ok"}'
+        values: '0+10x60'
+      - series: 'comporta_upstream_attempts_total{app="bot",provider="anthropic",model="claude",result="server_error"}'
+        values: '0+2x60'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ComportaUpstreamErrorRate
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ComportaUpstreamErrorRate
+        exp_alerts:
+          - exp_labels: {severity: warning, app: bot, provider: anthropic}
+            exp_annotations:
+              summary: "More than 5% of the attempts of bot to anthropic failed upstream over 5 minutes"
+
+  # Without traffic, or with too few attempts, nothing fires.
+  - interval: 15s
+    input_series:
+      - series: 'comporta_upstream_attempts_total{app="idle",provider="anthropic",model="claude",result="server_error"}'
+        values: '0x60'
+      - series: 'comporta_upstream_attempts_total{app="quiet",provider="anthropic",model="claude",result="server_error"}'
+        values: '0+0.05x60'
+      - series: 'comporta_request_duration_seconds_bucket{app="idle",operation="generation",le="+Inf"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: ComportaUpstreamErrorRate
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: ComportaRequestLatencyP95High
+        exp_alerts: []
+
+  # Every request takes between 10 and 30 seconds.
+  - interval: 15s
+    input_series:
+      - series: 'comporta_request_duration_seconds_bucket{app="bot",operation="generation",le="10"}'
+        values: '0x60'
+      - series: 'comporta_request_duration_seconds_bucket{app="bot",operation="generation",le="30"}'
+        values: '0+1x60'
+      - series: 'comporta_request_duration_seconds_bucket{app="bot",operation="generation",le="+Inf"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ComportaRequestLatencyP95High
+        exp_alerts:
+          - exp_labels: {severity: warning, app: bot}
+            exp_annotations:
+              summary: "p95 request duration of bot above 10 seconds over 5 minutes"
+
+  - interval: 15s
+    input_series:
+      - series: 'comporta_budget_used_ratio{app="bot",scope="user_max",dimension="usd_per_day",kind="budget"}'
+        values: '0.5 0.95x10'
+      - series: 'comporta_budget_used_ratio{app="bot",scope="app",dimension="usd_per_day",kind="budget"}'
+        values: '0.9x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ComportaBudgetAbove90Percent
+        exp_alerts:
+          - exp_labels: {severity: warning, app: bot, scope: user_max, dimension: usd_per_day, kind: budget}
+            exp_annotations:
+              summary: "bot spent more than 90% of its usd_per_day budget (user_max)"
