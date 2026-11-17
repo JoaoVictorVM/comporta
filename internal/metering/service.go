@@ -15,6 +15,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/pricing"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
+	"github.com/JoaoVictorVM/comporta/internal/telemetry"
 )
 
 type Store interface {
@@ -45,7 +46,12 @@ type Service struct {
 	unhealthy   bool
 	lastWarning time.Time
 	newTimer    func(time.Duration) timer
+	observer    telemetry.AccountingObserver
 }
+
+// UseTelemetry connects the observer that receives every concluded attempt.
+// It must be set before the first admission.
+func (s *Service) UseTelemetry(observer telemetry.AccountingObserver) { s.observer = observer }
 
 func New(store Store, catalog *pricing.Catalog, logger *slog.Logger, retention func() int64) *Service {
 	return &Service{store: store, catalog: catalog, logger: logger, slots: make(chan struct{}, 50000), wake: make(chan struct{}, 1), now: time.Now, retention: retention, newTimer: newSystemTimer}
@@ -456,6 +462,9 @@ func (s *Service) conclude(r storage.Record, q pricing.Quote, handle *limits.Han
 			s.unhealthy = true
 			s.mu.Unlock()
 			s.logger.Error("usage accounting failed; admission paused")
+			if s.observer != nil {
+				s.observer.AccountingFailure(telemetry.ReasonPricingFailed)
+			}
 			return r, false, err
 		}
 		r.Cost = cost
@@ -477,7 +486,32 @@ func (s *Service) conclude(r storage.Record, q pricing.Quote, handle *limits.Han
 		}
 		s.warnStorage(err)
 	}
+	s.observe(r, result, err)
 	return r, true, err
+}
+
+// observe hands telemetry the cost and tokens just decided, never priced
+// again. A replay or an attempt never sent consumed nothing and is skipped;
+// a failed settlement is reported as unconfirmed.
+func (s *Service) observe(r storage.Record, result proxy.AttemptResult, err error) {
+	if s.observer == nil || result.NotSent || r.Outcome == "cached" {
+		return
+	}
+	operation := telemetry.OperationGeneration
+	if result.Operation == proxy.OperationCountTokens {
+		operation = telemetry.OperationCountTokens
+	}
+	tokens := func(n *int64) telemetry.Optional[int64] {
+		if n == nil {
+			return telemetry.Optional[int64]{}
+		}
+		return telemetry.Some(*n)
+	}
+	s.observer.ObserveConsumption(telemetry.Consumption{
+		App: r.AppName, Provider: r.Provider, Model: r.ModelUsed, Operation: operation, CostMicrousd: int64(r.Cost),
+		InputTokens: tokens(r.Input), OutputTokens: tokens(r.Output), CacheReadTokens: tokens(r.CacheRead), CacheWriteTokens: tokens(r.CacheWrite),
+		UsageComplete: !r.UsageMissing, SettlementConfirmed: err == nil, RequestID: r.RequestID, AttemptIndex: r.AttemptIndex,
+	})
 }
 
 // enqueue hands a decided record to the worker. Its admission slot is released

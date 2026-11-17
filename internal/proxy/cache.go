@@ -11,6 +11,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/responsecache"
+	"github.com/JoaoVictorVM/comporta/internal/telemetry"
 )
 
 const (
@@ -167,6 +168,11 @@ func (o *operation) replay(r *http.Request, choice chosen, lease *responsecache.
 	o.attempt.complete = o.completion
 	o.attempt.result.NotSent = true
 	o.attempt.result.CacheHit = true
+	o.attempt.tel = o.tel
+	o.cacheHit = true
+	o.tel.CacheHit()
+	deliver := o.tel.Stage(telemetry.StageDeliver)
+	defer deliver.End()
 
 	header := o.w.Header()
 	header.Set(cacheHeader, cacheHit)

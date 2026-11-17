@@ -136,6 +136,25 @@ func (s *Service) run(ctx context.Context, tick <-chan time.Time) error {
 	}
 }
 
+// Flush exports the spans already queued by every live provider.
+func (s *Service) Flush(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	providers := append([]*traceProvider(nil), s.draining...)
+	if s.current != nil {
+		providers = append(providers, s.current)
+	}
+	s.mu.Unlock()
+	for _, p := range providers {
+		if err := p.tp.ForceFlush(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Close stops every provider and waits for their exports within the
 // shutdown limit, on success, failure or interruption alike. It is safe to
 // call more than once.

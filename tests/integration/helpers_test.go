@@ -31,6 +31,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/server"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
 	"github.com/JoaoVictorVM/comporta/internal/storage/sqlite"
+	"github.com/JoaoVictorVM/comporta/internal/telemetry"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
@@ -90,6 +91,7 @@ type gateway struct {
 	limits     *limits.Manager
 	loop       *loopguard.Manager
 	cache      *responsecache.Cache
+	telemetry  *telemetry.Service
 	userHeader string
 	handler    *proxy.Handler
 	t          testing.TB
@@ -180,6 +182,12 @@ type gatewayOptions struct {
 	// cache adds the response cache and its maintenance, as serve does.
 	cache      bool
 	cacheClock func() time.Time
+	// telemetry observes the gateway as serve does, with the given options;
+	// the source and the limit view are filled in. With metered it also
+	// receives the metering's conclusions and the event bus.
+	telemetry *telemetry.Options
+	// admin replaces the admin surface, for tests of the scrape endpoint.
+	admin func(*gateway) http.Handler
 }
 
 func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gatewayOptions) *gateway {
@@ -287,17 +295,42 @@ func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gat
 			return cache.Run(ctx, func() responsecache.Settings { return responsecache.FromSnapshot(manager.Capture()) })
 		})
 	}
+	var observer *telemetry.Service
+	if options.telemetry != nil {
+		settings := *options.telemetry
+		settings.Source = manager
+		if coordinator != nil {
+			settings.Limits = coordinator
+		}
+		observer = telemetry.New(settings)
+		t.Cleanup(observer.Close)
+		workers = append(workers, observer.Run)
+		if accounting != nil {
+			accounting.UseTelemetry(observer)
+			workers = append(workers, func(ctx context.Context) error { return observer.RunEvents(ctx, &usage.Bus) })
+		}
+	}
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), auth.NewGuard(nil, nil))
-	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results, Identity: identity, Hooks: hooks, Accounting: accountant, Loop: stage, Sensitive: inspection, Source: manager, Cache: cache})
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results, Identity: identity, Hooks: hooks, Accounting: accountant, Loop: stage, Sensitive: inspection, Source: manager, Cache: cache, Telemetry: observer})
+	built := &gateway{
+		usage: usage, accounting: accounting, limits: coordinator, loop: guard, cache: cache, telemetry: observer,
+		handler: handler, t: t, path: path, dir: dir, config: manager, store: store, keyManager: keyManager,
+		identity: identity, results: results, upstream: upstream, requests: requests, baseYAML: text,
+	}
+	adminSurface := server.AdminSurface(manager)
+	if options.admin != nil {
+		adminSurface = options.admin(built)
+	}
 	runtime, err := server.Open(context.Background(), server.Options{
 		Source:  manager,
 		Proxy:   server.ProxySurface(manager, handler),
-		Admin:   server.AdminSurface(manager),
+		Admin:   adminSurface,
 		Workers: workers,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	built.runtime = runtime
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- runtime.Run(ctx) }()
@@ -313,11 +346,7 @@ func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gat
 			usage.Close()
 		}
 	})
-	return &gateway{
-		usage: usage, accounting: accounting, limits: coordinator, loop: guard, cache: cache,
-		handler: handler, t: t, path: path, dir: dir, config: manager, store: store, keyManager: keyManager,
-		runtime: runtime, identity: identity, results: results, upstream: upstream, requests: requests, baseYAML: text,
-	}
+	return built
 }
 
 // createKey makes a key and waits until the running service accepts it.

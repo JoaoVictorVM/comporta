@@ -205,7 +205,15 @@ func detailedPayload(format auth.Format, failure Failure, detail *LimitDetail) [
 // WriteFailure answers with the failure in the given format. It must only be used
 // before the response is committed.
 func WriteFailure(w http.ResponseWriter, format auth.Format, failure Failure) {
+	remember(w, failure, nil)
 	writePayload(w, failure.Status, errorPayload(format, failure))
+}
+
+// remember keeps the answer of the gateway for the request's telemetry.
+func remember(w http.ResponseWriter, failure Failure, detail *LimitDetail) {
+	if tracked, ok := w.(*trackedWriter); ok && !tracked.committed {
+		tracked.failure, tracked.limit = &failure, detail
+	}
 }
 
 // writeRejection answers a refusal from a pipeline stage, with Retry-After and
@@ -214,6 +222,7 @@ func writeRejection(w http.ResponseWriter, format auth.Format, rejection *Reject
 	if rejection.RetryAfter > 0 {
 		w.Header().Set("Retry-After", strconv.FormatInt(rejection.RetryAfter, 10))
 	}
+	remember(w, rejection.failure(), rejection.Limit)
 	writePayload(w, rejection.Status, detailedPayload(format, rejection.failure(), rejection.Limit))
 }
 

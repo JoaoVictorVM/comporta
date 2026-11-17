@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
+	"github.com/JoaoVictorVM/comporta/internal/telemetry"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
@@ -73,6 +74,9 @@ type attempt struct {
 	sink      ResultSink
 	logger    *slog.Logger
 	once      sync.Once
+	// tel and trace observe the attempt; nil observes nothing.
+	tel   *telemetry.Op
+	trace *telemetry.Attempt
 }
 
 func newAttempt(envelope *Envelope, provider string, admission time.Time, now func() time.Time, sink ResultSink, logger *slog.Logger) *attempt {
@@ -130,16 +134,68 @@ func (a *attempt) markClientByte(status int) {
 	}
 }
 
+// observe hands telemetry a projection of the result. The user hash, key ID,
+// request ID and detections never leave here.
+func (a *attempt) observe(result AttemptResult, ended time.Time) {
+	if a.tel == nil {
+		return
+	}
+	if result.Committed && result.ClientTTFB.Known && result.DownstreamStatus.Known && result.DownstreamStatus.Value < 400 {
+		a.tel.Delivered(result.ClientTTFB.Value)
+	}
+	end := telemetry.AttemptEnd{
+		Sent: !result.NotSent, Result: attemptOutcome(result), ErrorType: string(result.ErrorCode), Ended: ended,
+		InputTokens: optionalOf(result.Usage.Input), OutputTokens: optionalOf(result.Usage.Output),
+		CacheReadTokens: optionalOf(result.Usage.CacheRead), CacheWriteTokens: optionalOf(result.Usage.CacheWrite),
+	}
+	if result.UpstreamStatus.Known {
+		end.Status = telemetry.Some(result.UpstreamStatus.Value)
+	}
+	a.trace.Finish(end)
+}
+
+func optionalOf(v Optional[int64]) telemetry.Optional[int64] {
+	return telemetry.Optional[int64]{Value: v.Value, Known: v.Known}
+}
+
+// attemptOutcome classifies what the provider did, apart from what the gateway
+// did with the answer afterwards.
+func attemptOutcome(r AttemptResult) telemetry.AttemptResult {
+	switch {
+	case r.ClientDisconnected || r.ErrorClass == ClassClientCancel:
+		return telemetry.AttemptCanceled
+	case !r.UpstreamStatus.Known:
+		return telemetry.AttemptTransportError
+	case r.UpstreamStatus.Value >= 500:
+		return telemetry.AttemptServerError
+	case r.UpstreamStatus.Value >= 400:
+		return telemetry.AttemptClientError
+	case r.UpstreamStatus.Value >= 300:
+		return telemetry.AttemptServerError
+	}
+	switch r.ErrorClass {
+	case ClassConnection, ClassTimeout, ClassProtocol:
+		return telemetry.AttemptTransportError
+	case ClassUpstream5xx, ClassOverload:
+		return telemetry.AttemptServerError
+	}
+	return telemetry.AttemptOK
+}
+
 // finish publishes the result once, whatever path ended the attempt. It runs on its
 // own context because the client's is often the reason the attempt ended, and a sink
 // that misbehaves must neither hold the request nor take the process down.
 func (a *attempt) finish() {
 	a.once.Do(func() {
-		a.result.Latency = a.now().Sub(a.began)
+		ended := a.now()
+		a.result.Latency = ended.Sub(a.began)
 		result := a.result
 		if a.complete != nil {
+			stage := a.tel.StageAttempt(telemetry.StageSettle, result.AttemptIndex)
 			a.complete(result)
+			stage.End()
 		}
+		a.observe(result, ended)
 		ctx, cancel := context.WithTimeout(context.Background(), sinkTimeout)
 		defer cancel()
 		done := make(chan struct{})
