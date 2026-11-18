@@ -26,6 +26,12 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom: {secretKeyRef: {name: store-password, key: password}}
           ports: [{containerPort: 5432}]
+          # Ready only once the real server listens on TCP: during initdb a
+          # temporary server answers on the socket alone.
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", "postgres", "-h", "127.0.0.1"]}
+            periodSeconds: 2
+            failureThreshold: 60
           volumeMounts: [{name: tls, mountPath: /tls}]
       volumes:
         - name: source

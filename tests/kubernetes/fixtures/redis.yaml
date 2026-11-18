@@ -40,6 +40,9 @@ spec:
             - name: REDIS_PASSWORD
               valueFrom: {secretKeyRef: {name: comporta-redis, key: password}}
           ports: [{containerPort: 6379}]
+          readinessProbe:
+            tcpSocket: {port: 6379}
+            periodSeconds: 2
           volumeMounts: [{name: tls, mountPath: /tls, readOnly: true}]
       volumes:
         - name: tls

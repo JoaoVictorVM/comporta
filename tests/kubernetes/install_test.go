@@ -160,9 +160,9 @@ spec:
   selector: {app: fake}
   ports: [{port: 9090}]
 `, image))
-	kubectl(t, "rollout", "status", "deployment/redis", "--timeout=180s")
-	kubectl(t, "rollout", "status", "deployment/postgres", "--timeout=180s")
-	kubectl(t, "rollout", "status", "deployment/fake", "--timeout=180s")
+	rollout(t, "redis", "180")
+	rollout(t, "postgres", "180")
+	rollout(t, "fake", "180")
 	fakeIP := strings.TrimSpace(kubectl(t, "get", "service", "fake", "-o", "jsonpath={.spec.clusterIP}"))
 
 	values := fmt.Sprintf(`replicas: 2
@@ -203,7 +203,7 @@ networkPolicy:
 	// The admin token is created once for the cluster, by a job with the same
 	// image, configuration and secrets as the replicas.
 	token := bootstrap(t)
-	kubectl(t, "rollout", "status", "deployment/"+release, "--timeout=300s")
+	rollout(t, release, "300")
 
 	t.Run("HardenedSecurityContext", func(t *testing.T) { checkSecurityContext(t) })
 	t.Run("ProbeHostAllowed", func(t *testing.T) {
@@ -311,7 +311,7 @@ func checkRollingRestart(t *testing.T, key, token string) {
 	}
 	before := spent(t, token)
 	kubectl(t, "rollout", "restart", "deployment/"+release)
-	kubectl(t, "rollout", "status", "deployment/"+release, "--timeout=300s")
+	rollout(t, release, "300")
 	after := spent(t, token)
 	if after < before || before == "" {
 		t.Fatalf("a rolling restart must keep the shared budget: before %q after %q", before, after)
@@ -365,8 +365,47 @@ spec:
         - {name: providers, secret: {secretName: comporta-providers, defaultMode: 0440}}
         - {name: tmp, emptyDir: {medium: Memory}}
 `, jobName, image, quoted, release))
-	kubectl(t, "wait", "--for=condition=complete", "job/"+jobName, "--timeout=180s")
-	return kubectl(t, "logs", "job/"+jobName)
+	deadline := time.Now().Add(180 * time.Second)
+	for {
+		status := kubectl(t, "get", "job", jobName, "-o", "jsonpath={.status.succeeded}/{.status.failed}")
+		if strings.HasPrefix(status, "1/") {
+			return kubectl(t, "logs", "job/"+jobName)
+		}
+		if strings.HasSuffix(status, "/1") || time.Now().After(deadline) {
+			t.Fatalf("job %s did not complete (%s)\n%s", strings.Join(args, " "), status, diagnose("job-name="+jobName))
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// rollout waits for a deployment and explains a failure.
+func rollout(t *testing.T, name, seconds string) {
+	t.Helper()
+	out, err := exec.Command("kubectl", "--context", "kind-"+clusterName, "-n", namespace, "rollout", "status", "deployment/"+name, "--timeout="+seconds+"s").CombinedOutput()
+	if err != nil {
+		selector := "app=" + name
+		if name == release {
+			selector = "app.kubernetes.io/instance=" + release
+		}
+		t.Fatalf("deployment %s not ready: %s\n%s", name, out, diagnose(selector))
+	}
+}
+
+// diagnose collects what explains a stuck workload: its logs, its pod
+// description and the namespace events. Secrets never reach them: the job
+// prints only fixed messages and the token, which this test discards.
+func diagnose(selector string) string {
+	var b strings.Builder
+	for _, args := range [][]string{
+		{"logs", "-l", selector, "--all-containers", "--tail=50"},
+		{"describe", "pods", "-l", selector},
+		{"get", "events", "--sort-by=.lastTimestamp"},
+		{"get", "pods", "-o", "wide"},
+	} {
+		out, _ := exec.Command("kubectl", append([]string{"--context", "kind-" + clusterName, "-n", namespace}, args...)...).CombinedOutput()
+		b.WriteString("$ kubectl " + strings.Join(args, " ") + "\n" + string(out) + "\n")
+	}
+	return b.String()
 }
 
 // bootstrap migrates the shared database and creates the admin token. The
