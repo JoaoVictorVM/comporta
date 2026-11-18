@@ -23,11 +23,17 @@ type SnapshotSource interface {
 	Capture() *config.Snapshot
 }
 
+// LoopChecker counts one arrival and answers a cut. The local guard keeps its
+// state in memory; the distributed one shares it through Redis.
+type LoopChecker interface {
+	Check(loopguard.Request) (loopguard.Decision, error)
+}
+
 // LoopStage connects the loop guard to the pipeline. Source supplies the
 // current policy, so a reload disables the guard for the next evaluation even
 // inside a request that captured an older snapshot.
 type LoopStage struct {
-	Guard    *loopguard.Manager
+	Guard    LoopChecker
 	Source   SnapshotSource
 	Recorder LoopRecorder
 }
@@ -45,7 +51,7 @@ func loopUnavailable() *Rejection {
 // evaluate counts the arrival once and answers a cut. Only generation is
 // guarded: counting tokens or listing models never loops an agent's spend.
 func (s *LoopStage) evaluate(ctx context.Context, snapshot *config.Snapshot, e *Envelope) *Rejection {
-	if s == nil || s.Guard == nil || e.Operation != OperationGeneration {
+	if s == nil || isNilChecker(s.Guard) || e.Operation != OperationGeneration {
 		return nil
 	}
 	request := loopguard.Request{
@@ -117,4 +123,12 @@ func loopRejection(d loopguard.Decision) *Rejection {
 // 1.5s, 0.25s. Go's own format would render 120s as 2m0s.
 func formatDuration(d time.Duration) string {
 	return strconv.FormatFloat(d.Seconds(), 'f', -1, 64) + "s"
+}
+
+func isNilChecker(c LoopChecker) bool {
+	if c == nil {
+		return true
+	}
+	m, ok := c.(*loopguard.Manager)
+	return ok && m == nil
 }

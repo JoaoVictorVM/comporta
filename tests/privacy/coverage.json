@@ -1,6 +1,8 @@
 {
   "constructors": ["AnthropicBody", "AnthropicStreamBody", "CountBody", "OpenAIBody", "OpenAIStreamBody"],
   "instrumented_go_files": [
+    "tests/distributed/main_test.go",
+    "tests/kubernetes/install_test.go",
     "internal/pricing/estimate_test.go",
     "internal/proxy/bench_test.go",
     "internal/proxy/handler_test.go",

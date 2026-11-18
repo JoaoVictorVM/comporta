@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/fakeprovider"
@@ -21,6 +22,7 @@ func TestCacheInvalidatesOnAppliedReload(t *testing.T) {
 	key := gw.createKey("bot").Key.Reveal()
 	body := zeroTemp(gptBody)
 	gw.call("/v1/chat/completions", key, body)
+	gw.waitCached(t, 1)
 	if response, _ := gw.call("/v1/chat/completions", key, body); response.Header.Get("X-Comporta-Cache") != "hit" {
 		t.Fatal("expected a hit before the reload")
 	}
@@ -39,6 +41,7 @@ func TestRejectedReloadKeepsCache(t *testing.T) {
 	key := gw.createKey("bot").Key.Reveal()
 	body := zeroTemp(gptBody)
 	gw.call("/v1/chat/completions", key, body)
+	gw.waitCached(t, 1)
 	if err := os.WriteFile(gw.path, []byte(gw.baseYAML+"\nunknown_root: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -185,5 +188,19 @@ func TestPauseBlocksCachedResponse(t *testing.T) {
 	s.admin(http.MethodPost, "/admin/v1/resume", `{"app":"bot"}`)
 	if status, hit := s.callCache("bot", "", body); status != http.StatusOK || !hit {
 		t.Fatalf("after resuming the entry is still valid: %d hit=%v", status, hit)
+	}
+}
+
+// waitCached waits until the capture of a response is stored: it is published
+// after the answer reached the client, so a follow-up call may otherwise run
+// before the entry exists.
+func (g *gateway) waitCached(t testing.TB, entries int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for g.cache.Stats().Entries < entries {
+		if time.Now().After(deadline) {
+			t.Fatal("the response was never cached")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

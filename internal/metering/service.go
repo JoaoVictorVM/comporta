@@ -30,7 +30,7 @@ type Source interface {
 }
 
 type Service struct {
-	limits      *limits.Manager
+	limits      limits.Coordinator
 	limitStore  storage.LimitStore
 	source      Source
 	flushMu     sync.Mutex
@@ -59,7 +59,7 @@ func New(store Store, catalog *pricing.Catalog, logger *slog.Logger, retention f
 
 // UseLimits connects the limit coordinator. store writes reservations in the
 // same transactions as the usage journal, so it must be the usage database.
-func (s *Service) UseLimits(manager *limits.Manager, store storage.LimitStore, source Source) error {
+func (s *Service) UseLimits(manager limits.Coordinator, store storage.LimitStore, source Source) error {
 	if manager == nil || store == nil {
 		return errors.New("limits need a coordinator and a store")
 	}
@@ -262,21 +262,27 @@ func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 		}
 		return base
 	}
-	commit := func(res storage.Reservation, sel limits.Selection) (int64, error) {
+	commit := func(ctx context.Context, res storage.Reservation, sel limits.Selection) (int64, error) {
 		admitted := withPolicy(r, chosen(sel), sel)
 		admitted.LimitsDegraded = res.Quote.Degraded
 		return s.limitStore.AdmitReserved(ctx, admitted, res)
 	}
-	var handle *limits.Handle
+	var handle limits.Attempt
 	var decision limits.Decision
 	var sel limits.Selection
-	var op *limits.Session
+	var op limits.Chain
 	if open != nil {
-		op, handle, decision, sel, err = s.limits.ReserveSession(policy, request, options, commit)
+		op, handle, decision, sel, err = s.limits.OpenChain(ctx, policy, request, options, commit)
 	} else {
-		handle, decision, sel, err = s.limits.ReserveSelect(policy, request, options, commit)
+		handle, decision, sel, err = s.limits.ReserveAttempt(ctx, policy, request, options, commit)
 	}
 	switch {
+	case errors.Is(err, limits.ErrPaused):
+		<-s.slots
+		return proxy.Admission{}, pausedRejection(e.AppName), false
+	case errors.Is(err, limits.ErrMaintenance):
+		<-s.slots
+		return proxy.Admission{}, maintenanceRejection(), false
 	case errors.Is(err, limits.ErrStale):
 		<-s.slots
 		return proxy.Admission{}, nil, true
@@ -387,7 +393,7 @@ func optional[T any](v proxy.Optional[T]) *T {
 // completion returns the two ways of ending an admitted attempt. Both share
 // one conclusion: whichever runs first decides it, and a repeat reports that
 // first answer without concluding again.
-func (s *Service) completion(r storage.Record, q pricing.Quote, handle *limits.Handle) (func(proxy.AttemptResult), func(proxy.AttemptResult) error) {
+func (s *Service) completion(r storage.Record, q pricing.Quote, handle limits.Attempt) (func(proxy.AttemptResult), func(proxy.AttemptResult) error) {
 	var once sync.Once
 	err := errNotConcluded
 	conclude := func(result proxy.AttemptResult) error {
@@ -412,7 +418,7 @@ func (s *Service) completion(r storage.Record, q pricing.Quote, handle *limits.H
 // settlement of its reservation, without queueing it for materialization. It
 // reports whether the record may be queued, and the durability error that
 // forbids anything else from being sent.
-func (s *Service) conclude(r storage.Record, q pricing.Quote, handle *limits.Handle, result proxy.AttemptResult) (storage.Record, bool, error) {
+func (s *Service) conclude(r storage.Record, q pricing.Quote, handle limits.Attempt, result proxy.AttemptResult) (storage.Record, bool, error) {
 	r.FinishedAt = s.now().UTC()
 	if r.FinishedAt.Before(r.StartedAt) {
 		r.FinishedAt = r.StartedAt
@@ -532,22 +538,22 @@ func (s *Service) enqueue(r storage.Record) {
 // finish makes the result durable. With limits, the settlement or release of
 // the reservation is written in the same transaction; on failure the
 // reservation stays conservatively held and the limit worker retries it.
-func (s *Service) finish(ctx context.Context, r storage.Record, handle *limits.Handle, result proxy.AttemptResult) error {
+func (s *Service) finish(ctx context.Context, r storage.Record, handle limits.Attempt, result proxy.AttemptResult) error {
 	if handle == nil {
 		return s.store.Complete(ctx, r)
 	}
 	// The deadline covers the write only: waiting for the coordinator behind a
 	// burst of admissions is not a storage failure.
-	persist := func(st storage.Settlement) (int64, error) {
-		write, cancel := context.WithTimeout(context.Background(), time.Second)
+	persist := func(ctx context.Context, st storage.Settlement) (int64, error) {
+		write, cancel := context.WithTimeout(ctx, time.Second)
 		defer cancel()
 		return s.limitStore.CompleteSettled(write, r, st)
 	}
 	if cacheHit(result) {
-		return s.limits.Release(handle, limits.ReleaseCache, persist)
+		return s.limits.ReleaseAttempt(context.Background(), handle, limits.ReleaseCache, persist)
 	}
 	if result.NotSent {
-		return s.limits.Release(handle, limits.ReleaseNotSent, persist)
+		return s.limits.ReleaseAttempt(context.Background(), handle, limits.ReleaseNotSent, persist)
 	}
 	usage := limits.Usage{Cost: r.Cost, Complete: !r.UsageMissing}
 	for _, n := range []*int64{r.Input, r.Output, r.CacheWrite, r.CacheRead} {
@@ -559,7 +565,15 @@ func (s *Service) finish(ctx context.Context, r storage.Record, handle *limits.H
 			}
 		}
 	}
-	return s.limits.Settle(handle, usage, persist)
+	return s.limits.SettleAttempt(context.Background(), handle, usage, persist)
+}
+
+func maintenanceRejection() *proxy.Rejection {
+	return &proxy.Rejection{Status: 503, Code: proxy.CodeUserMaintenance, Class: proxy.ClassInternal, Message: "this user's data is being changed by an operator; retry in a few seconds"}
+}
+
+func pausedRejection(app string) *proxy.Rejection {
+	return &proxy.Rejection{Status: 503, Code: proxy.CodeAppPaused, Class: proxy.ClassInternal, Message: "app " + app + " is paused by an operator"}
 }
 
 // cacheHit accepts the marker only on a generation answered without any

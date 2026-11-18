@@ -31,6 +31,7 @@ func validateConfig(cfg *Config, d *decoder, baseDir string, opts Options) []Dia
 	}
 	validateAlerts(cfg, d)
 	validateTelemetry(&cfg.Telemetry, d)
+	validateDeployment(cfg, d, baseDir)
 	return warnings.sorted()
 }
 

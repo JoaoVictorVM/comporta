@@ -1,0 +1,48 @@
+# Postgres for the kind test only, with TLS from the test CA. The key must be
+# owned by the server user, so an init container copies it with mode 0600.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: postgres}}
+  template:
+    metadata:
+      labels: {app: postgres, role: store}
+    spec:
+      initContainers:
+        - name: tls
+          image: postgres:17.12-alpine@sha256:a77aa70e641402a21411b92b721c58d10f23b50ae5fdd2333efd22d166e1e5f7
+          command: ["sh", "-c", "cp /src/tls.crt /src/tls.key /tls/ && chown 70:70 /tls/* && chmod 0600 /tls/tls.key"]
+          volumeMounts:
+            - {name: source, mountPath: /src, readOnly: true}
+            - {name: tls, mountPath: /tls}
+      containers:
+        - name: postgres
+          image: postgres:17.12-alpine@sha256:a77aa70e641402a21411b92b721c58d10f23b50ae5fdd2333efd22d166e1e5f7
+          args: ["-c", "ssl=on", "-c", "ssl_cert_file=/tls/tls.crt", "-c", "ssl_key_file=/tls/tls.key"]
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: store-password, key: password}}
+          ports: [{containerPort: 5432}]
+          # Ready only once the real server listens on TCP: during initdb a
+          # temporary server answers on the socket alone.
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", "postgres", "-h", "127.0.0.1"]}
+            periodSeconds: 2
+            failureThreshold: 60
+          volumeMounts: [{name: tls, mountPath: /tls}]
+      volumes:
+        - name: source
+          secret: {secretName: store-tls}
+        - name: tls
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector: {app: postgres}
+  ports: [{port: 5432, targetPort: 5432}]

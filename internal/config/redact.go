@@ -85,9 +85,39 @@ func publicTree(cfg *Config) map[string]any {
 			"anomaly_multiplier": cfg.Alerts.AnomalyMultiplier,
 			"anomaly_min_usd":    cfg.Alerts.AnomalyMinUSD.String(),
 		},
-		"telemetry": telemetry,
-		"storage":   map[string]any{"retention_days": cfg.Storage.RetentionDays},
+		"telemetry":  telemetry,
+		"storage":    publicStorage(cfg),
+		"deployment": publicDeployment(cfg.Deployment),
 	}
+}
+
+// publicStorage shows the distributed backends only when they are in use, so
+// the effective configuration of a single instance is unchanged. Key file
+// paths are shown, never their contents.
+func publicStorage(cfg *Config) map[string]any {
+	out := map[string]any{"retention_days": cfg.Storage.RetentionDays, "backend": string(cfg.Storage.Backend)}
+	if !cfg.Deployment.Distributed() {
+		return out
+	}
+	postgres := map[string]any{"max_connections": cfg.Storage.Postgres.MaxConnections}
+	addSecret(postgres, "dsn", cfg.Storage.Postgres.DSN)
+	redis := map[string]any{"address": cfg.Storage.Redis.Address, "database": cfg.Storage.Redis.Database,
+		"tls": map[string]any{"enabled": cfg.Storage.Redis.TLS.Enabled}}
+	addText(redis, "username", cfg.Storage.Redis.Username)
+	addSecret(redis, "password", cfg.Storage.Redis.Password)
+	addText(redis["tls"].(map[string]any), "ca_file", cfg.Storage.Redis.TLS.CAFile)
+	addText(redis["tls"].(map[string]any), "server_name", cfg.Storage.Redis.TLS.ServerName)
+	out["postgres"], out["redis"] = postgres, redis
+	return out
+}
+
+func publicDeployment(d Deployment) map[string]any {
+	out := map[string]any{"mode": string(d.Mode), "replicas": d.Replicas}
+	if d.Distributed() {
+		out["cluster_id"], out["config_revision"] = d.ClusterID, d.ConfigRevision
+		out["hmac_key_file"], out["cursor_key_file"] = d.HMACKeyFile, d.CursorKeyFile
+	}
+	return out
 }
 
 func publicListener(listener Listener) map[string]any {

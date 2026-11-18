@@ -1,0 +1,96 @@
+{{- $name := include "comporta.name" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels: {{- include "comporta.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  # A new pod is ready before an old one stops, so capacity never drops during
+  # a rollout; budgets are shared, so the extra pod never adds budget.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {{- include "comporta.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "comporta.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      # Above the 10 s drain and the 5 s readiness notice, with margin for the
+      # usage queue and the lease release.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {{- include "comporta.selector" . | nindent 14 }}
+      containers:
+        - name: comporta
+          image: {{ include "comporta.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve", "--config", "/etc/comporta/comporta.yaml"]
+          ports:
+            - {name: proxy, containerPort: {{ .Values.service.proxyPort }}}
+            - {name: admin, containerPort: {{ .Values.service.adminPort }}}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities: {drop: [ALL]}
+          # Probes send a fixed Host the listeners accept; they carry no token.
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin, httpHeaders: [{name: Host, value: localhost}]}
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: {path: /readyz, port: admin, httpHeaders: [{name: Host, value: localhost}]}
+            periodSeconds: 2
+            failureThreshold: 1
+          startupProbe:
+            httpGet: {path: /healthz, port: admin, httpHeaders: [{name: Host, value: localhost}]}
+            periodSeconds: 2
+            failureThreshold: 60
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/comporta, readOnly: true}
+            - {name: identity, mountPath: /run/secrets/identity, readOnly: true}
+            - {name: postgres, mountPath: /run/secrets/postgres, readOnly: true}
+            - {name: redis, mountPath: /run/secrets/redis, readOnly: true}
+            - {name: providers, mountPath: /run/secrets/providers, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: {{ $name }}}
+        # Secrets are volumes, never environment variables or subPath mounts, so
+        # a rotation is an atomic swap the gateway reads safely.
+        - name: identity
+          secret: {secretName: {{ .Values.secrets.identity }}, defaultMode: 0440}
+        - name: postgres
+          secret: {secretName: {{ .Values.secrets.postgres }}, defaultMode: 0440}
+        - name: redis
+          secret: {secretName: {{ .Values.secrets.redis }}, defaultMode: 0440}
+        - name: providers
+          secret: {secretName: {{ .Values.secrets.providers }}, defaultMode: 0440}
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 32Mi}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -60,6 +60,17 @@ const MetricsPath = "/metrics"
 // AdminSurfaceWithMetrics adds the scrape route to the admin listener. The
 // Host checks run before it, as for every other admin route.
 func AdminSurfaceWithMetrics(source SnapshotSource, api, metrics http.Handler) http.Handler {
+	return AdminSurfaceReady(source, api, metrics, nil)
+}
+
+// ReadinessPath answers whether this replica may take traffic. It needs no
+// credential, accepts no body or query and reveals no diagnostic: only ready
+// or not_ready. Liveness stays on /healthz and never depends on the stores.
+const ReadinessPath = "/readyz"
+
+// AdminSurfaceReady adds the readiness route. A nil ready function keeps the
+// route absent, which is the behavior of a single instance.
+func AdminSurfaceReady(source SnapshotSource, api, metrics http.Handler, ready func() bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := admit(w, r, source); !ok {
 			return
@@ -70,6 +81,17 @@ func AdminSurfaceWithMetrics(source SnapshotSource, api, metrics http.Handler) h
 		}
 		if metrics != nil && r.Method == http.MethodGet && r.RequestURI == MetricsPath {
 			metrics.ServeHTTP(w, r)
+			return
+		}
+		if ready != nil && r.Method == http.MethodGet && r.RequestURI == ReadinessPath && r.ContentLength <= 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			if !ready() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"status":"not_ready"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"status":"ready"}`))
 			return
 		}
 		if r.Method != http.MethodGet || r.RequestURI != "/healthz" {

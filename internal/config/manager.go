@@ -373,6 +373,14 @@ func staticChanges(current *Config, candidate *Candidate) []Diagnostic {
 		{"listeners.admin.port", current.Listeners.Admin.Port != next.Listeners.Admin.Port},
 		{"listeners.proxy.bind", current.Listeners.Proxy.Bind != next.Listeners.Proxy.Bind},
 		{"listeners.proxy.port", current.Listeners.Proxy.Port != next.Listeners.Proxy.Port},
+		{"deployment.mode", current.Deployment.Mode != next.Deployment.Mode},
+		{"deployment.replicas", current.Deployment.Replicas != next.Deployment.Replicas},
+		{"deployment.cluster_id", current.Deployment.ClusterID != next.Deployment.ClusterID},
+		{"deployment.hmac_key_file", current.Deployment.HMACKeyFile != next.Deployment.HMACKeyFile},
+		{"deployment.cursor_key_file", current.Deployment.CursorKeyFile != next.Deployment.CursorKeyFile},
+		{"storage.backend", current.Storage.Backend != next.Storage.Backend},
+		{"storage.postgres", current.Storage.Postgres != next.Storage.Postgres},
+		{"storage.redis", current.Storage.Redis != next.Storage.Redis},
 	}
 	var out []Diagnostic
 	for _, f := range fields {

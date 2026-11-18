@@ -22,11 +22,11 @@ var errNotConcluded = errors.New("previous attempt not concluded")
 type session struct {
 	service  *Service
 	snapshot *config.Snapshot
-	op       *limits.Session
+	op       limits.Chain
 	first    storage.Record
 	current  storage.Record
 	quote    pricing.Quote
-	handle   *limits.Handle
+	handle   limits.Attempt
 	done     *storage.Record
 	failed   error
 	closed   bool
@@ -152,12 +152,18 @@ func (x *session) Continue(ctx context.Context, e *proxy.Envelope, candidates []
 	}
 	fallbacks := s.limitStore.(storage.FallbackStore)
 	operation := storage.Operation{RequestID: r.RequestID, AppName: r.AppName, Subject: r.UserHash, Anonymous: r.Anonymous, Generation: x.first.Quote.Generation, StartedAt: x.first.StartedAt}
-	handle, decision, sel, err := s.limits.ReserveContinuation(x.op, request, options, func(res storage.Reservation, sel limits.Selection) (int64, error) {
+	handle, decision, sel, err := s.limits.ContinueChain(ctx, x.op, request, options, func(ctx context.Context, res storage.Reservation, sel limits.Selection) (int64, error) {
 		out := admitted(sel)
 		out.LimitsDegraded = res.Quote.Degraded
 		return fallbacks.AdmitContinuation(ctx, out, res, operation)
 	})
 	switch {
+	case errors.Is(err, limits.ErrPaused):
+		release()
+		return proxy.Admission{}, pausedRejection(r.AppName)
+	case errors.Is(err, limits.ErrMaintenance):
+		release()
+		return proxy.Admission{}, maintenanceRejection()
 	case errors.Is(err, limits.ErrUnavailable):
 		release()
 		return reject(503, proxy.CodeLimitsUnavailable, limits.ErrUnavailable.Error())
@@ -218,5 +224,5 @@ func (x *session) Close(terminal *proxy.Failure) {
 		}
 		x.service.enqueue(final)
 	}
-	x.service.limits.CloseSession(x.op)
+	x.service.limits.CloseChain(x.op)
 }

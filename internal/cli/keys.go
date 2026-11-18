@@ -74,7 +74,12 @@ func newKeysIssueCommand(out streams, verb, short string) *cobra.Command {
 				_, _ = fmt.Fprintln(out.stderr, unknownAppMessage(app, candidate.AppNames()))
 				return errReported
 			}
-			created, err := issueKey(command.Context(), keys.NewStore(candidate.DataDir()), verb, app)
+			store, done, err := keyLifecycle(command, out, candidate)
+			if err != nil {
+				return err
+			}
+			defer done()
+			created, err := issueKey(command.Context(), store, verb, app)
 			if err != nil {
 				return reportKeysError(out, err)
 			}
@@ -83,7 +88,7 @@ func newKeysIssueCommand(out streams, verb, short string) *cobra.Command {
 	}
 }
 
-func issueKey(ctx context.Context, store *keys.Store, verb, app string) (keys.Created, error) {
+func issueKey(ctx context.Context, store keys.Lifecycle, verb, app string) (keys.Created, error) {
 	if verb == "rotate" {
 		return store.Rotate(ctx, app)
 	}
@@ -113,7 +118,12 @@ func newKeysListCommand(out streams) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			entries, err := keys.NewStore(candidate.DataDir()).List()
+			store, done, err := keyLifecycle(command, out, candidate)
+			if err != nil {
+				return err
+			}
+			defer done()
+			entries, err := store.List()
 			if err != nil {
 				return reportKeysError(out, err)
 			}
@@ -158,7 +168,12 @@ func newKeysRevokeCommand(out streams) *cobra.Command {
 				return err
 			}
 			id := args[0]
-			changed, err := keys.NewStore(candidate.DataDir()).Revoke(command.Context(), id)
+			store, done, err := keyLifecycle(command, out, candidate)
+			if err != nil {
+				return err
+			}
+			defer done()
+			changed, err := store.Revoke(command.Context(), id)
 			if err != nil {
 				return reportKeysError(out, err)
 			}
@@ -241,4 +256,25 @@ func levenshtein(a, b string) int {
 		previous, current = current, previous
 	}
 	return previous[len(b)]
+}
+
+// keyLifecycle selects where keys live: keys.json for a single instance, the
+// shared database in distributed mode, where keys.json is never touched.
+func keyLifecycle(command *cobra.Command, out streams, candidate *config.Candidate) (keys.Lifecycle, func(), error) {
+	if !candidate.Deployment().Distributed() {
+		return keys.NewStore(candidate.DataDir()), func() {}, nil
+	}
+	resolved, err := loadResolved(command, out)
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := openShared(command.Context(), resolved)
+	if err != nil {
+		return nil, nil, reportShared(out, err)
+	}
+	if err := store.RequireCurrent(command.Context()); err != nil {
+		store.Close()
+		return nil, nil, reportShared(out, errors.New("shared database is not migrated; run \"comporta storage migrate\""))
+	}
+	return store.Keys(), func() { store.Close() }, nil
 }

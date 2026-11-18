@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"io/fs"
+	"os"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -90,3 +91,7 @@ func containsSID(sids []*windows.SID, target *windows.SID) bool {
 	}
 	return false
 }
+
+// writableByOthers is checked through ACLs only by the warning path; mode bits
+// carry no meaning on Windows, so the key itself is not refused here.
+func writableByOthers(os.FileInfo) bool { return false }

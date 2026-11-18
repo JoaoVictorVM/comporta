@@ -1,0 +1,57 @@
+# Redis for the kind test only: TLS with the test CA, a password, AOF with
+# fsync on every write and no eviction, as the gateway requires.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: redis}}
+  template:
+    metadata:
+      labels: {app: redis, role: store}
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4.12-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
+          args:
+            - redis-server
+            - --port
+            - "0"
+            - --tls-port
+            - "6379"
+            - --tls-cert-file
+            - /tls/tls.crt
+            - --tls-key-file
+            - /tls/tls.key
+            - --tls-ca-cert-file
+            - /tls/ca.crt
+            - --tls-auth-clients
+            - "no"
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            - --appendonly
+            - "yes"
+            - --appendfsync
+            - always
+            - --maxmemory-policy
+            - noeviction
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom: {secretKeyRef: {name: comporta-redis, key: password}}
+          ports: [{containerPort: 6379}]
+          readinessProbe:
+            tcpSocket: {port: 6379}
+            periodSeconds: 2
+          volumeMounts: [{name: tls, mountPath: /tls, readOnly: true}]
+      volumes:
+        - name: tls
+          secret: {secretName: store-tls}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  selector: {app: redis}
+  ports: [{port: 6379, targetPort: 6379}]

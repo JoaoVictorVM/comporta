@@ -54,6 +54,14 @@ func resolveSecrets(cfg *Config, d *decoder, baseDir string, opts Options) map[s
 		resolver.resolve(path, "signing_secret", "signing_secret_file", channel.SigningSecret)
 		resolver.resolve(path, "token", "token_file", channel.Token)
 	}
+	if cfg.Deployment.Distributed() {
+		if secret, ok := resolver.resolve("storage.postgres", "dsn", "dsn_file", cfg.Storage.Postgres.DSN); ok {
+			if problem := CheckPostgresDSN(secret.Reveal()); problem != "" {
+				d.reportAt(CodeInvalidValue, "storage.postgres.dsn", problem)
+			}
+		}
+		resolver.resolve("storage.redis", "password", "password_file", cfg.Storage.Redis.Password)
+	}
 	return resolver.values
 }
 

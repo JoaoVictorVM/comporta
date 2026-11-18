@@ -393,7 +393,7 @@ func TestUnavailableStoreRespondsWithoutCounting(t *testing.T) {
 			t.Fatalf("got %s", got)
 		}
 	}
-	if len(h.adapter.guard.entries) != 0 {
+	if len(h.adapter.guard.(*Guard).entries) != 0 {
 		t.Fatal("an outage is not a failed credential")
 	}
 	if h.next.calls != 0 {
@@ -418,7 +418,7 @@ func TestInvalidRemoteAddressIsRejected(t *testing.T) {
 			t.Fatal("the address must not be echoed")
 		}
 	}
-	if len(h.adapter.guard.entries) != 0 {
+	if len(h.adapter.guard.(*Guard).entries) != 0 {
 		t.Fatal("no shared identity may be invented")
 	}
 }

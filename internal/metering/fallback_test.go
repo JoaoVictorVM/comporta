@@ -163,7 +163,7 @@ func TestFallbackSettlementFailureStops(t *testing.T) {
 	}
 	// The reservation stays held: the limit worker retries it.
 	policy, _ := limits.PolicyFor(snapshot, "bot")
-	for _, v := range s.limits.State(policy, nil).Limits {
+	for _, v := range s.limits.(*limits.Manager).State(policy, nil).Limits {
 		if v.Dimension == limits.USDPerDay && v.Reserved == 0 {
 			t.Fatalf("reservation released after a failed settlement: %+v", v)
 		}

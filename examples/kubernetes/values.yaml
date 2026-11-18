@@ -1,0 +1,50 @@
+# Example values for "helm install comporta ./deploy/helm -f values.yaml".
+# Create the referenced Secrets first; this file holds no secret value.
+#
+#   kubectl create secret generic comporta-identity \
+#     --from-file=hmac.key=./hmac.key --from-file=cursor.key=./cursor.key
+#   kubectl create secret generic comporta-postgres --from-file=dsn=./dsn
+#   kubectl create secret generic comporta-redis --from-file=password=./redis-password --from-file=ca.crt=./ca.crt
+#   kubectl create secret generic comporta-providers --from-file=anthropic=./anthropic-key
+replicas: 2
+
+cluster:
+  id: gateway-prod
+  configRevision: 1
+
+storage:
+  redis:
+    address: redis.database.svc.cluster.local:6379
+    username: comporta
+    tls:
+      enabled: true
+
+config:
+  timezone: America/Sao_Paulo
+  providers:
+    anthropic:
+      api_format: anthropic
+      base_url: https://api.anthropic.com
+      api_key_file: /run/secrets/providers/anthropic
+      models: [claude-sonnet-4-5]
+  apps:
+    support-bot:
+      allowed_models: [claude-sonnet-4-5]
+      require_user: true
+      budget: {usd_per_day: 20.00}
+      per_user:
+        budget: {usd_per_day: 1.00}
+
+networkPolicy:
+  enabled: true
+  proxyFrom:
+    - podSelector:
+        matchLabels: {app: support-bot}
+  egress:
+    # Postgres and Redis of the cluster.
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: database}}}]
+      ports: [{port: 5432, protocol: TCP}, {port: 6379, protocol: TCP}]
+    # NetworkPolicy cannot match a domain name: keep these CIDRs current with
+    # the provider's published ranges, or route egress through a gateway.
+    - to: [{ipBlock: {cidr: 160.79.104.0/23}}]
+      ports: [{port: 443, protocol: TCP}]

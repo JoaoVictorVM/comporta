@@ -13,3 +13,7 @@ func inspectPermissions(path string) (bool, error) {
 	}
 	return info.Mode().Perm()&groupOtherReadOrAccess != 0, nil
 }
+
+// writableByOthers reports a mode that lets the group or others replace the
+// bytes of a shared key. A projected volume uses 0440 or 0400.
+func writableByOthers(info os.FileInfo) bool { return info.Mode().Perm()&0o022 != 0 }

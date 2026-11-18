@@ -218,9 +218,10 @@ func newAdminCommand(out streams) *cobra.Command {
 	group := &cobra.Command{Use: "admin", Short: "Manage the admin credential"}
 	reset := &cobra.Command{
 		Use:   "reset-token",
-		Short: "Replace the admin token of a stopped gateway",
-		Long: "Generate a new admin token and print it once. The gateway must be stopped; pauses, usage " +
-			"and the user identity key are kept. The previous token stops working.",
+		Short: "Replace the admin token of a stopped gateway, or of a distributed cluster",
+		Long: "Generate a new admin token and print it once. A single instance must be stopped; pauses, usage " +
+			"and the user identity key are kept. In distributed mode the replicas keep running: the new token " +
+			"takes effect on all of them within a second and every panel session ends. The previous token stops working.",
 		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			path, err := command.Flags().GetString("config")
@@ -234,6 +235,9 @@ func newAdminCommand(out streams) *cobra.Command {
 			candidate, err := config.Load(path, config.Options{SystemTimezone: config.DetectSystemTimezone(), Catalog: catalog})
 			if err != nil {
 				return errors.New("configuration could not be loaded")
+			}
+			if candidate.Deployment().Distributed() {
+				return resetSharedToken(command, out)
 			}
 			// The instance lock first, then the token lock: the order serve uses.
 			store, err := sqlite.Prepare(command.Context(), candidate.DataDir())
@@ -257,4 +261,25 @@ func newAdminCommand(out streams) *cobra.Command {
 	}
 	group.AddCommand(reset)
 	return group
+}
+
+func resetSharedToken(command *cobra.Command, out streams) error {
+	resolved, err := loadResolved(command, out)
+	if err != nil {
+		return err
+	}
+	store, err := openShared(command.Context(), resolved)
+	if err != nil {
+		return reportShared(out, err)
+	}
+	defer store.Close()
+	if err := store.RequireCurrent(command.Context()); err != nil {
+		return reportShared(out, errors.New("shared database is not migrated; run \"comporta storage migrate\""))
+	}
+	token, err := admin.ResetSharedToken(command.Context(), store, false)
+	if err != nil {
+		return errors.New("the admin token reset did not complete; the previous token may still be valid, run the command again")
+	}
+	fmt.Fprintf(out.stdout, "New admin token (shown only once; store it now): %s\n", token)
+	return nil
 }

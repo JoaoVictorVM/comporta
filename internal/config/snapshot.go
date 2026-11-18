@@ -112,3 +112,13 @@ func (s *Snapshot) Telemetry() Telemetry { return s.cfg.Telemetry }
 func (s *Snapshot) EffectiveYAML() string { return s.publicYAML }
 
 func (s *Snapshot) Storage() Storage { return s.cfg.Storage }
+
+// Deployment returns the deployment declaration.
+func (s *Snapshot) Deployment() Deployment { return s.cfg.Deployment }
+
+// StorageSecret returns a resolved storage secret. The field is
+// storage.postgres.dsn or storage.redis.password.
+func (s *Snapshot) StorageSecret(field string) (Secret, bool) {
+	secret, ok := s.secrets[field]
+	return secret, ok
+}

@@ -16,11 +16,14 @@ import (
 
 // Failures of the operational services, mapped to fixed HTTP answers.
 var (
-	ErrAppNotFound   = errors.New("app not found")
-	ErrInvalidInput  = errors.New("invalid request")
-	ErrUserBusy      = errors.New("user busy")
-	ErrDeletion      = errors.New("deletion failed; no records were removed")
-	ErrStorageFailed = errors.New("admin storage unavailable")
+	ErrAppNotFound  = errors.New("app not found")
+	ErrInvalidInput = errors.New("invalid request")
+	ErrUserBusy     = errors.New("user busy")
+	ErrDeletion     = errors.New("deletion failed; no records were removed")
+	// ErrOperationPending means the deletion committed and its cleanup across
+	// replicas continues in the background.
+	ErrOperationPending = errors.New("operation is pending reconciliation; retry later")
+	ErrStorageFailed    = errors.New("admin storage unavailable")
 )
 
 var appName = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
@@ -79,6 +82,12 @@ type ServiceOptions struct {
 	Now    func() time.Time
 	// PrepareTimeout bounds the wait for the user's requests in flight.
 	PrepareTimeout time.Duration
+	// FreshPause reloads the pause state before answering a read, for replicas
+	// that share it.
+	FreshPause bool
+	// CursorKey signs usage cursors. Replicas share it, so a cursor issued by one
+	// is accepted by another; without it each process draws its own.
+	CursorKey []byte
 }
 
 // Service holds the operations of the admin API, independent of HTTP.
@@ -96,7 +105,8 @@ type Service struct {
 	now      func() time.Time
 	prepare  time.Duration
 	// cursorKey signs usage cursors; it lives only in this process.
-	cursorKey []byte
+	cursorKey  []byte
+	freshPause bool
 }
 
 // NewService returns the operational services.
@@ -105,6 +115,10 @@ func NewService(options ServiceOptions) *Service {
 		control: options.Control, source: options.Source, identity: options.Identity, history: options.History,
 		metering: options.Metering, limits: options.Limits, loop: options.Loop, cache: options.Cache, usage: options.Usage, logger: options.Logger, now: options.Now, prepare: options.PrepareTimeout,
 		cursorKey: newCursorKey(),
+	}
+	s.freshPause = options.FreshPause
+	if len(options.CursorKey) == 32 {
+		s.cursorKey = append([]byte(nil), options.CursorKey...)
 	}
 	if s.prepare <= 0 {
 		s.prepare = 10 * time.Second
@@ -139,6 +153,13 @@ func (o PauseOutcome) Effective() bool { return o.GlobalPaused || o.AppPaused }
 // PauseState returns the persisted overrides; the caller combines them with the
 // configured apps.
 func (s *Service) PauseState() storage.PauseState {
+	// Replicas share the overrides: the answer comes from the durable state,
+	// not from a projection another replica may have changed since.
+	if s.freshPause {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = s.control.Reload(ctx)
+		cancel()
+	}
 	return s.control.State()
 }
 
@@ -158,7 +179,7 @@ func (s *Service) SetPause(ctx context.Context, selector PauseSelector, pause bo
 	at := s.now().UTC().Truncate(time.Microsecond)
 	result, err := s.control.Apply(ctx, storage.PauseChange{All: selector.All, App: selector.App, Paused: pause, At: at})
 	if err != nil {
-		s.logger.Error("pause state could not be saved; the operation was not applied")
+		s.logger.Error("pause state could not be confirmed; it may or may not have been applied")
 		return PauseOutcome{}, ErrStorageFailed
 	}
 	outcome := PauseOutcome{Selector: selector, GlobalPaused: result.State.Global, Changed: result.Changed, UpdatedAt: at}
@@ -255,6 +276,9 @@ func (s *Service) Forget(ctx context.Context, id string) (ForgetResult, error) {
 		// failed deletion keeps the counters and cooldowns of the user.
 		s.forgetLoop(subjects)
 		return result, nil
+	case errors.Is(err, storage.ErrPending):
+		s.logger.Warn("user deletion committed; cleanup pending")
+		return result, ErrOperationPending
 	case errors.Is(err, storage.ErrBusy):
 		reason := "pending usage"
 		var busy storage.BusyError

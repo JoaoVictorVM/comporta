@@ -1,0 +1,24 @@
+{{- $name := include "comporta.name" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-proxy
+  labels: {{- include "comporta.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: {{- include "comporta.selector" . | nindent 4 }}
+  ports:
+    - {name: proxy, port: {{ .Values.service.proxyPort }}, targetPort: proxy}
+---
+# The admin API has its own Service and no Ingress: reach it with port-forward
+# or from the peers networkPolicy.adminFrom allows.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-admin
+  labels: {{- include "comporta.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: {{- include "comporta.selector" . | nindent 4 }}
+  ports:
+    - {name: admin, port: {{ .Values.service.adminPort }}, targetPort: admin}

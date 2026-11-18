@@ -57,9 +57,10 @@ var (
 	errTooLarge         = &apiError{http.StatusRequestEntityTooLarge, "body_too_large", "request body exceeds 16 KiB", 0}
 	errMediaType        = &apiError{http.StatusUnsupportedMediaType, "unsupported_media_type", "content type must be application/json", 0}
 	errSessionsFull     = &apiError{http.StatusServiceUnavailable, "admin_sessions_full", "admin session capacity reached", 0}
-	errStorage          = &apiError{http.StatusServiceUnavailable, "admin_storage_unavailable", "admin storage unavailable; the operation was not applied", 0}
+	errStorage          = &apiError{http.StatusServiceUnavailable, "admin_storage_unavailable", "admin storage unavailable; the operation may or may not have been applied, check the current state before retrying", 0}
 	errAppNotFound      = &apiError{http.StatusNotFound, "app_not_found", "app not found", 0}
 	errUserBusy         = &apiError{http.StatusConflict, "user_busy", "user has requests in progress; try again", 0}
+	errPending          = &apiError{http.StatusServiceUnavailable, "operation_pending", "operation is pending reconciliation; retry later", 2}
 	errDeletionFailed   = &apiError{http.StatusServiceUnavailable, "deletion_failed", "deletion failed; no records were removed", 0}
 	errInternal         = &apiError{http.StatusInternalServerError, "internal_error", "internal error", 0}
 	errQueryNotAccepted = invalid("query parameters are not accepted")
@@ -88,9 +89,9 @@ type handlerFunc func(w http.ResponseWriter, r *http.Request, body []byte) *apiE
 
 // HandlerOptions configures the admin API.
 type HandlerOptions struct {
-	Credential *Credential
-	Sessions   *Sessions
-	Guard      *auth.Guard
+	Credential Verifier
+	Sessions   SessionStore
+	Guard      auth.Limiter
 	Service    *Service
 	Logger     *slog.Logger
 	Now        func() time.Time
@@ -98,9 +99,9 @@ type HandlerOptions struct {
 
 // Handler serves /admin/v1. It never exists on the proxy listener.
 type Handler struct {
-	credential *Credential
-	sessions   *Sessions
-	guard      *auth.Guard
+	credential Verifier
+	sessions   SessionStore
+	guard      auth.Limiter
 	service    *Service
 	logger     *slog.Logger
 	now        func() time.Time
@@ -592,6 +593,8 @@ func serviceFailure(err error) *apiError {
 		return errUserBusy
 	case errors.Is(err, ErrDeletion):
 		return errDeletionFailed
+	case errors.Is(err, ErrOperationPending):
+		return errPending
 	}
 	return errStorage
 }
