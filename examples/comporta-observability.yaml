@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=../schema/comporta.schema.json
+#
+# Configuration for `docker compose --profile observability up`. It is the
+# container configuration plus metrics and tracing: Prometheus scrapes the admin
+# listener as http://comporta:8081/metrics, and every proxy request becomes one
+# trace sent to Jaeger over OTLP/HTTP inside the Compose network. See
+# docs/observability.md for the preparation, including the admin token that
+# Prometheus reads from a private file.
+
+data_dir: /data
+timezone: UTC
+
+providers:
+  anthropic:
+    api_format: anthropic
+    base_url: https://api.anthropic.com
+    api_key: ${ANTHROPIC_API_KEY}
+    models:
+      - claude-sonnet-4-6
+      - claude-haiku-4-5
+
+pricing:
+  claude-sonnet-4-6: {input: 3, output: 15, cache_write: 3.75, cache_read: 0.3}
+  claude-haiku-4-5: {input: 1, output: 5, cache_write: 1.25, cache_read: 0.1}
+
+apps:
+  my-app:
+    allowed_models:
+      - claude-sonnet-4-6
+      - claude-haiku-4-5
+    budget:
+      usd_per_day: 5.00
+    per_user:
+      budget:
+        usd_per_day: 0.50
+
+listeners:
+  proxy:
+    bind: 0.0.0.0
+    port: 8080
+  admin:
+    bind: 0.0.0.0
+    port: 8081
+  # Prometheus reaches the gateway by its Compose service name.
+  allowed_hosts:
+    - comporta
+
+telemetry:
+  metrics_enabled: true
+  otel_enabled: true
+  # A base URL: /v1/traces is appended. Plain http is accepted here because
+  # "jaeger" is a single-label name on the private Compose network.
+  otel_endpoint: http://jaeger:4318

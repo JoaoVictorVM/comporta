@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/responsecache"
@@ -101,6 +102,21 @@ func TestCacheDisabledByDefault(t *testing.T) {
 	}
 }
 
+// settled waits for the captures still open to end: the client can read the
+// answer before the operation that produced it discards or publishes its
+// capture.
+func settled(t *testing.T, cache *responsecache.Cache) responsecache.Stats {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s := cache.Stats()
+		if s.Builders == 0 || time.Now().After(deadline) {
+			return s
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestCacheNeedsConfirmedConclusion(t *testing.T) {
 	fx, upstream, accounting, cache := cacheFixture(t, cacheSettings, jsonReply(cachedOpenAI))
 	accounting.failWith(errors.New("storage down"))
@@ -110,7 +126,7 @@ func TestCacheNeedsConfirmedConclusion(t *testing.T) {
 	if upstream.count() != 2 {
 		t.Fatal("a response whose result was not made durable is never stored")
 	}
-	if s := cache.Stats(); s.Entries != 1 || s.Builders != 0 {
+	if s := settled(t, cache); s.Entries != 1 || s.Builders != 0 {
 		t.Fatalf("stats = %+v", s)
 	}
 }
@@ -126,8 +142,8 @@ func TestCacheSkipsUsageMissingAndErrors(t *testing.T) {
 			fx, upstream, _, cache := cacheFixture(t, cacheSettings, reply)
 			fx.post("/v1/chat/completions", "openai", zeroTempOpenAI)
 			fx.post("/v1/chat/completions", "openai", zeroTempOpenAI)
-			if upstream.count() != 2 || cache.Stats().Entries != 0 || cache.Stats().UsedBytes != 0 {
-				t.Fatalf("nothing incomplete is stored: %+v", cache.Stats())
+			if s := settled(t, cache); upstream.count() != 2 || s.Entries != 0 || s.UsedBytes != 0 {
+				t.Fatalf("nothing incomplete is stored: %+v", s)
 			}
 		})
 	}

@@ -24,6 +24,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
 	"github.com/JoaoVictorVM/comporta/internal/server"
 	"github.com/JoaoVictorVM/comporta/internal/storage/sqlite"
+	"github.com/JoaoVictorVM/comporta/internal/telemetry"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
@@ -100,6 +101,12 @@ func newServeCommand(out streams) *cobra.Command {
 			if err := accounting.UseLimits(coordinator, store, manager); err != nil {
 				return err
 			}
+			// Telemetry lives in memory for this process. Its providers are closed on
+			// every return path, failures included, within its own deadline.
+			observer := telemetry.New(telemetry.Options{Source: manager, Limits: coordinator, Logger: logger})
+			defer observer.Close()
+			accounting.UseTelemetry(observer)
+			eventsWorker := func(ctx context.Context) error { return observer.RunEvents(ctx, &store.Bus) }
 			// Pauses load before the listeners: a paused app never takes a request
 			// after a restart, and an unreadable state keeps the service down.
 			control := runtimecontrol.New(store)
@@ -121,14 +128,14 @@ func newServeCommand(out streams) *cobra.Command {
 			cacheWorker := func(ctx context.Context) error {
 				return cache.Run(ctx, func() responsecache.Settings { return responsecache.FromSnapshot(manager.Capture()) })
 			}
-			adminAPI := admin.NewHandler(admin.HandlerOptions{
+			adminHandler := admin.NewHandler(admin.HandlerOptions{
 				Credential: credential, Logger: logger,
 				Service: admin.NewService(admin.ServiceOptions{
 					Control: control, Source: manager, Identity: identity, History: store,
 					Metering: accounting, Limits: coordinator, Loop: guard, Cache: cache, Usage: store, Logger: logger,
 				}),
 			})
-			if err := runGateway(command.Context(), logger, manager, keyManager, identity, accounting, control, loop, sensitive, cache, adminAPI, configEvents.Run, coordinator.Run, guard.Run, cacheWorker); err != nil {
+			if err := runGateway(command.Context(), logger, manager, keyManager, identity, accounting, control, loop, sensitive, cache, observer, adminHandler, adminHandler.Metrics(observer), configEvents.Run, coordinator.Run, guard.Run, cacheWorker, observer.Run, eventsWorker); err != nil {
 				return err
 			}
 			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -150,17 +157,17 @@ func newServeCommand(out streams) *cobra.Command {
 	return command
 }
 
-func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service, accounting *metering.Service, gate proxy.Gate, loop *proxy.LoopStage, sensitive *proxy.SensitiveStage, cache *responsecache.Cache, adminAPI http.Handler, configWorker, limitsWorker, loopWorker, cacheWorker server.Worker) error {
+func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service, accounting *metering.Service, gate proxy.Gate, loop *proxy.LoopStage, sensitive *proxy.SensitiveStage, cache *responsecache.Cache, observer *telemetry.Service, adminAPI, metrics http.Handler, extra ...server.Worker) error {
 	guard := auth.NewGuard(nil, logger)
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), guard)
-	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Identity: identity, Logger: logger, Accounting: accounting, Gate: gate, Loop: loop, Sensitive: sensitive, Source: manager, Cache: cache})
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Identity: identity, Logger: logger, Accounting: accounting, Gate: gate, Loop: loop, Sensitive: sensitive, Source: manager, Cache: cache, Telemetry: observer})
 	defer handler.Close()
 	defer cache.Close()
 	gateway, err := server.Open(ctx, server.Options{
 		Source:  manager,
 		Proxy:   server.ProxySurface(manager, handler),
-		Admin:   server.AdminSurfaceWith(manager, adminAPI),
-		Workers: []server.Worker{manager.Run, keyManager.Run, accounting.Run, configWorker, limitsWorker, loopWorker, cacheWorker},
+		Admin:   server.AdminSurfaceWithMetrics(manager, adminAPI, metrics),
+		Workers: append([]server.Worker{manager.Run, keyManager.Run, accounting.Run}, extra...),
 		Logger:  logger,
 	})
 	if err != nil {

@@ -249,6 +249,19 @@ func TestAlertAndTelemetryRules(t *testing.T) {
 	requireDiagnostic(t, replaced(t, baseYAML, "  bot:\n", "  bot:\n    detection: {cpf: maybe}\n"), CodeInvalidValue, "apps.bot.detection.cpf")
 }
 
+func TestTelemetryEndpointTransport(t *testing.T) {
+	endpoint := func(url string) string {
+		return baseYAML + "telemetry: {otel_enabled: true, otel_endpoint: \"" + url + "\"}\n"
+	}
+	for _, valid := range []string{"https://otel.example", "https://otel.example/base/v1/traces", "http://localhost:4318", "http://127.0.0.1:4318",
+		"http://10.0.0.7:4318", "http://[::1]:4318", "http://[fd00::7]:4318", "http://jaeger:4318", "http://otel-collector:4318/"} {
+		requireValid(t, endpoint(valid))
+	}
+	for _, public := range []string{"http://otel.example:4318", "http://8.8.8.8:4318", "http://[2001:4860::8888]:4318", "https://otel.example/a/../b", "ftp://otel.example"} {
+		requireDiagnostic(t, endpoint(public), CodeInvalidValue, "telemetry.otel_endpoint")
+	}
+}
+
 func TestDiagnosticPositions(t *testing.T) {
 	diags := requireDiagnostic(t, replaced(t, baseYAML, "  bot:\n", "  bot:\n    on_limit: sometimes\n"), CodeInvalidPolicy, "apps.bot.on_limit")
 	if diags[0].Line != 16 || diags[0].Column == 0 {

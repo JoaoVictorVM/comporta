@@ -20,5 +20,105 @@ services:
       - comporta-data:/data
       - ${COMPORTA_CONFIG:-./examples/comporta-container.yaml}:/etc/comporta/comporta.yaml:ro
 
+  # The services below start only with `docker compose --profile observability up`
+  # and COMPORTA_CONFIG=./examples/comporta-observability.yaml. Their images are
+  # pinned by digest; their UIs are published on the host's loopback only, and
+  # OTLP stays inside the Compose network. See docs/observability.md.
+  prometheus:
+    profiles: [observability]
+    image: prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.listen-address=0.0.0.0:9090
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - prometheus-data:/prometheus
+      - ./examples/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./examples/observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      # The admin token, in a private file outside the repository. It must exist:
+      # Compose never creates it.
+      - type: bind
+        source: ${COMPORTA_METRICS_TOKEN_FILE:-./.comporta-metrics-token}
+        target: /run/secrets/comporta_metrics_token
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      - comporta
+
+  grafana:
+    profiles: [observability]
+    image: grafana/grafana:13.2.6@sha256:b21409d7951ddcfd63a4b49083e4ef2cc35bc1437d071813bf82bfb238b00bca
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana_admin_password
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false
+      - GF_NEWS_NEWS_FEED_ENABLED=false
+      # The bundled plugins are enough. The background installer would download
+      # updates and, on this read-only filesystem, unregister the Prometheus
+      # plugin while failing to replace it.
+      - GF_PLUGINS_PREINSTALL_DISABLED=true
+      - GF_PLUGINS_PREINSTALL_AUTO_UPDATE=false
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/dashboards/comporta.json
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./examples/observability/grafana/datasources.yml:/etc/grafana/provisioning/datasources/comporta.yml:ro
+      - ./examples/observability/grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/comporta.yml:ro
+      - ./examples/observability/grafana/comporta.json:/etc/grafana/dashboards/comporta.json:ro
+      # The admin password, chosen by the operator in a private file.
+      - type: bind
+        source: ${GRAFANA_ADMIN_PASSWORD_FILE:-./.grafana-admin-password}
+        target: /run/secrets/grafana_admin_password
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp
+    depends_on:
+      - prometheus
+      - jaeger
+
+  jaeger:
+    profiles: [observability]
+    image: jaegertracing/jaeger:2.23.0@sha256:3823829974ccfc2485d2e48b165579091f32295022ae80ca49704e2f4834116e
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command: ["--config", "/etc/jaeger/config.yaml"]
+    # Only the UI is published. The OTLP receiver on 4318 is reachable by the
+    # gateway through the Compose network and not from the host.
+    ports:
+      - "127.0.0.1:16686:16686"
+    volumes:
+      - ./examples/observability/jaeger.yaml:/etc/jaeger/config.yaml:ro
+    tmpfs:
+      - /tmp
+
 volumes:
   comporta-data:
+  prometheus-data:
+  grafana-data:

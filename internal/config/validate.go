@@ -187,6 +187,25 @@ func ambiguousPath(path string) bool {
 	return false
 }
 
+// privateTelemetryHost accepts, besides local and private IP literals, a
+// single-label name such as a Compose service, which only resolves inside a
+// private network. The exporter still refuses to dial a public address over
+// plain HTTP, whatever the name resolves to.
+func privateTelemetryHost(host string) bool {
+	if isLocalHost(host) {
+		return true
+	}
+	if _, err := netip.ParseAddr(host); err == nil || host == "" || strings.Contains(host, ".") {
+		return false
+	}
+	for _, r := range host {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
 func isLocalHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
@@ -413,6 +432,10 @@ func validateTelemetry(telemetry *Telemetry, d *decoder) {
 			d.reportAt(CodeInvalidValue, path, "must not contain credentials")
 		case parsed.RawQuery != "" || parsed.Fragment != "":
 			d.reportAt(CodeInvalidValue, path, "must not contain a query or fragment")
+		case ambiguousPath(parsed.EscapedPath()):
+			d.reportAt(CodeInvalidValue, path, "must not contain dot segments, backslashes or encoded separators in the path")
+		case parsed.Scheme == "http" && !privateTelemetryHost(parsed.Hostname()):
+			d.reportAt(CodeInvalidValue, path, "plain http is only allowed for localhost, loopback or private IP literals and single-label service names; use https")
 		}
 	}
 	if telemetry.OTelEnabled && telemetry.OTelEndpoint == "" {

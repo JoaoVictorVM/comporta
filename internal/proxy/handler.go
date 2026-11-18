@@ -19,6 +19,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/keys"
 	"github.com/JoaoVictorVM/comporta/internal/responsecache"
 	"github.com/JoaoVictorVM/comporta/internal/runtimecontrol"
+	"github.com/JoaoVictorVM/comporta/internal/telemetry"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
@@ -104,6 +105,9 @@ type Options struct {
 	// Cache replays exact responses for apps that enable it. It is only used
 	// together with Accounting, which records the hit and ends its reservation.
 	Cache *responsecache.Cache
+	// Telemetry observes each request without taking part in its decisions.
+	// Without it nothing is observed.
+	Telemetry *telemetry.Service
 }
 
 // Handler serves the fixed routes.
@@ -121,6 +125,7 @@ type Handler struct {
 	now        func() time.Time
 	source     SnapshotSource
 	cache      *responsecache.Cache
+	telemetry  *telemetry.Service
 }
 
 // NewHandler returns a Handler.
@@ -129,7 +134,7 @@ func NewHandler(options Options) *Handler {
 		accounting: options.Accounting, gate: options.Gate, source: options.Source,
 		auth: options.Auth, transports: options.Transports, sink: options.Sink,
 		hooks: options.Hooks, loop: options.Loop, sensitive: options.Sensitive, identity: options.Identity, logger: options.Logger, now: options.Now,
-		cache: options.Cache,
+		cache: options.Cache, telemetry: options.Telemetry,
 	}
 	if handler.transports == nil {
 		handler.transports = NewTransportPool(nil, nil)
@@ -155,6 +160,10 @@ type trackedWriter struct {
 	http.ResponseWriter
 	controller *http.ResponseController
 	committed  bool
+	// status and failure are what the gateway answered, kept for telemetry.
+	status  int
+	failure *Failure
+	limit   *LimitDetail
 }
 
 func newTrackedWriter(w http.ResponseWriter) *trackedWriter {
@@ -162,11 +171,17 @@ func newTrackedWriter(w http.ResponseWriter) *trackedWriter {
 }
 
 func (w *trackedWriter) WriteHeader(status int) {
+	if !w.committed {
+		w.status = status
+	}
 	w.committed = true
 	w.ResponseWriter.WriteHeader(status)
 }
 
 func (w *trackedWriter) Write(data []byte) (int, error) {
+	if !w.committed {
+		w.status = http.StatusOK
+	}
 	w.committed = true
 	return w.ResponseWriter.Write(data)
 }
@@ -192,11 +207,17 @@ func (w *trackedWriter) prepareWrite(limit time.Duration) {
 func (h *Handler) ServeRoute(w http.ResponseWriter, r *http.Request, route Route, snapshot *config.Snapshot) {
 	format := route.format(r)
 	tracked := newTrackedWriter(w)
-	op := &operation{handler: h, w: tracked, raw: w, format: format, route: route, snapshot: snapshot, admission: h.now()}
+	op := &operation{handler: h, w: tracked, raw: w, format: format, route: route, snapshot: snapshot, admission: h.now(),
+		tel: h.telemetry.Begin(snapshot, route.operation())}
+	// Registered first so that it runs last, after every cleanup of finish.
+	defer op.observe(r)
 	defer op.finish()
 
+	stage := op.tel.Stage(telemetry.StageAuthenticate)
 	authenticated, ok := h.auth.Authorize(tracked, r, format, snapshot)
+	stage.End()
 	if !ok {
+		op.unauthenticated = true
 		return
 	}
 	identity, ok := auth.IdentityFrom(authenticated.Context())
@@ -204,6 +225,7 @@ func (h *Handler) ServeRoute(w http.ResponseWriter, r *http.Request, route Route
 		WriteFailure(tracked, format, internalFailure())
 		return
 	}
+	op.tel.Authenticated(identity.AppName())
 	_, rawQuery, hasQuery := strings.Cut(r.RequestURI, "?")
 	if route == RouteModels {
 		serveModels(tracked, authenticated, format, snapshot, identity.AppName(), rawQuery)
@@ -248,6 +270,11 @@ type operation struct {
 	// attempt of a non-streaming request that may fall back.
 	index    int
 	deadline time.Time
+	// tel observes the request; nil observes nothing.
+	tel             *telemetry.Op
+	unauthenticated bool
+	cacheHit        bool
+	fallbacks       int
 }
 
 // finish publishes the attempt and keeps a panic to this request. It is the one
@@ -314,31 +341,42 @@ func (o *operation) answerPanic() bool {
 
 func (o *operation) serve(r *http.Request) {
 	listeners := o.snapshot.Listeners()
+	stage := o.tel.Stage(telemetry.StageValidate)
 	if failure, ok := checkRequestHeaders(r); !ok {
+		stage.End()
 		WriteFailure(o.w, o.format, failure)
 		return
 	}
 	body, failure := o.readBody(r, listeners)
 	if failure != nil {
+		stage.End()
 		if failure.Code != CodeClientDisconnected {
 			WriteFailure(o.w, o.format, *failure)
+		} else {
+			o.w.failure = failure
 		}
 		return
 	}
 	identity, _ := auth.IdentityFrom(r.Context())
 	request, failure := parseRequest(o.route, r, body, identity, o.snapshot.Generation())
+	stage.End()
 	if failure != nil {
 		WriteFailure(o.w, o.format, *failure)
 		return
 	}
 	envelope := request.envelope
 	o.stream = envelope.Stream
-	if failure := request.applyIdentity(o.handler.identity, o.route, o.snapshot); failure != nil {
+	stage = o.tel.Stage(telemetry.StageIdentity)
+	failure = request.applyIdentity(o.handler.identity, o.route, o.snapshot)
+	stage.End()
+	if failure != nil {
 		WriteFailure(o.w, o.format, *failure)
 		return
 	}
 	if o.handler.gate != nil {
+		stage := o.tel.Stage(telemetry.StagePause)
 		ticket, err := o.handler.gate.Admit(runtimecontrol.Subject{App: envelope.AppName, Hash: envelope.Identity.Hash().Hex(), Anonymous: envelope.Identity.Anonymous()})
+		stage.End()
 		if err != nil {
 			WriteFailure(o.w, o.format, gateFailure(err, envelope.AppName))
 			return
@@ -360,18 +398,25 @@ func (o *operation) serve(r *http.Request) {
 	}
 	// Counted once per HTTP request, before any reservation: a cut never
 	// reserves budget and never reaches the provider.
-	if rejection := o.handler.loop.evaluate(r.Context(), o.snapshot, plan.request.envelope); rejection != nil {
-		writeRejection(o.w, o.format, rejection)
-		return
+	if loop := o.handler.loop; loop != nil && loop.Guard != nil && plan.request.envelope.Operation == OperationGeneration {
+		stage := o.tel.Stage(telemetry.StageLoopGuard)
+		rejection := o.handler.loop.evaluate(r.Context(), o.snapshot, plan.request.envelope)
+		stage.End()
+		if rejection != nil {
+			writeRejection(o.w, o.format, rejection)
+			return
+		}
 	}
 	admission := Admission{}
 	if o.handler.accounting != nil {
+		stage := o.tel.Stage(telemetry.StageAdmit)
 		for retry := 0; ; retry++ {
 			admission, rejection = o.admit(r.Context(), plan)
 			if rejection == nil {
 				break
 			}
 			if !rejection.Stale || o.handler.source == nil || retry >= staleRetries {
+				stage.End()
 				writeRejection(o.w, o.format, rejection)
 				return
 			}
@@ -380,10 +425,12 @@ func (o *operation) serve(r *http.Request) {
 			// memory, under the same request ID. The loop guard already counted it.
 			o.snapshot = o.handler.source.Capture()
 			if plan, rejection = o.reprepare(r, body, identity, plan.request.envelope.RequestID); rejection != nil {
+				stage.End()
 				o.reject(rejection)
 				return
 			}
 		}
+		stage.End()
 		o.completion = admission.Complete
 		if conclude := admission.Conclude; conclude != nil {
 			o.completion = func(result AttemptResult) { o.concludeErr, o.concluded = conclude(result), true }
@@ -400,6 +447,7 @@ func (o *operation) serve(r *http.Request) {
 		o.attempt = newAttempt(plan.request.envelope, plan.providerName, o.admission, o.handler.now, o.handler.sink, o.handler.logger)
 		o.attempt.complete = o.completion
 		o.attempt.result.NotSent = true
+		o.attempt.tel = o.tel
 		WriteFailure(o.w, o.format, internalFailure())
 		return
 	}
@@ -407,9 +455,13 @@ func (o *operation) serve(r *http.Request) {
 		o.w.Header().Set(downgradedFromHeader, envelope.ModelRequested)
 	}
 	o.downgraded = choice.downgraded
+	o.tel.Route(envelope.ModelRequested, choice.envelope.ModelEffective, choice.providerName, choice.envelope.Stream)
 	app, _ := o.snapshot.App(choice.envelope.AppName)
 	if state := o.cacheFor(r, app, choice); state != nil {
-		if lease := state.lookup(); lease != nil {
+		stage := o.tel.Stage(telemetry.StageCacheLookup)
+		lease := state.lookup()
+		stage.End()
+		if lease != nil {
 			o.replay(r, choice, lease, listeners)
 			return
 		}
@@ -482,7 +534,9 @@ func (o *operation) fallback(r *http.Request, plan *preparation, app config.App,
 			return
 		}
 		considered[next] = true
+		stage := o.tel.StageAttempt(telemetry.StageFallback, index+1)
 		choice, rejection := o.continueWith(r, plan, app, next, model, cause, sent)
+		stage.End()
 		if rejection != nil {
 			failure := rejection.failure()
 			o.terminal = &failure
@@ -490,6 +544,9 @@ func (o *operation) fallback(r *http.Request, plan *preparation, app config.App,
 			return
 		}
 		transitions = append(transitions, transition{from: model, to: choice.envelope.ModelEffective, cause: cause})
+		o.fallbacks++
+		o.tel.Fallback(cause)
+		o.tel.Route(choice.envelope.ModelRequested, choice.envelope.ModelEffective, choice.providerName, choice.envelope.Stream)
 		if value, ok := fallbackHeaderValue(transitions); ok {
 			o.w.Header().Set(fallbackHeader, value)
 		}
@@ -569,15 +626,20 @@ func (o *operation) prepare(r *http.Request, request *prepared, first bool) (*pr
 	if !ok {
 		return nil, asRejection(internalFailure())
 	}
+	stage := o.tel.Stage(telemetry.StageRoute)
 	providerName, provider, failure := o.resolveProvider(envelope.ModelEffective)
 	if failure != nil {
+		stage.End()
 		return nil, asRejection(*failure)
 	}
 	// Checked on the model the client asked for, before any switch: a downgrade
 	// never turns a forbidden model into an allowed one.
 	if !slices.Contains(app.AllowedModels, envelope.ModelRequested) {
+		stage.End()
 		return nil, modelNotAllowed(envelope.ModelRequested, envelope.AppName)
 	}
+	o.tel.Route(envelope.ModelRequested, envelope.ModelEffective, providerName, envelope.Stream)
+	stage.End()
 	if o.handler.accounting != nil {
 		if err := request.capOutput(app.MaxTokens); err != nil {
 			return nil, asRejection(internalFailure())
@@ -592,7 +654,12 @@ func (o *operation) prepare(r *http.Request, request *prepared, first bool) (*pr
 	// The inspection sees the body BeforeSend saw and its patches reach both the
 	// loop signature's request hash and the reservation estimate. The target is
 	// built afterwards, so it carries the same sanitized content.
+	var inspection *telemetry.StageSpan
+	if o.handler.sensitive != nil && o.handler.sensitive.Scanner != nil {
+		inspection = o.tel.Stage(telemetry.StageSensitive)
+	}
 	state, rejection := o.handler.sensitive.inspect(r.Context(), o.snapshot, request, o.w, o.handler.logger, o.handler.now)
+	inspection.End()
 	o.sensitive = state
 	if rejection != nil {
 		return nil, rejection
@@ -712,6 +779,9 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 	o.attempt.result.AttemptIndex = max(o.index, 1)
 	o.attempt.complete = o.completion
 	o.attempt.result.NotSent = true
+	o.attempt.tel = o.tel
+	deliver := o.tel.StageAttempt(telemetry.StageDeliver, o.index)
+	defer deliver.End()
 
 	ctx := r.Context()
 	var cancelDeadline context.CancelFunc = func() {}
@@ -756,6 +826,7 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 	defer release()
 
 	o.attempt.result.NotSent = false
+	o.attempt.trace = o.tel.StartAttempt(envelope.RequestID, o.attempt.result.AttemptIndex, name, envelope.ModelEffective)
 	response, err := transport.RoundTrip(request)
 	if err != nil {
 		if r.Context().Err() != nil {
