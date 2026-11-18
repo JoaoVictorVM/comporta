@@ -18,7 +18,7 @@ func replayed() proxy.AttemptResult {
 
 func reservedUSD(t *testing.T, s *Service, policy limits.Policy) (reserved, spent int64) {
 	t.Helper()
-	for _, v := range s.limits.State(policy, nil).Limits {
+	for _, v := range s.limits.(*limits.Manager).State(policy, nil).Limits {
 		if v.Dimension == limits.USDPerDay {
 			return v.Reserved, v.Used
 		}

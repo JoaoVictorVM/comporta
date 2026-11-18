@@ -1,85 +1,26 @@
 package sqlite
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"io"
 	"time"
 
-	"github.com/JoaoVictorVM/comporta/internal/events"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
 )
 
-type ledgerPayload struct {
-	AppName string               `json:"app_name"`
-	Deltas  []storage.LimitDelta `json:"deltas"`
-}
+type ledgerPayload = storage.LedgerPayload
 
-func validDimension(d string) bool {
-	switch d {
-	case "usd_per_day", "usd_per_month", "tokens_per_day", "tokens_per_month":
-		return true
-	}
-	return false
-}
-
-func validSubject(scope, subject string, anonymous bool) bool {
-	switch scope {
-	case "app":
-		return subject == "" && !anonymous
-	case "user":
-		return hexID.MatchString(subject)
-	}
-	return false
-}
-
-func validReservation(r storage.Reservation) error {
-	if !hexID.MatchString(r.RequestID) || r.AttemptIndex < 1 || !recordName.MatchString(r.AppName) || r.AdmittedAt.IsZero() || r.State != storage.ReservationReserved {
-		return storage.ErrInvalid
-	}
-	if r.Subject != "" && !hexID.MatchString(r.Subject) {
-		return storage.ErrInvalid
-	}
-	q := r.Quote
-	if (q.Operation != "generation" && q.Operation != "count_tokens") || q.EstimatedTokens < 0 || q.ReservedCost < 0 {
-		return storage.ErrInvalid
-	}
-	for _, item := range r.Items {
-		if !validSubject(item.Scope, item.Subject, item.Anonymous) || !validDimension(item.Dimension) || item.WindowEnd <= item.WindowStart || item.Reserved < 0 || item.Settled != nil {
-			return storage.ErrInvalid
-		}
-		if _, err := time.LoadLocation(item.Timezone); err != nil {
-			return storage.ErrInvalid
-		}
-	}
-	if e := r.Rate; e != nil {
-		// Attempt 1 is the logical request; later attempts only carry tokens.
-		attempt := e.AttemptIndex
-		if attempt == 0 {
-			attempt = 1
-		}
-		if e.RequestID != r.RequestID || e.AppName != r.AppName || e.Subject != r.Subject || e.Anonymous != r.Anonymous || e.EstimatedTokens < 0 || e.ActualTokens != nil || !e.Active ||
-			attempt != r.AttemptIndex || attempt > storage.MaxAttempts {
-			return storage.ErrInvalid
-		}
-	}
-	return nil
-}
-
-func decodeStrict(data string, target any) error {
-	d := json.NewDecoder(bytes.NewBufferString(data))
-	d.DisallowUnknownFields()
-	if err := d.Decode(target); err != nil {
-		return storage.ErrInvalid
-	}
-	if err := d.Decode(new(any)); err != io.EOF {
-		return storage.ErrInvalid
-	}
-	return nil
-}
+var (
+	validDimension   = storage.ValidDimension
+	validSubject     = storage.ValidSubject
+	validReservation = storage.ValidReservation
+	decodeStrict     = storage.DecodeStrict
+	policyEvent      = storage.PolicyEvent
+	itemsJSON        = storage.ItemsJSON
+	deltaFor         = storage.DeltaFor
+)
 
 // AdmitReserved writes the usage journal entry and the reservation in one
 // transaction, so neither can exist without the other after a crash. A repeat
@@ -135,19 +76,6 @@ func (s *Store) AdmitReserved(ctx context.Context, r storage.Record, res storage
 	return seq, nil
 }
 
-func policyEvent(r storage.Record) (events.Event, bool) {
-	var kind events.Type
-	switch r.PolicyOutcome {
-	case "warned":
-		kind = events.Warned
-	case "downgraded":
-		kind = events.Downgraded
-	default:
-		return events.Event{}, false
-	}
-	return events.NewPolicyAdmission(kind, r.StartedAt, r.RequestID, r.AttemptIndex, r.AppName, r.PolicyLimitName, r.PolicyScope, r.PolicyReason, r.ModelRequested, r.ModelUsed), true
-}
-
 func (s *Store) admitJournal(ctx context.Context, tx *sql.Tx, r storage.Record) (bool, error) {
 	data, _ := json.Marshal(r)
 	quote, _ := json.Marshal(r.Quote)
@@ -169,14 +97,6 @@ func (s *Store) admitJournal(ctx context.Context, tx *sql.Tx, r storage.Record) 
 		return false, databaseError(err)
 	}
 	return true, nil
-}
-
-func itemsJSON(items []storage.LimitItem) string {
-	if items == nil {
-		items = []storage.LimitItem{}
-	}
-	data, _ := json.Marshal(items)
-	return string(data)
 }
 
 func loadItems(ctx context.Context, q interface {
@@ -272,10 +192,6 @@ func insertReservation(ctx context.Context, tx *sql.Tx, r storage.Reservation) (
 		}
 	}
 	return insertLedger(ctx, tx, r.RequestID, r.AttemptIndex, storage.TransitionAdmit, r.AdmittedAt, payload)
-}
-
-func deltaFor(item storage.LimitItem, spent, reserved int64) storage.LimitDelta {
-	return storage.LimitDelta{Scope: item.Scope, Subject: item.Subject, Anonymous: item.Anonymous, Dimension: item.Dimension, WindowStart: item.WindowStart, WindowEnd: item.WindowEnd, Spent: spent, Reserved: reserved}
 }
 
 func insertLedger(ctx context.Context, tx *sql.Tx, requestID string, attempt int, transition string, at time.Time, payload ledgerPayload) (int64, error) {

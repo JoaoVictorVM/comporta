@@ -1,118 +1,32 @@
 package sqlite
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/events"
 	"github.com/JoaoVictorVM/comporta/internal/storage"
-	"io"
-	"regexp"
 	"strings"
 	"time"
 )
 
-var hexID = regexp.MustCompile(`^[0-9a-f]{32}$`)
+var hexID = storage.HexID
 
-func validate(r storage.Record) error {
-	if !hexID.MatchString(r.RequestID) || !hexID.MatchString(r.UserHash) || r.AppName == "" || r.AttemptIndex < 0 || r.Cost < 0 || r.ReservedCost < 0 || r.StartedAt.IsZero() || r.LatencyUS < 0 {
-		return storage.ErrInvalid
-	}
-	if r.Operation != "generation" && r.Operation != "count_tokens" {
-		return storage.ErrInvalid
-	}
-	switch r.Outcome {
-	case "ok", "blocked", "cached", "fallback", "downgraded", "loop_cut":
-	default:
-		return storage.ErrInvalid
-	}
-	if _, err := time.LoadLocation(r.Timezone); err != nil {
-		return storage.ErrInvalid
-	}
-	if _, err := time.Parse("2006-01-02", r.Day); err != nil {
-		return storage.ErrInvalid
-	}
-	if r.RequestCount < 0 || r.RequestCount > 1 {
-		return storage.ErrInvalid
-	}
-	if r.Outcome == "loop_cut" && r.AttemptIndex != 0 {
-		return storage.ErrInvalid
-	}
-	switch r.BlockReason {
-	case "", "spent", "reservation":
-	default:
-		return storage.ErrInvalid
-	}
-	if r.Detections != nil && (len(r.Detections) == 0 || r.Detections.Validate() != nil) {
-		return storage.ErrInvalid
-	}
-	if err := r.ValidatePolicy(); err != nil {
-		return err
-	}
-	if err := r.ValidateFallback(); err != nil || !category.MatchString(r.TerminalErrorCode) {
-		return storage.ErrInvalid
-	}
-	// A downgraded transport outcome only exists when the policy downgraded.
-	if r.Outcome == "downgraded" && r.PolicyOutcome != "downgraded" {
-		return storage.ErrInvalid
-	}
-	// Attempt 0 is a request refused locally before any attempt: it is terminal,
-	// costs nothing and never counts as a request in the generation totals. A
-	// loop cut is only ever attempt 0.
-	if r.AttemptIndex == 0 && ((r.Outcome != "blocked" && r.Outcome != "loop_cut") || r.RequestCount != 0 || r.Cost != 0 || r.ReservedCost != 0 || r.FinishedAt.IsZero()) {
-		return storage.ErrInvalid
-	}
-	if !r.FinishedAt.IsZero() && r.FinishedAt.Before(r.StartedAt) {
-		return storage.ErrInvalid
-	}
-	if !recordName.MatchString(r.AppName) || len(r.ModelRequested) > 256 || len(r.ModelUsed) > 256 || !category.MatchString(r.ErrorClass) || !category.MatchString(r.ErrorCode) {
-		return storage.ErrInvalid
-	}
-	for _, status := range []*int{r.UpstreamStatus, r.DownstreamStatus} {
-		if status != nil && (*status < 100 || *status > 599) {
-			return storage.ErrInvalid
-		}
-	}
-	if r.Quote.Threshold < 0 || r.Quote.Write1h < 0 || r.Quote.HighWrite1h < 0 || r.Quote.EstimatedInput < 0 || r.Quote.EstimatedOutput < 0 || r.Quote.InputFormulaCost < 0 || r.Quote.ReservedCost < 0 {
-		return storage.ErrInvalid
-	}
-	for _, p := range []config.Price{r.Quote.Price, r.Quote.HighPrice} {
-		if p.Input < 0 || p.Output < 0 || p.CacheWrite < 0 || p.CacheRead < 0 {
-			return storage.ErrInvalid
-		}
-	}
-	switch r.Quote.Source {
-	case "", "local", "override", "embedded":
-	default:
-		return storage.ErrInvalid
-	}
-	for _, n := range []*int64{r.Input, r.Output, r.CacheWrite, r.CacheRead, r.RawInputTotal, r.CountedInput, r.CacheWrite5m, r.CacheWrite1h, r.UpstreamTTFB, r.ClientTTFB} {
-		if n != nil && *n < 0 {
-			return storage.ErrInvalid
-		}
-	}
-	return nil
-}
-
-var recordName = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
-var category = regexp.MustCompile(`^[a-z0-9_]{0,64}$`)
-
-func decodeRecord(data string, r *storage.Record) error {
-	d := json.NewDecoder(bytes.NewBufferString(data))
-	d.DisallowUnknownFields()
-	if err := d.Decode(r); err != nil {
-		return storage.ErrInvalid
-	}
-	if err := d.Decode(new(any)); err != io.EOF {
-		return storage.ErrInvalid
-	}
-	return validate(*r)
-}
+// The shared rules live in package storage; these names keep the SQLite code
+// unchanged.
+var (
+	validate        = storage.ValidateRecord
+	decodeRecord    = storage.DecodeRecord
+	sameAdmission   = storage.SameAdmission
+	blockedEvent    = storage.BlockedEvent
+	eventFor        = storage.EventFor
+	completionEvent = storage.CompletionEvent
+	cachedEvent     = storage.CachedEvent
+	value           = storage.Value
+	recordName      = storage.RecordName
+	category        = storage.Category
+)
 
 func (s *Store) Admit(ctx context.Context, r storage.Record) error {
 	if err := validate(r); err != nil {
@@ -232,13 +146,6 @@ func (s *Store) Pending(ctx context.Context) ([]storage.Pending, error) {
 		out = append(out, p)
 	}
 	return out, rows.Err()
-}
-
-func sameAdmission(a, b storage.Record) bool {
-	qa, _ := json.Marshal(a.Quote)
-	qb, _ := json.Marshal(b.Quote)
-	return a.RequestID == b.RequestID && a.AttemptIndex == b.AttemptIndex && a.AppName == b.AppName && a.UserHash == b.UserHash && a.Anonymous == b.Anonymous && a.Operation == b.Operation && a.Provider == b.Provider && a.ModelRequested == b.ModelRequested && a.ModelUsed == b.ModelUsed && a.StartedAt.Equal(b.StartedAt) && a.Day == b.Day && a.Timezone == b.Timezone && a.ReservedCost == b.ReservedCost && string(qa) == string(qb) &&
-		a.PolicyOutcome == b.PolicyOutcome && a.PolicyLimitName == b.PolicyLimitName && a.FallbackFrom == b.FallbackFrom && a.FallbackCause == b.FallbackCause
 }
 
 func (s *Store) Commit(ctx context.Context, records []storage.Record) error {
@@ -419,37 +326,6 @@ func commitBlocked(ctx context.Context, tx *sql.Tx, r storage.Record, data, quot
 	}
 	*inserted = true
 	return nil
-}
-
-func blockedEvent(r storage.Record) events.Event {
-	id := sha256.Sum256([]byte("blocked:" + r.RequestID))
-	return events.Event{ID: hex.EncodeToString(id[:16]), Type: events.Blocked, At: r.FinishedAt, RequestID: r.RequestID, App: r.AppName,
-		Payload: events.Payload{Outcome: r.Outcome, ErrorClass: r.ErrorClass, ErrorCode: r.ErrorCode, Reason: r.BlockReason}}
-}
-
-func eventFor(r storage.Record) events.Event {
-	if r.AttemptIndex == 0 {
-		return blockedEvent(r)
-	}
-	return completionEvent(r)
-}
-
-func completionEvent(r storage.Record) events.Event {
-	e := events.Completion(r.RequestID, r.AttemptIndex, r.FinishedAt, r.AppName, r.Outcome, r.Cost, r.UsageMissing)
-	e.Payload.ErrorClass = r.ErrorClass
-	e.Payload.ErrorCode = r.ErrorCode
-	return e
-}
-
-func cachedEvent(r storage.Record) events.Event {
-	return events.CacheHit(r.RequestID, r.AttemptIndex, r.FinishedAt, r.AppName)
-}
-
-func value(p *int64) int64 {
-	if p == nil {
-		return 0
-	}
-	return *p
 }
 
 func (s *Store) Recover(ctx context.Context, now time.Time) error {

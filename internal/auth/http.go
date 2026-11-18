@@ -75,12 +75,12 @@ type SnapshotSource interface {
 type HTTP struct {
 	source        KeySource
 	authenticator *Authenticator
-	guard         *Guard
+	guard         Limiter
 }
 
 // NewHTTP returns an adapter. The guard is per process and must be shared by every
 // protected route, so that an address blocked on one is blocked on all.
-func NewHTTP(source KeySource, authenticator *Authenticator, guard *Guard) *HTTP {
+func NewHTTP(source KeySource, authenticator *Authenticator, guard Limiter) *HTTP {
 	return &HTTP{source: source, authenticator: authenticator, guard: guard}
 }
 

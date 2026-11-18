@@ -146,3 +146,28 @@ func writeFramed(mac hash.Hash, value string) {
 	mac.Write(binary.BigEndian.AppendUint32(nil, uint32(len(value))))
 	mac.Write([]byte(value))
 }
+
+// FromSharedKey builds the service from a key every replica of a cluster reads
+// from the same secret, so all of them compute the same pseudonyms. The key is
+// never generated here: a missing or malformed shared key stops the start.
+func FromSharedKey(key []byte) (*Service, error) {
+	if len(key) != keyBytes {
+		return nil, errors.New("shared user identity key must contain exactly 32 bytes")
+	}
+	return newService(key), nil
+}
+
+// Fingerprint identifies the key without revealing it, so replicas can compare
+// keys through the shared database. Its domain differs from every pseudonym.
+func (s *Service) Fingerprint() string {
+	return hex.EncodeToString(s.Derive("comporta:identity-fingerprint:v1"))
+}
+
+// Derive returns a subkey bound to a domain, for digests that must agree across
+// replicas without sharing the pseudonym key itself.
+func (s *Service) Derive(purpose string) []byte {
+	mac := hmac.New(sha256.New, s.key[:])
+	mac.Write([]byte("comporta:derive:v1\x00"))
+	writeFramed(mac, purpose)
+	return mac.Sum(nil)
+}

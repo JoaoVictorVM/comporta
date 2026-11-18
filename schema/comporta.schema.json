@@ -7,7 +7,59 @@
   "additionalProperties": false,
   "required": ["providers"],
   "properties": {
-    "storage": {"type":"object","additionalProperties":false,"properties":{"retention_days":{"type":"integer","minimum":1,"maximum":365,"default":30}}},
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Where usage history and shared state live. SQLite is the default for a single instance; distributed mode needs postgres and redis.",
+      "properties": {
+        "retention_days": {"type": "integer", "minimum": 1, "maximum": 365, "default": 30},
+        "backend": {"enum": ["sqlite", "postgres"], "default": "sqlite", "description": "postgres requires deployment.mode distributed. Changing it requires a restart and an empty destination."},
+        "postgres": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dsn": {"$ref": "#/$defs/secretRef"},
+            "dsn_file": {"$ref": "#/$defs/secretFile"},
+            "max_connections": {"type": "integer", "minimum": 2, "maximum": 100, "default": 10, "description": "Per process. Multiply by the replicas to size the server."}
+          },
+          "not": {"required": ["dsn", "dsn_file"]}
+        },
+        "redis": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "address": {"type": "string", "pattern": "^[^@/,;?# ]+:[0-9]{1,5}$", "description": "One standalone endpoint as host:port, without credentials. Sentinel and Cluster are not supported."},
+            "username": {"type": "string", "minLength": 1, "description": "ACL user name. Not a secret."},
+            "password": {"$ref": "#/$defs/secretRef"},
+            "password_file": {"$ref": "#/$defs/secretFile"},
+            "database": {"type": "integer", "minimum": 0, "maximum": 15, "default": 0},
+            "tls": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"type": "boolean", "default": true, "description": "Only a loopback address may disable TLS."},
+                "ca_file": {"type": "string", "minLength": 1, "description": "CA bundle that signs the server certificate. The host name is always verified."},
+                "server_name": {"type": "string", "minLength": 1, "description": "Expected certificate name when it differs from the address host."}
+              }
+            }
+          },
+          "not": {"required": ["password", "password_file"]}
+        }
+      }
+    },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How many processes share this gateway. Several replicas need mode distributed.",
+      "properties": {
+        "mode": {"enum": ["single", "distributed"], "default": "single", "description": "Changing it requires a restart."},
+        "replicas": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 1, "description": "Declared replica count. With SQLite, more than 1 aborts startup."},
+        "cluster_id": {"type": "string", "pattern": "^[a-z0-9-]{1,40}$", "description": "Stable and immutable cluster name. Required in distributed mode."},
+        "config_revision": {"type": "integer", "minimum": 1, "description": "Positive revision shared by every replica. Raise it to roll out a change; never lower it."},
+        "hmac_key_file": {"type": "string", "minLength": 1, "description": "File with exactly 32 bytes used to pseudonymize users, mounted from one shared secret."},
+        "cursor_key_file": {"type": "string", "minLength": 1, "description": "File with exactly 32 bytes that signs usage cursors. Must differ from hmac_key_file."}
+      }
+    },
     "data_dir": {"type": "string", "minLength": 1, "description": "Data directory, relative to this file. Default: ./data. Changing it requires a restart."},
     "timezone": {"type": "string", "minLength": 1, "description": "IANA timezone for budgets. Default: system timezone, which must have an IANA identifier."},
     "fail_mode": {"$ref": "#/$defs/failMode", "description": "Behavior when limit state is unavailable. Default: fail_closed."},

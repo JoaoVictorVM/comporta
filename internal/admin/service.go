@@ -79,6 +79,9 @@ type ServiceOptions struct {
 	Now    func() time.Time
 	// PrepareTimeout bounds the wait for the user's requests in flight.
 	PrepareTimeout time.Duration
+	// CursorKey signs usage cursors. Replicas share it, so a cursor issued by one
+	// is accepted by another; without it each process draws its own.
+	CursorKey []byte
 }
 
 // Service holds the operations of the admin API, independent of HTTP.
@@ -105,6 +108,9 @@ func NewService(options ServiceOptions) *Service {
 		control: options.Control, source: options.Source, identity: options.Identity, history: options.History,
 		metering: options.Metering, limits: options.Limits, loop: options.Loop, cache: options.Cache, usage: options.Usage, logger: options.Logger, now: options.Now, prepare: options.PrepareTimeout,
 		cursorKey: newCursorKey(),
+	}
+	if len(options.CursorKey) == 32 {
+		s.cursorKey = append([]byte(nil), options.CursorKey...)
 	}
 	if s.prepare <= 0 {
 		s.prepare = 10 * time.Second

@@ -80,17 +80,18 @@ func (r SecretRef) IsSet() bool { return r.Env != "" || r.File != "" }
 // Config is the typed, fully defaulted configuration contract. Secret values
 // never live here: see Snapshot for the accessors that expose them.
 type Config struct {
-	DataDir   string
-	Timezone  string
-	FailMode  FailMode
-	Providers map[string]Provider
-	Apps      map[string]App
-	Listeners Listeners
-	Pricing   map[string]Price
-	Cache     Cache
-	Alerts    Alerts
-	Telemetry Telemetry
-	Storage   Storage
+	DataDir    string
+	Timezone   string
+	FailMode   FailMode
+	Providers  map[string]Provider
+	Apps       map[string]App
+	Listeners  Listeners
+	Pricing    map[string]Price
+	Cache      Cache
+	Alerts     Alerts
+	Telemetry  Telemetry
+	Storage    Storage
+	Deployment Deployment
 }
 
 type Provider struct {
@@ -210,7 +211,61 @@ type Price struct {
 	CacheRead  Microusd
 }
 
-type Storage struct{ RetentionDays int64 }
+type StorageBackend string
+
+const (
+	BackendSQLite   StorageBackend = "sqlite"
+	BackendPostgres StorageBackend = "postgres"
+)
+
+type DeploymentMode string
+
+const (
+	ModeSingle      DeploymentMode = "single"
+	ModeDistributed DeploymentMode = "distributed"
+)
+
+// Deployment declares how many processes share one gateway. Replicas is the
+// operator's intent: it cannot detect copies launched outside the declaration.
+type Deployment struct {
+	Mode           DeploymentMode
+	Replicas       int64
+	ClusterID      string
+	ConfigRevision int64
+	HMACKeyFile    string
+	CursorKeyFile  string
+}
+
+// Distributed reports whether replicas share state through Redis and Postgres.
+func (d Deployment) Distributed() bool { return d.Mode == ModeDistributed }
+
+type PostgresStorage struct {
+	DSN            SecretRef
+	MaxConnections int64
+}
+
+type RedisTLS struct {
+	Enabled    bool
+	CAFile     string
+	ServerName string
+}
+
+// RedisStorage is a single standalone endpoint. Sentinel and Cluster are not
+// supported: the decision scripts need every key of an admission on one node.
+type RedisStorage struct {
+	Address  string
+	Username string
+	Password SecretRef
+	Database int64
+	TLS      RedisTLS
+}
+
+type Storage struct {
+	RetentionDays int64
+	Backend       StorageBackend
+	Postgres      PostgresStorage
+	Redis         RedisStorage
+}
 
 type Cache struct {
 	MaxBytes int64
@@ -250,12 +305,14 @@ type Telemetry struct {
 
 func defaultConfig() Config {
 	return Config{
-		DataDir:   "./data",
-		Storage:   Storage{RetentionDays: 30},
-		FailMode:  FailClosed,
-		Providers: map[string]Provider{},
-		Apps:      map[string]App{},
-		Pricing:   map[string]Price{},
+		DataDir: "./data",
+		Storage: Storage{RetentionDays: 30, Backend: BackendSQLite,
+			Postgres: PostgresStorage{MaxConnections: 10}, Redis: RedisStorage{TLS: RedisTLS{Enabled: true}}},
+		Deployment: Deployment{Mode: ModeSingle, Replicas: 1},
+		FailMode:   FailClosed,
+		Providers:  map[string]Provider{},
+		Apps:       map[string]App{},
+		Pricing:    map[string]Price{},
 		Listeners: Listeners{
 			Proxy:                 Listener{Bind: "127.0.0.1", Port: 8080},
 			Admin:                 Listener{Bind: "127.0.0.1", Port: 8081},

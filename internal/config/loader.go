@@ -79,6 +79,18 @@ func (c *Candidate) Warnings() []Diagnostic {
 // DataDir is the absolute data directory.
 func (c *Candidate) DataDir() string { return c.cfg.DataDir }
 
+// Deployment returns the deployment declaration.
+func (c *Candidate) Deployment() Deployment { return c.cfg.Deployment }
+
+// Storage returns the storage settings.
+func (c *Candidate) Storage() Storage { return c.cfg.Storage }
+
+// StorageSecret returns a storage secret resolved by a load with secrets.
+func (c *Candidate) StorageSecret(field string) (Secret, bool) {
+	secret, ok := c.secrets[field]
+	return secret, ok
+}
+
 // Listeners returns a copy of the listener settings, for clients that need to
 // find the running gateway.
 func (c *Candidate) Listeners() Listeners { return c.cfg.Listeners.clone() }
@@ -629,7 +641,7 @@ func (d *decoder) decodeRoot(root *yaml.Node) Config {
 	if root == nil {
 		return cfg
 	}
-	fields := d.fields(root, "", "data_dir", "timezone", "fail_mode", "providers", "apps", "listeners", "pricing", "cache", "alerts", "telemetry", "storage")
+	fields := d.fields(root, "", "data_dir", "timezone", "fail_mode", "providers", "apps", "listeners", "pricing", "cache", "alerts", "telemetry", "storage", "deployment")
 	d.optText(fields, "data_dir", "", &cfg.DataDir)
 	d.optText(fields, "timezone", "", &cfg.Timezone)
 	optEnum(d, fields, "fail_mode", "", CodeInvalidValue, &cfg.FailMode, FailClosed, FailOpen)
@@ -654,8 +666,10 @@ func (d *decoder) decodeRoot(root *yaml.Node) Config {
 		})
 	}
 	if node, ok := fields["storage"]; ok {
-		storage := d.fields(node, "storage", "retention_days")
-		d.optRange(storage, "retention_days", "storage", 1, 365, &cfg.Storage.RetentionDays)
+		d.decodeStorage(node, &cfg.Storage)
+	}
+	if node, ok := fields["deployment"]; ok {
+		d.decodeDeployment(node, &cfg.Deployment)
 	}
 	if node, ok := fields["cache"]; ok {
 		cache := d.fields(node, "cache", "max_bytes")
@@ -926,4 +940,43 @@ func mappingValue(node *yaml.Node, key string) *yaml.Node {
 		}
 	}
 	return nil
+}
+
+func (d *decoder) decodeStorage(node *yaml.Node, out *Storage) {
+	const parent = "storage"
+	fields := d.fields(node, parent, "retention_days", "backend", "postgres", "redis")
+	d.optRange(fields, "retention_days", parent, 1, 365, &out.RetentionDays)
+	optEnum(d, fields, "backend", parent, CodeInvalidValue, &out.Backend, BackendSQLite, BackendPostgres)
+	if value, ok := fields["postgres"]; ok {
+		path := joinPath(parent, "postgres")
+		postgres := d.fields(value, path, "dsn", "dsn_file", "max_connections")
+		out.Postgres.DSN, _ = d.secretRef(postgres, path, "postgres", "dsn", "dsn_file")
+		d.optRange(postgres, "max_connections", path, 2, 100, &out.Postgres.MaxConnections)
+	}
+	if value, ok := fields["redis"]; ok {
+		path := joinPath(parent, "redis")
+		redis := d.fields(value, path, "address", "username", "password", "password_file", "database", "tls")
+		d.optText(redis, "address", path, &out.Redis.Address)
+		d.optText(redis, "username", path, &out.Redis.Username)
+		out.Redis.Password, _ = d.secretRef(redis, path, "redis", "password", "password_file")
+		d.optRange(redis, "database", path, 0, 15, &out.Redis.Database)
+		if tlsNode, ok := redis["tls"]; ok {
+			tlsPath := joinPath(path, "tls")
+			tls := d.fields(tlsNode, tlsPath, "enabled", "ca_file", "server_name")
+			d.optBool(tls, "enabled", tlsPath, &out.Redis.TLS.Enabled)
+			d.optText(tls, "ca_file", tlsPath, &out.Redis.TLS.CAFile)
+			d.optText(tls, "server_name", tlsPath, &out.Redis.TLS.ServerName)
+		}
+	}
+}
+
+func (d *decoder) decodeDeployment(node *yaml.Node, out *Deployment) {
+	const parent = "deployment"
+	fields := d.fields(node, parent, "mode", "replicas", "cluster_id", "config_revision", "hmac_key_file", "cursor_key_file")
+	optEnum(d, fields, "mode", parent, CodeInvalidValue, &out.Mode, ModeSingle, ModeDistributed)
+	d.optRange(fields, "replicas", parent, 1, 1000, &out.Replicas)
+	d.optText(fields, "cluster_id", parent, &out.ClusterID)
+	d.optPositive(fields, "config_revision", parent, &out.ConfigRevision)
+	d.optText(fields, "hmac_key_file", parent, &out.HMACKeyFile)
+	d.optText(fields, "cursor_key_file", parent, &out.CursorKeyFile)
 }

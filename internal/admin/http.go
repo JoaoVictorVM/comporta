@@ -88,9 +88,9 @@ type handlerFunc func(w http.ResponseWriter, r *http.Request, body []byte) *apiE
 
 // HandlerOptions configures the admin API.
 type HandlerOptions struct {
-	Credential *Credential
-	Sessions   *Sessions
-	Guard      *auth.Guard
+	Credential Verifier
+	Sessions   SessionStore
+	Guard      auth.Limiter
 	Service    *Service
 	Logger     *slog.Logger
 	Now        func() time.Time
@@ -98,9 +98,9 @@ type HandlerOptions struct {
 
 // Handler serves /admin/v1. It never exists on the proxy listener.
 type Handler struct {
-	credential *Credential
-	sessions   *Sessions
-	guard      *auth.Guard
+	credential Verifier
+	sessions   SessionStore
+	guard      auth.Limiter
 	service    *Service
 	logger     *slog.Logger
 	now        func() time.Time
