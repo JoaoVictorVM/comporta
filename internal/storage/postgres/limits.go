@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/JoaoVictorVM/comporta/internal/events"
@@ -126,12 +128,17 @@ func insertReservation(ctx context.Context, tx *sql.Tx, r storage.Reservation) (
 		return 0, databaseError(err)
 	}
 	payload := storage.LedgerPayload{AppName: r.AppName, Deltas: []storage.LimitDelta{}}
-	for i, item := range r.Items {
-		if _, err = tx.ExecContext(ctx, `INSERT INTO limit_reservation_items VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULL)`,
-			r.RequestID, r.AttemptIndex, i, item.Scope, item.Subject, item.Anonymous, item.Dimension, item.WindowStart, item.WindowEnd, item.Timezone, item.Reserved); err != nil {
+	if len(r.Items) > 0 {
+		var values []string
+		var args []any
+		for i, item := range r.Items {
+			values = append(values, "("+placeholdersFrom(len(args)+1, 11)+",NULL)")
+			args = append(args, r.RequestID, r.AttemptIndex, i, item.Scope, item.Subject, item.Anonymous, item.Dimension, item.WindowStart, item.WindowEnd, item.Timezone, item.Reserved)
+			payload.Deltas = append(payload.Deltas, storage.DeltaFor(item, 0, item.Reserved))
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO limit_reservation_items VALUES `+strings.Join(values, ","), args...); err != nil {
 			return 0, databaseError(err)
 		}
-		payload.Deltas = append(payload.Deltas, storage.DeltaFor(item, 0, item.Reserved))
 	}
 	if e := r.Rate; e != nil && r.AttemptIndex > 1 {
 		if _, err = tx.ExecContext(ctx, `INSERT INTO limit_attempt_rate_events VALUES($1,$2,$3,$4,$5,$6,$7,NULL,true)`, e.RequestID, r.AttemptIndex, e.AppName, e.Subject, e.Anonymous, micros(e.AdmittedAt), e.EstimatedTokens); err != nil {
@@ -251,11 +258,19 @@ func settleTx(ctx context.Context, tx *sql.Tx, st storage.Settlement) (int64, er
 		return 0, storage.ErrInvalid
 	}
 	payload := storage.LedgerPayload{AppName: app, Deltas: []storage.LimitDelta{}}
-	for i, item := range items {
-		if _, err = tx.ExecContext(ctx, `UPDATE limit_reservation_items SET settled=$1 WHERE request_id=$2 AND attempt_index=$3 AND item_index=$4`, st.Settled[i], st.RequestID, st.AttemptIndex, indices[i]); err != nil {
+	if len(items) > 0 {
+		var values []string
+		args := []any{st.RequestID, st.AttemptIndex}
+		for i, item := range items {
+			n := len(args)
+			values = append(values, "($"+strconv.Itoa(n+1)+"::integer,$"+strconv.Itoa(n+2)+"::bigint)")
+			args = append(args, indices[i], st.Settled[i])
+			payload.Deltas = append(payload.Deltas, storage.DeltaFor(item, st.Settled[i], -item.Reserved))
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE limit_reservation_items i SET settled=v.settled FROM (VALUES `+strings.Join(values, ",")+`) AS v(item_index,settled)
+WHERE i.request_id=$1 AND i.attempt_index=$2 AND i.item_index=v.item_index`, args...); err != nil {
 			return 0, databaseError(err)
 		}
-		payload.Deltas = append(payload.Deltas, storage.DeltaFor(item, st.Settled[i], -item.Reserved))
 	}
 	next := storage.ReservationSettled
 	if st.Transition == storage.TransitionRelease {

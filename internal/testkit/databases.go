@@ -111,13 +111,15 @@ func startDatabases() (*Databases, error) {
 		return nil, err
 	}
 	d.postgres, err = docker("run", "-d", "--rm", "--name", name+"-pg", "-e", "POSTGRES_PASSWORD="+d.password,
-		"-p", "127.0.0.1:"+pgPort+":5432", PostgresImage, "-c", "max_connections=400", "-c", "fsync=on")
+		"-p", "127.0.0.1:"+pgPort+":5432", "--tmpfs", "/var/lib/postgresql/data:rw,size=1g", PostgresImage, "-c", "max_connections=400", "-c", "fsync=on")
 	if err != nil {
 		return nil, err
 	}
 	// The scripts need every reservation to survive a restart: AOF with fsync on
-	// every write and no eviction, as in production.
-	d.redis, err = docker("run", "-d", "--name", name+"-redis", "-p", "127.0.0.1:"+redisPort+":6379", RedisImage,
+	// every write and no eviction, as in production. The data lives on tmpfs, so
+	// fsync is cheap on any host and a restart behaves like a lost disk, which
+	// the rebuild must handle anyway.
+	d.redis, err = docker("run", "-d", "--name", name+"-redis", "-p", "127.0.0.1:"+redisPort+":6379", "--tmpfs", "/data:rw,size=512m", RedisImage,
 		"redis-server", "--appendonly", "yes", "--appendfsync", "always", "--maxmemory-policy", "noeviction", "--databases", "64")
 	if err != nil {
 		d.stop()

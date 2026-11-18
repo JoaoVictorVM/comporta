@@ -46,34 +46,36 @@ func (s *Store) Admit(ctx context.Context, r storage.Record) error {
 func (s *Store) admitJournal(ctx context.Context, tx *sql.Tx, r storage.Record) (bool, error) {
 	data, _ := json.Marshal(r)
 	quote, _ := json.Marshal(r.Quote)
+	owner := s.currentOwner()
+	// The bound on unfinished entries is checked in the same statement, and the
+	// count stops at the limit, so it never scans a large journal.
+	var inserted bool
+	err := tx.QueryRowContext(ctx, `WITH capacity AS (SELECT count(*) AS n FROM (SELECT 1 FROM metering_journal WHERE state='admitted' LIMIT $8) x),
+ins AS (INSERT INTO metering_journal(request_id,attempt_index,admitted_at,state,metadata_json,quote_json,result_json,owner_id,owner_fence)
+SELECT $1,$2,$3,'admitted',$4,$5,NULL,$6,$7 FROM capacity WHERE n<$8 ON CONFLICT(request_id,attempt_index) DO NOTHING RETURNING 1)
+SELECT EXISTS(SELECT 1 FROM ins)`, r.RequestID, r.AttemptIndex, micros(r.StartedAt), string(data), string(quote), owner.ID, owner.Fence, s.journalLimit).Scan(&inserted)
+	if err != nil {
+		return false, databaseError(err)
+	}
+	if inserted {
+		return true, nil
+	}
 	var old string
-	err := tx.QueryRowContext(ctx, `SELECT metadata_json::text FROM metering_journal WHERE request_id=$1 AND attempt_index=$2`, r.RequestID, r.AttemptIndex).Scan(&old)
-	if err == nil {
-		canonical, _, err := canonicalRecord(old)
-		if err != nil {
-			return false, err
-		}
-		if canonical == string(data) {
-			return false, nil
-		}
-		return false, storage.ErrConflict
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return false, databaseError(err)
-	}
-	var pending int64
-	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM metering_journal WHERE state='admitted'`).Scan(&pending); err != nil {
-		return false, databaseError(err)
-	}
-	if pending >= s.journalLimit {
+	err = tx.QueryRowContext(ctx, `SELECT metadata_json::text FROM metering_journal WHERE request_id=$1 AND attempt_index=$2`, r.RequestID, r.AttemptIndex).Scan(&old)
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, storage.ErrUnavailable
 	}
-	owner := s.currentOwner()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO metering_journal(request_id,attempt_index,admitted_at,state,metadata_json,quote_json,result_json,owner_id,owner_fence) VALUES($1,$2,$3,'admitted',$4,$5,NULL,$6,$7)`,
-		r.RequestID, r.AttemptIndex, micros(r.StartedAt), string(data), string(quote), owner.ID, owner.Fence); err != nil {
+	if err != nil {
 		return false, databaseError(err)
 	}
-	return true, nil
+	canonical, _, err := canonicalRecord(old)
+	if err != nil {
+		return false, err
+	}
+	if canonical == string(data) {
+		return false, nil
+	}
+	return false, storage.ErrConflict
 }
 
 func (s *Store) Complete(ctx context.Context, r storage.Record) error {
@@ -312,10 +314,12 @@ func boolInt(b bool) int64 {
 
 const requestColumns = `request_id,attempt_index,started_at,finished_at,app_name,user_hash,anonymous,operation,provider,model_requested,model_used,upstream_status,downstream_status,outcome,error_class,error_code,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,raw_input_total,counted_input_tokens,cache_write_5m_tokens,cache_write_1h_tokens,cost_microusd,reserved_cost_microusd,usage_missing,recovered,estimate_exceeded,request_count,latency_us,upstream_ttfb_us,client_ttfb_us,usage_day,timezone,price_quote_json,record_json`
 
-func placeholders(n int) string {
+func placeholders(n int) string { return placeholdersFrom(1, n) }
+
+func placeholdersFrom(first, n int) string {
 	var b strings.Builder
-	for i := 1; i <= n; i++ {
-		if i > 1 {
+	for i := first; i < first+n; i++ {
+		if i > first {
 			b.WriteByte(',')
 		}
 		b.WriteByte('$')

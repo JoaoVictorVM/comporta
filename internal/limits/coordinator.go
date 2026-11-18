@@ -29,7 +29,7 @@ type Attempt interface {
 
 // Chain is a logical request that may span several attempts.
 type Chain interface {
-	chain()
+	RequestID() string
 }
 
 // Coordinator is the admission and settlement strategy. The local Manager
@@ -46,7 +46,8 @@ type Coordinator interface {
 	ReleaseAttempt(ctx context.Context, a Attempt, reason ReleaseReason, persist Persist) error
 }
 
-func (*Session) chain() {}
+// RequestID identifies the logical request.
+func (s *Session) RequestID() string { return s.request.RequestID }
 
 func bind(ctx context.Context, commit Commit) func(storage.Reservation, Selection) (int64, error) {
 	return func(res storage.Reservation, sel Selection) (int64, error) { return commit(ctx, res, sel) }
