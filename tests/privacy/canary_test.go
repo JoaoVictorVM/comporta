@@ -90,6 +90,23 @@ func freePort(t *testing.T) int {
 	return listener.Addr().(*net.TCPAddr).Port
 }
 
+// distinctPorts returns n free ports that differ from each other. The system
+// may hand out a port again once its probe listener closes, and two processes
+// on one port would make the gateway fail to start while the fake answers in
+// its place.
+func distinctPorts(t *testing.T, n int) []int {
+	t.Helper()
+	seen := map[int]bool{}
+	var out []int
+	for len(out) < n {
+		if port := freePort(t); !seen[port] {
+			seen[port] = true
+			out = append(out, port)
+		}
+	}
+	return out
+}
+
 var (
 	binaryOnce sync.Once
 	binaryPath string
@@ -191,8 +208,9 @@ func startLiveWith(t *testing.T, scenario, extraListeners string, edit func(stri
 // scenario per model.
 func startLiveFake(t *testing.T, fakeArgs []string, extraListeners string, edit func(string) string) *liveGateway {
 	t.Helper()
-	gateway := &liveGateway{t: t, dir: t.TempDir(), proxyPort: freePort(t)}
-	fakePort, adminPort := freePort(t), freePort(t)
+	ports := distinctPorts(t, 3)
+	gateway := &liveGateway{t: t, dir: t.TempDir(), proxyPort: ports[0]}
+	fakePort, adminPort := ports[1], ports[2]
 	gateway.adminPort = adminPort
 	config := filepath.Join(gateway.dir, "comporta.yaml")
 	text := fmt.Sprintf(`timezone: UTC

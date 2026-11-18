@@ -71,7 +71,9 @@ func (c *resultCollector) last(t testing.TB) proxy.AttemptResult {
 
 func (c *resultCollector) waitCount(t testing.TB, want int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	// Hundreds of concurrent conclusions are written to SQLite before their
+	// results arrive; a loaded CI machine needs more than a few seconds.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		c.mu.Lock()
 		count := len(c.results)
