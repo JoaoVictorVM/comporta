@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -141,7 +142,16 @@ func (s *Store) handshake(ctx context.Context, cn *goredis.Conn) error {
 		return err
 	}
 	if runID(info) != *expected {
+		// The connection stays usable for identity checks, but every script
+		// refuses until the coordinator decided between following the epoch
+		// and rebuilding.
 		s.changed.Store(true)
+	}
+	return nil
+}
+
+func (s *Store) guard() error {
+	if s.changed.Load() {
 		return ErrFenced
 	}
 	return nil
@@ -159,7 +169,12 @@ func runID(info string) string {
 // RunID reads the identifier of the server process. It changes on every
 // restart, which is how a lost or reloaded projection is detected.
 func (s *Store) RunID(ctx context.Context) (string, error) {
+	// A read is safe to repeat: the second try replaces a pooled connection the
+	// restart of the server closed.
 	info, err := s.client.Info(ctx, "server").Result()
+	if err != nil {
+		info, err = s.client.Info(ctx, "server").Result()
+	}
 	if err != nil {
 		return "", ErrUnavailable
 	}
@@ -280,6 +295,9 @@ func subjectKeys(app string, user limits.Subject) (string, string) {
 
 // Read loads the app and user state of one admission.
 func (s *Store) Read(ctx context.Context, app string, user limits.Subject) (Snapshot, error) {
+	if err := s.guard(); err != nil {
+		return Snapshot{}, err
+	}
 	var out Snapshot
 	k := s.Keys()
 	a, u := subjectKeys(app, user)
@@ -374,6 +392,9 @@ func scopeTag(scope string) string {
 
 // Admit applies a plan if the app is still at the version it was read at.
 func (s *Store) Admit(ctx context.Context, a Admission) (AdmitStatus, error) {
+	if err := s.guard(); err != nil {
+		return "", err
+	}
 	k := s.Keys()
 	res := a.Plan.Reservation
 	app := res.AppName
@@ -389,7 +410,7 @@ func (s *Store) Admit(ctx context.Context, a Admission) (AdmitStatus, error) {
 		tokens = res.Rate.EstimatedTokens
 	}
 	args := []any{s.epoch(), a.Version, a.Digest, app, slot, res.RequestID, strconv.Itoa(res.AttemptIndex),
-		strconv.FormatInt(res.AdmittedAt.UnixMilli(), 10), strconv.FormatInt(tokens, 10), a.Owner, user, strconv.Itoa(len(res.Items))}
+		strconv.FormatInt(res.AdmittedAt.UnixMilli(), 10), strconv.FormatInt(tokens, 10), a.Owner, user, planPayload(res, a.Digest), strconv.Itoa(len(res.Items))}
 	for _, item := range res.Items {
 		args = append(args, scopeTag(item.Scope), BucketField(item.Dimension, item.WindowStart, item.WindowEnd), strconv.FormatInt(item.Reserved, 10))
 	}
@@ -448,6 +469,9 @@ const (
 
 // Settle projects an ending already durable in Postgres.
 func (s *Store) Settle(ctx context.Context, e Ending) (SettleStatus, error) {
+	if err := s.guard(); err != nil {
+		return "", err
+	}
 	k := s.Keys()
 	res, st := e.Reservation, e.Settlement
 	if len(st.Settled) != len(res.Items) {
@@ -521,7 +545,7 @@ func (s *Store) Rollback(ctx context.Context, owner, digest string, res storage.
 // confirmed.
 func (s *Store) Confirm(ctx context.Context, request string, attempt int) error {
 	k := s.Keys()
-	_, err := s.scripts.control.Run(ctx, s.client, []string{k.Pending()}, "confirm", request+"|"+strconv.Itoa(attempt)).Result()
+	_, err := s.scripts.control.Run(ctx, s.client, []string{k.Pending(), k.Receipt(request, attempt)}, "confirm", request+"|"+strconv.Itoa(attempt)).Result()
 	return classify(err)
 }
 
@@ -653,4 +677,71 @@ func (s *Store) SeedApp(ctx context.Context, app, timezone string, at time.Time,
 	pipe.Incr(ctx, k.Version(app))
 	_, err = pipe.Exec(ctx)
 	return classify(err)
+}
+
+// planPayload is what the orphan watch needs to undo an admission whose SQL
+// commit never happened: the reservation itself, nothing else.
+func planPayload(res storage.Reservation, digest string) string {
+	data, _ := json.Marshal(struct {
+		Reservation storage.Reservation `json:"reservation"`
+		Digest      string              `json:"digest"`
+	}{res, digest})
+	return string(data)
+}
+
+// Orphan is an admission applied in Redis whose commit was never confirmed.
+type Orphan struct {
+	Reservation storage.Reservation
+	Digest      string
+	Owner       string
+}
+
+// LoadOrphan reads the plan kept in the receipt of an unconfirmed admission.
+func (s *Store) LoadOrphan(ctx context.Context, member string) (Orphan, bool, error) {
+	request, attempt, ok := strings.Cut(member, "|")
+	index, err := strconv.Atoi(attempt)
+	if !ok || err != nil {
+		return Orphan{}, false, ErrIntegrity
+	}
+	values, err := s.client.HMGet(ctx, s.Keys().Receipt(request, index), "plan", "owner", "end").Result()
+	if err != nil {
+		return Orphan{}, false, classify(err)
+	}
+	plan, _ := values[0].(string)
+	owner, _ := values[1].(string)
+	if values[2] != nil || plan == "" {
+		_ = s.Confirm(ctx, request, index)
+		return Orphan{}, false, nil
+	}
+	var payload struct {
+		Reservation storage.Reservation `json:"reservation"`
+		Digest      string              `json:"digest"`
+	}
+	if err := json.Unmarshal([]byte(plan), &payload); err != nil {
+		return Orphan{}, false, ErrIntegrity
+	}
+	return Orphan{Reservation: payload.Reservation, Digest: payload.Digest, Owner: owner}, true, nil
+}
+
+// ReleaseOwner frees every concurrency slot a dead process held.
+func (s *Store) ReleaseOwner(ctx context.Context, owner string) error {
+	k := s.Keys()
+	entries, err := s.client.SMembers(ctx, k.Owned(owner)).Result()
+	if err != nil {
+		return classify(err)
+	}
+	for _, entry := range entries {
+		parts := strings.SplitN(entry, "|", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		hash, anonymous, ok := ParseSubjectKey(parts[1])
+		if !ok {
+			continue
+		}
+		if err := s.ReleaseSlot(ctx, owner, parts[0], limits.Subject{App: parts[0], Hash: hash, Anonymous: anonymous}, parts[2]); err != nil {
+			return err
+		}
+	}
+	return classify(s.client.Del(ctx, k.Owned(owner)).Err())
 }

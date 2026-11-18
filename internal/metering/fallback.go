@@ -161,6 +161,9 @@ func (x *session) Continue(ctx context.Context, e *proxy.Envelope, candidates []
 	case errors.Is(err, limits.ErrPaused):
 		release()
 		return proxy.Admission{}, pausedRejection(r.AppName)
+	case errors.Is(err, limits.ErrMaintenance):
+		release()
+		return proxy.Admission{}, maintenanceRejection()
 	case errors.Is(err, limits.ErrUnavailable):
 		release()
 		return reject(503, proxy.CodeLimitsUnavailable, limits.ErrUnavailable.Error())

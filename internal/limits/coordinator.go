@@ -12,6 +12,9 @@ import (
 // state durably returns it; the local one leaves pauses to runtimecontrol.
 var ErrPaused = errors.New("app is paused by an operator")
 
+// ErrMaintenance means a deletion of the user is in progress on some replica.
+var ErrMaintenance = errors.New("user is under maintenance")
+
 // Commit makes an admission durable together with the usage journal. The
 // context carries whatever transaction the coordinator opened, so the write
 // joins it.

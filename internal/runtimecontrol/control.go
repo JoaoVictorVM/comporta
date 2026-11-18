@@ -67,6 +67,15 @@ func (c *Control) Load(ctx context.Context) error {
 	return nil
 }
 
+// Reload replaces the projection with the durable state, for a replica that
+// learned another one changed it. It is serialized with Apply, so a reload
+// that read before a local change cannot overwrite it.
+func (c *Control) Reload(ctx context.Context) error {
+	c.operations.Lock()
+	defer c.operations.Unlock()
+	return c.Load(ctx)
+}
+
 // Ticket is one admitted request. It must be released exactly once, after the
 // request's completion reached usage accounting.
 type Ticket struct {

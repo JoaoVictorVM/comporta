@@ -25,9 +25,10 @@ if not valid_nonneg(at) or not valid_nonneg(tokens) or (slot ~= "0" and slot ~= 
   return {"invalid"}
 end
 
-local n = tonumber(ARGV[12])
+local plan = ARGV[12]
+local n = tonumber(ARGV[13])
 local writes = {}
-local i = 13
+local i = 14
 for _ = 1, n do
   local scope, prefix, amount = ARGV[i], ARGV[i + 1], ARGV[i + 2]
   if not valid_nonneg(amount) then return {"invalid"} end
@@ -72,6 +73,6 @@ if has_zone == "1" then
   redis.call("HSET", zone, "active", zone_active, "pending", zone_pending, "activate_at", zone_at)
 end
 redis.call("SADD", subjects, user)
-redis.call("HSET", receipt, "admit", digest, "app", app, "user", user)
+redis.call("HSET", receipt, "admit", digest, "app", app, "user", user, "owner", owner, "plan", plan)
 redis.call("ZADD", pending, at, request .. "|" .. attempt)
 return {"ok", tostring(redis.call("INCR", version))}

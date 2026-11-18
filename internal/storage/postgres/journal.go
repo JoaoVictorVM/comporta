@@ -168,6 +168,18 @@ func (s *Store) PendingOf(ctx context.Context, owner string) ([]storage.Pending,
 // is confirmed and never counted twice.
 func (s *Store) Commit(ctx context.Context, records []storage.Record) error {
 	return s.inTx(ctx, func(tx *sql.Tx) (func(), error) {
+		// A process whose lease was taken over must not materialize anything:
+		// its journal now belongs to the recovery, which may already have
+		// written these records, or deleted their user.
+		if owner := s.currentOwner(); owner.ID != "" {
+			var fenced bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM replica_leases WHERE instance_id=$1 AND fence=$2 AND state='fenced')`, owner.ID, owner.Fence).Scan(&fenced); err != nil {
+				return nil, databaseError(err)
+			}
+			if fenced {
+				return nil, storage.ErrUnavailable
+			}
+		}
 		var notifications []events.Event
 		for _, r := range records {
 			if err := storage.ValidateRecord(r); err != nil {

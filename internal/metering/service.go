@@ -280,6 +280,9 @@ func (s *Service) admit(ctx context.Context, snapshot *config.Snapshot, e *proxy
 	case errors.Is(err, limits.ErrPaused):
 		<-s.slots
 		return proxy.Admission{}, pausedRejection(e.AppName), false
+	case errors.Is(err, limits.ErrMaintenance):
+		<-s.slots
+		return proxy.Admission{}, maintenanceRejection(), false
 	case errors.Is(err, limits.ErrStale):
 		<-s.slots
 		return proxy.Admission{}, nil, true
@@ -563,6 +566,10 @@ func (s *Service) finish(ctx context.Context, r storage.Record, handle limits.At
 		}
 	}
 	return s.limits.SettleAttempt(context.Background(), handle, usage, persist)
+}
+
+func maintenanceRejection() *proxy.Rejection {
+	return &proxy.Rejection{Status: 503, Code: proxy.CodeUserMaintenance, Class: proxy.ClassInternal, Message: "this user's data is being changed by an operator; retry in a few seconds"}
 }
 
 func pausedRejection(app string) *proxy.Rejection {

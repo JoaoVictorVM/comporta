@@ -32,7 +32,7 @@ func (s *Store) AdmitReserved(ctx context.Context, r storage.Record, res storage
 			return nil, err
 		}
 		var err error
-		if seq, err = insertReservation(ctx, tx, res); err != nil {
+		if seq, err = insertReservation(ctx, tx, res, s.currentOwner().ID); err != nil {
 			return nil, err
 		}
 		event, hasEvent := storage.PolicyEvent(r)
@@ -95,7 +95,7 @@ func canonicalLimitQuote(text string) (string, error) {
 	return string(data), nil
 }
 
-func insertReservation(ctx context.Context, tx *sql.Tx, r storage.Reservation) (int64, error) {
+func insertReservation(ctx context.Context, tx *sql.Tx, r storage.Reservation, owner string) (int64, error) {
 	quote, _ := json.Marshal(r.Quote)
 	var oldQuote, state string
 	err := tx.QueryRowContext(ctx, `SELECT quote_json::text,state FROM limit_reservations WHERE request_id=$1 AND attempt_index=$2`, r.RequestID, r.AttemptIndex).Scan(&oldQuote, &state)
@@ -123,8 +123,8 @@ func insertReservation(ctx context.Context, tx *sql.Tx, r storage.Reservation) (
 	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, databaseError(err)
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO limit_reservations(request_id,attempt_index,app_name,subject,anonymous,state,admitted_at,finished_at,quote_json,settlement_json) VALUES($1,$2,$3,$4,$5,'reserved',$6,NULL,$7,NULL)`,
-		r.RequestID, r.AttemptIndex, r.AppName, r.Subject, r.Anonymous, micros(r.AdmittedAt), string(quote)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO limit_reservations(request_id,attempt_index,app_name,subject,anonymous,state,admitted_at,finished_at,quote_json,settlement_json,owner_id) VALUES($1,$2,$3,$4,$5,'reserved',$6,NULL,$7,NULL,$8)`,
+		r.RequestID, r.AttemptIndex, r.AppName, r.Subject, r.Anonymous, micros(r.AdmittedAt), string(quote), owner); err != nil {
 		return 0, databaseError(err)
 	}
 	payload := storage.LedgerPayload{AppName: r.AppName, Deltas: []storage.LimitDelta{}}
@@ -532,20 +532,59 @@ func FoldCheckpoint(ctx context.Context, tx *sql.Tx, at time.Time, zones map[str
 		return 0, err
 	}
 	now := micros(at)
+	// Deltas are summed per bucket first: a settlement's negative reservation
+	// delta is only valid against the row its admission created.
+	type key struct {
+		app, scope, subject string
+		anonymous           bool
+		dim                 string
+		start, end          int64
+	}
+	net := map[key][2]int64{}
+	var order []key
 	for _, e := range entries {
 		if e.Seq > top {
 			break
 		}
 		for _, d := range e.Deltas {
-			if _, err = tx.ExecContext(ctx, `INSERT INTO budget_state VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-ON CONFLICT(app_name,scope,subject,anonymous,dimension,window_start,window_end) DO UPDATE SET spent=budget_state.spent+excluded.spent,reserved=budget_state.reserved+excluded.reserved,updated_at=excluded.updated_at`,
-				e.AppName, d.Scope, d.Subject, d.Anonymous, d.Dimension, d.WindowStart, d.WindowEnd, d.Spent, d.Reserved, now); err != nil {
-				return 0, databaseError(err)
+			k := key{e.AppName, d.Scope, d.Subject, d.Anonymous, d.Dimension, d.WindowStart, d.WindowEnd}
+			v, seen := net[k]
+			if !seen {
+				order = append(order, k)
 			}
+			net[k] = [2]int64{v[0] + d.Spent, v[1] + d.Reserved}
+		}
+	}
+	for _, k := range order {
+		v := net[k]
+		result, err := tx.ExecContext(ctx, `UPDATE budget_state SET spent=spent+$8,reserved=reserved+$9,updated_at=$10
+WHERE app_name=$1 AND scope=$2 AND subject=$3 AND anonymous=$4 AND dimension=$5 AND window_start=$6 AND window_end=$7`,
+			k.app, k.scope, k.subject, k.anonymous, k.dim, k.start, k.end, v[0], v[1], now)
+		if err != nil {
+			return 0, databaseError(err)
+		}
+		if n, _ := result.RowsAffected(); n == 1 {
+			continue
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO budget_state VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+			k.app, k.scope, k.subject, k.anonymous, k.dim, k.start, k.end, v[0], v[1], now); err != nil {
+			return 0, databaseError(err)
 		}
 	}
 	if zones == nil {
-		zones = map[string]storage.ZoneState{}
+		if zones, err = LoadZones(ctx, tx); err != nil {
+			return 0, err
+		}
+	}
+	if unknown == nil {
+		var metadata string
+		err := tx.QueryRowContext(ctx, `SELECT metadata_json::text FROM limit_checkpoints WHERE id=1`).Scan(&metadata)
+		if err == nil {
+			var previous storage.CheckpointMetadata
+			if storage.DecodeStrict(metadata, &previous) == nil {
+				unknown = previous.Unknown
+			}
+		}
 	}
 	metadata, _ := json.Marshal(storage.CheckpointMetadata{Version: 1, Zones: zones, Unknown: unknown})
 	if _, err = tx.ExecContext(ctx, `INSERT INTO limit_checkpoints VALUES(1,$1,$2,$3,$4) ON CONFLICT(id) DO UPDATE SET covered_seq=excluded.covered_seq,created_at=excluded.created_at,civil_watermark=excluded.civil_watermark,metadata_json=excluded.metadata_json`,
@@ -605,4 +644,15 @@ func putEvent(ctx context.Context, tx *sql.Tx, e events.Event, payload string) (
 		return false, databaseError(err)
 	}
 	return true, nil
+}
+
+// Evidence is the best record of how an attempt ended, for the recovery of a
+// process that died before settling it.
+func (s *Store) Evidence(ctx context.Context, requestID string, attempt int) (*storage.Record, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, storage.ErrUnavailable
+	}
+	defer tx.Rollback()
+	return evidence(ctx, tx, requestID, attempt)
 }

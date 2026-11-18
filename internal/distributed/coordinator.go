@@ -298,7 +298,7 @@ func (c *Coordinator) admitOnce(ctx context.Context, p limits.Policy, r limits.R
 			tx.Rollback()
 		}
 	}()
-	view, err := postgres.AdmissionGate(ctx, tx, c.o.Cluster, p.App, r.RequestID, lease)
+	view, err := postgres.AdmissionGate(ctx, tx, c.o.Cluster, p.App, r.RequestID, r.Subject.Hash, lease)
 	if err != nil {
 		return nil, limits.Decision{}, limits.Selection{}, storage.ErrUnavailable
 	}
@@ -317,6 +317,8 @@ func (c *Coordinator) admitOnce(ctx context.Context, p limits.Policy, r limits.R
 		return nil, limits.Decision{}, limits.Selection{}, limits.ErrUnavailable
 	case view.GlobalPaused || view.AppPaused:
 		return nil, limits.Decision{}, limits.Selection{}, limits.ErrPaused
+	case view.Maintenance && !r.Subject.Anonymous:
+		return nil, limits.Decision{}, limits.Selection{}, limits.ErrMaintenance
 	}
 	continuation := ch != nil && r.AttemptIndex > 1
 	var plan limits.Plan

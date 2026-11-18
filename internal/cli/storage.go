@@ -6,13 +6,46 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/pricing"
 	"github.com/JoaoVictorVM/comporta/internal/storage/postgres"
+	redisstore "github.com/JoaoVictorVM/comporta/internal/storage/redis"
 )
+
+// openRedis connects to the shared Redis of a distributed configuration and
+// verifies it keeps reservations durably.
+func openRedis(ctx context.Context, candidate *config.Candidate) (*redisstore.Store, error) {
+	r := candidate.Storage().Redis
+	options := redisstore.Options{Address: r.Address, Username: r.Username, Database: int(r.Database), TLS: r.TLS.Enabled, CAFile: r.TLS.CAFile, ServerName: r.TLS.ServerName}
+	if secret, ok := candidate.StorageSecret("storage.redis.password"); ok {
+		options.Password = secret.Reveal()
+	}
+	store, err := redisstore.Open(ctx, options)
+	if err != nil {
+		return nil, errors.New("shared Redis unavailable; check storage.redis and its secret")
+	}
+	if err := store.CheckServer(ctx); err != nil {
+		store.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+// maxLoopWindow is how long lost loop history could still matter: the
+// longest similar window or cooldown of any app, and at least a minute.
+func maxLoopWindow(candidate *config.Candidate) time.Duration {
+	longest := time.Minute
+	for _, name := range candidate.AppNames() {
+		if app, ok := candidate.App(name); ok && app.LoopGuard.Enabled {
+			longest = max(longest, app.LoopGuard.SimilarWindow, app.LoopGuard.Cooldown)
+		}
+	}
+	return longest
+}
 
 var errSharedUnavailable = errors.New("shared database unavailable; check storage.postgres and its secret")
 
@@ -110,7 +143,7 @@ func newStorageCommand(out streams) *cobra.Command {
 			return nil
 		},
 	}
-	group.AddCommand(migrate, status)
+	group.AddCommand(migrate, status, newStorageRecoverCommand(out))
 	return group
 }
 

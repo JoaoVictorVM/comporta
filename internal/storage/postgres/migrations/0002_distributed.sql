@@ -26,6 +26,9 @@ ALTER TABLE metering_journal ADD COLUMN owner_id text NOT NULL DEFAULT '' CHECK 
 ALTER TABLE metering_journal ADD COLUMN owner_fence bigint NOT NULL DEFAULT 0 CHECK (owner_fence >= 0);
 CREATE INDEX ix_journal_owner ON metering_journal (owner_id, state);
 
+ALTER TABLE limit_reservations ADD COLUMN owner_id text NOT NULL DEFAULT '' CHECK (owner_id = '' OR owner_id ~ '^[0-9a-f]{32}$');
+CREATE INDEX ix_reservations_owner ON limit_reservations (owner_id, state);
+
 ALTER TABLE request_operations ADD COLUMN owner_id text NOT NULL DEFAULT '' CHECK (owner_id = '' OR owner_id ~ '^[0-9a-f]{32}$');
 ALTER TABLE request_operations ADD COLUMN owner_fence bigint NOT NULL DEFAULT 0 CHECK (owner_fence >= 0);
 ALTER TABLE request_operations ADD COLUMN cluster_epoch text NOT NULL DEFAULT '';

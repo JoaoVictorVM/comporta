@@ -10,6 +10,10 @@ import (
 // a deletion would leave something behind. Nothing was changed.
 var ErrBusy = errors.New("subject has pending usage")
 
+// ErrPending reports a change committed in the durable store whose cleanup in
+// the shared projection is still running. It is resumed; retrying finds it.
+var ErrPending = errors.New("operation pending reconciliation")
+
 // BusyError is ErrBusy with the kind of state still in transit. The reason is
 // a fixed category, safe to log: it never names the subject.
 type BusyError struct{ Reason string }

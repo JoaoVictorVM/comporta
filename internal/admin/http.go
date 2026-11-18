@@ -57,9 +57,10 @@ var (
 	errTooLarge         = &apiError{http.StatusRequestEntityTooLarge, "body_too_large", "request body exceeds 16 KiB", 0}
 	errMediaType        = &apiError{http.StatusUnsupportedMediaType, "unsupported_media_type", "content type must be application/json", 0}
 	errSessionsFull     = &apiError{http.StatusServiceUnavailable, "admin_sessions_full", "admin session capacity reached", 0}
-	errStorage          = &apiError{http.StatusServiceUnavailable, "admin_storage_unavailable", "admin storage unavailable; the operation was not applied", 0}
+	errStorage          = &apiError{http.StatusServiceUnavailable, "admin_storage_unavailable", "admin storage unavailable; the operation may or may not have been applied, check the current state before retrying", 0}
 	errAppNotFound      = &apiError{http.StatusNotFound, "app_not_found", "app not found", 0}
 	errUserBusy         = &apiError{http.StatusConflict, "user_busy", "user has requests in progress; try again", 0}
+	errPending          = &apiError{http.StatusServiceUnavailable, "operation_pending", "operation is pending reconciliation; retry later", 2}
 	errDeletionFailed   = &apiError{http.StatusServiceUnavailable, "deletion_failed", "deletion failed; no records were removed", 0}
 	errInternal         = &apiError{http.StatusInternalServerError, "internal_error", "internal error", 0}
 	errQueryNotAccepted = invalid("query parameters are not accepted")
@@ -592,6 +593,8 @@ func serviceFailure(err error) *apiError {
 		return errUserBusy
 	case errors.Is(err, ErrDeletion):
 		return errDeletionFailed
+	case errors.Is(err, ErrOperationPending):
+		return errPending
 	}
 	return errStorage
 }

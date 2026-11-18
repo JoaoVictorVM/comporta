@@ -114,7 +114,7 @@ func (s *Store) AdmitContinuation(ctx context.Context, r storage.Record, res sto
 		if _, err = s.admitJournal(ctx, tx, r); err != nil {
 			return nil, err
 		}
-		if seq, err = insertReservation(ctx, tx, res); err != nil {
+		if seq, err = insertReservation(ctx, tx, res, owner.ID); err != nil {
 			return nil, err
 		}
 		fallback := events.NewFallback(r.StartedAt, r.RequestID, r.AppName, r.AttemptIndex, r.FallbackFrom, r.ModelUsed, r.FallbackCause)

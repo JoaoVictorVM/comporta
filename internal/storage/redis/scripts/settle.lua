@@ -54,6 +54,7 @@ if rate_tokens ~= "" then
   end
 end
 redis.call("HSET", receipt, "end", transition .. ":" .. digest)
+redis.call("HDEL", receipt, "plan")
 redis.call("ZREM", pending, request .. "|" .. attempt)
 redis.call("INCR", version)
 return {"ok"}

@@ -57,8 +57,10 @@ if op == "rollback" then
 end
 
 if op == "confirm" then
-  -- KEYS: pending. ARGV: op, member.
+  -- KEYS: pending, receipt. ARGV: op, member. The plan, which names the
+  -- user, is only kept while the commit is unconfirmed.
   redis.call("ZREM", KEYS[1], ARGV[2])
+  redis.call("HDEL", KEYS[2], "plan")
   return {"ok"}
 end
 
