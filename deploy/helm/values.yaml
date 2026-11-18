@@ -1,0 +1,83 @@
+# Replicas share every budget through Redis and Postgres, which this chart does
+# not create: point it at stores you operate, with TLS.
+replicas: 2
+
+image:
+  repository: ghcr.io/joaovictorvm/comporta
+  tag: "0.8.0"
+  # Prefer a digest in production, such as sha256:...; it wins over the tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+cluster:
+  # Stable and immutable name of this cluster in the shared stores.
+  id: comporta
+  # Raise it to roll out a configuration change. Never lower it.
+  configRevision: 1
+
+storage:
+  retentionDays: 30
+  postgres:
+    maxConnections: 10
+  redis:
+    # One standalone endpoint, host:port. Sentinel and Cluster are not supported.
+    address: ""
+    username: comporta
+    database: 0
+    tls:
+      enabled: true
+      # Expected certificate name, when it differs from the address host.
+      serverName: ""
+
+# Secrets are created beforehand and only referenced here; the chart never
+# renders a secret value. Each is mounted read-only as files, without subPath,
+# so a rotation reaches the pods.
+secrets:
+  # Keys hmac.key and cursor.key, 32 bytes each. Every replica must read the
+  # same values: they make pseudonyms and usage cursors agree.
+  identity: comporta-identity
+  # Key dsn: a postgres URL with sslmode=verify-full.
+  postgres: comporta-postgres
+  # Key password, and ca.crt when the server certificate is not publicly trusted.
+  redis: comporta-redis
+  redisCA: true
+  # Keys named after the providers in config.providers, read through api_key_file.
+  providers: comporta-providers
+
+# The gateway configuration without deployment and storage, which the chart
+# renders from the values above. Provider keys use api_key_file pointing at
+# /run/secrets/providers/<name>.
+config:
+  timezone: UTC
+  providers: {}
+  apps: {}
+
+listeners:
+  # Extra Host names accepted by the listeners, besides the Service names.
+  allowedHosts: []
+
+service:
+  proxyPort: 8080
+  adminPort: 8081
+
+networkPolicy:
+  enabled: true
+  # Pods allowed to call the proxy, as NetworkPolicy peers.
+  proxyFrom: []
+  # Pods allowed to call the admin listener. Empty means only port-forward.
+  adminFrom: []
+  # Egress to the stores, the providers and telemetry, as NetworkPolicy peers
+  # with their ports. NetworkPolicy matches IPs, not names: a provider whose
+  # addresses change needs these CIDRs maintained, or an egress gateway.
+  egress: []
+
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {memory: 512Mi}
+
+podDisruptionBudget:
+  maxUnavailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

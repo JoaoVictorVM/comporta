@@ -82,6 +82,9 @@ type ServiceOptions struct {
 	Now    func() time.Time
 	// PrepareTimeout bounds the wait for the user's requests in flight.
 	PrepareTimeout time.Duration
+	// FreshPause reloads the pause state before answering a read, for replicas
+	// that share it.
+	FreshPause bool
 	// CursorKey signs usage cursors. Replicas share it, so a cursor issued by one
 	// is accepted by another; without it each process draws its own.
 	CursorKey []byte
@@ -102,7 +105,8 @@ type Service struct {
 	now      func() time.Time
 	prepare  time.Duration
 	// cursorKey signs usage cursors; it lives only in this process.
-	cursorKey []byte
+	cursorKey  []byte
+	freshPause bool
 }
 
 // NewService returns the operational services.
@@ -112,6 +116,7 @@ func NewService(options ServiceOptions) *Service {
 		metering: options.Metering, limits: options.Limits, loop: options.Loop, cache: options.Cache, usage: options.Usage, logger: options.Logger, now: options.Now, prepare: options.PrepareTimeout,
 		cursorKey: newCursorKey(),
 	}
+	s.freshPause = options.FreshPause
 	if len(options.CursorKey) == 32 {
 		s.cursorKey = append([]byte(nil), options.CursorKey...)
 	}
@@ -148,6 +153,13 @@ func (o PauseOutcome) Effective() bool { return o.GlobalPaused || o.AppPaused }
 // PauseState returns the persisted overrides; the caller combines them with the
 // configured apps.
 func (s *Service) PauseState() storage.PauseState {
+	// Replicas share the overrides: the answer comes from the durable state,
+	// not from a projection another replica may have changed since.
+	if s.freshPause {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = s.control.Reload(ctx)
+		cancel()
+	}
 	return s.control.State()
 }
 

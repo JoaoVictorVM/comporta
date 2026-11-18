@@ -1,0 +1,27 @@
+{{- if lt (int .Values.replicas) 2 }}
+{{- fail "replicas must be at least 2: a single replica does not need shared stores, use the SQLite deployment instead" }}
+{{- end }}
+{{- if not .Values.storage.redis.address }}
+{{- fail "storage.redis.address is required" }}
+{{- end }}
+{{- $name := include "comporta.name" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels: {{- include "comporta.labels" . | nindent 4 }}
+data:
+  comporta.yaml: |
+    {{- $config := deepCopy .Values.config }}
+    {{- $hosts := list (printf "%s-proxy" $name) (printf "%s-admin" $name) (printf "%s-proxy.%s.svc" $name .Release.Namespace) (printf "%s-admin.%s.svc" $name .Release.Namespace) }}
+    {{- $hosts = concat $hosts .Values.listeners.allowedHosts }}
+    {{- $_ := set $config "data_dir" "/tmp/comporta" }}
+    {{- $_ := set $config "listeners" (dict "proxy" (dict "bind" "0.0.0.0" "port" .Values.service.proxyPort) "admin" (dict "bind" "0.0.0.0" "port" .Values.service.adminPort) "allowed_hosts" $hosts) }}
+    {{- $_ := set $config "deployment" (dict "mode" "distributed" "replicas" .Values.replicas "cluster_id" .Values.cluster.id "config_revision" .Values.cluster.configRevision "hmac_key_file" "/run/secrets/identity/hmac.key" "cursor_key_file" "/run/secrets/identity/cursor.key") }}
+    {{- $tls := dict "enabled" .Values.storage.redis.tls.enabled }}
+    {{- if and .Values.storage.redis.tls.enabled .Values.secrets.redisCA }}{{- $_ := set $tls "ca_file" "/run/secrets/redis/ca.crt" }}{{- end }}
+    {{- if .Values.storage.redis.tls.serverName }}{{- $_ := set $tls "server_name" .Values.storage.redis.tls.serverName }}{{- end }}
+    {{- $redis := dict "address" .Values.storage.redis.address "database" .Values.storage.redis.database "password_file" "/run/secrets/redis/password" "tls" $tls }}
+    {{- if .Values.storage.redis.username }}{{- $_ := set $redis "username" .Values.storage.redis.username }}{{- end }}
+    {{- $_ := set $config "storage" (dict "backend" "postgres" "retention_days" .Values.storage.retentionDays "postgres" (dict "dsn_file" "/run/secrets/postgres/dsn" "max_connections" .Values.storage.postgres.maxConnections) "redis" $redis) }}
+    {{- toYaml $config | nindent 4 }}

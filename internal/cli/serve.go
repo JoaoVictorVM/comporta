@@ -53,6 +53,9 @@ func newServeCommand(out streams) *cobra.Command {
 				return errReported
 			}
 			snapshot := manager.Capture()
+			if snapshot.Deployment().Distributed() {
+				return serveDistributed(command.Context(), out, logger, manager, catalog, configEvents)
+			}
 			keyManager, err := keys.NewManager(keys.ManagerOptions{Dir: snapshot.DataDir(), Logger: logger})
 			if err != nil {
 				logger.Error(err.Error())
@@ -158,17 +161,46 @@ func newServeCommand(out streams) *cobra.Command {
 }
 
 func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service, accounting *metering.Service, gate proxy.Gate, loop *proxy.LoopStage, sensitive *proxy.SensitiveStage, cache *responsecache.Cache, observer *telemetry.Service, adminAPI, metrics http.Handler, extra ...server.Worker) error {
-	guard := auth.NewGuard(nil, logger)
-	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), guard)
-	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Identity: identity, Logger: logger, Accounting: accounting, Gate: gate, Loop: loop, Sensitive: sensitive, Source: manager, Cache: cache, Telemetry: observer})
+	return runGatewayWith(ctx, logger, manager, gatewayParts{
+		keys: keyManager, keysRun: keyManager.Run, guard: auth.NewGuard(nil, logger), identity: identity, accounting: accounting, gate: gate,
+		loop: loop, sensitive: sensitive, cache: cache, observer: observer, adminAPI: adminAPI, metrics: metrics, extra: extra,
+	})
+}
+
+// gatewayParts are the components a gateway runs with, whatever the
+// deployment mode provides them from.
+type gatewayParts struct {
+	keys        auth.KeySource
+	keysRun     server.Worker
+	guard       auth.Limiter
+	identity    *useridentity.Service
+	accounting  *metering.Service
+	gate        proxy.Gate
+	loop        *proxy.LoopStage
+	sensitive   *proxy.SensitiveStage
+	cache       *responsecache.Cache
+	observer    *telemetry.Service
+	adminAPI    http.Handler
+	metrics     http.Handler
+	ready       func() bool
+	onDrain     func()
+	drainNotice time.Duration
+	extra       []server.Worker
+}
+
+func runGatewayWith(ctx context.Context, logger *slog.Logger, manager *config.Manager, p gatewayParts) error {
+	authHTTP := auth.NewHTTP(p.keys, auth.NewAuthenticator(p.keys, nil), p.guard)
+	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Identity: p.identity, Logger: logger, Accounting: p.accounting, Gate: p.gate, Loop: p.loop, Sensitive: p.sensitive, Source: manager, Cache: p.cache, Telemetry: p.observer})
 	defer handler.Close()
-	defer cache.Close()
+	defer p.cache.Close()
 	gateway, err := server.Open(ctx, server.Options{
-		Source:  manager,
-		Proxy:   server.ProxySurface(manager, handler),
-		Admin:   server.AdminSurfaceWithMetrics(manager, adminAPI, metrics),
-		Workers: append([]server.Worker{manager.Run, keyManager.Run, accounting.Run}, extra...),
-		Logger:  logger,
+		Source:      manager,
+		Proxy:       server.ProxySurface(manager, handler),
+		Admin:       server.AdminSurfaceReady(manager, p.adminAPI, p.metrics, p.ready),
+		Workers:     append([]server.Worker{manager.Run, p.keysRun, p.accounting.Run}, p.extra...),
+		Logger:      logger,
+		OnDrain:     p.onDrain,
+		DrainNotice: p.drainNotice,
 	})
 	if err != nil {
 		logger.Error(err.Error())

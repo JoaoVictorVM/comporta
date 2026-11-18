@@ -115,6 +115,10 @@ func New(options Options) *Service {
 	return s
 }
 
+// Register adds a collector to the scrape, for state this package does not
+// own, such as the health of shared stores.
+func (s *Service) Register(c prometheus.Collector) error { return s.registry.Register(c) }
+
 // buildVersion is the module version stamped by the Go toolchain, or "dev"
 // for a local build.
 func buildVersion() string {

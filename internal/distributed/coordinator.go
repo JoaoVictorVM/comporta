@@ -88,6 +88,10 @@ func New(o Options) *Coordinator {
 	return c
 }
 
+// UseLeases sets the lease source, which exists only once the lifecycle
+// started. Until then nothing is admitted.
+func (c *Coordinator) UseLeases(l LeaseSource) { c.o.Leases = l }
+
 // UseEpoch switches the coordinator and the Redis client to an epoch.
 func (c *Coordinator) UseEpoch(epoch, mode string) {
 	c.epoch.Store(&epoch)
@@ -284,6 +288,9 @@ func (c *Coordinator) gate(ctx context.Context, app string, exclusiveApp bool) (
 func (c *Coordinator) admitOnce(ctx context.Context, p limits.Policy, r limits.Request, candidates []limits.Candidate, commit limits.Commit, ch *chain) (*attempt, limits.Decision, limits.Selection, error) {
 	ctx, cancel := context.WithTimeout(ctx, AdmissionDeadline)
 	defer cancel()
+	if c.o.Leases == nil {
+		return nil, limits.Decision{}, limits.Selection{}, limits.ErrUnavailable
+	}
 	lease, ok := c.o.Leases.Lease()
 	if !ok {
 		return nil, limits.Decision{}, limits.Selection{}, limits.ErrUnavailable

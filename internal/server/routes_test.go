@@ -196,3 +196,31 @@ func TestMetricsHostAndPathValidation(t *testing.T) {
 		t.Fatalf("service name host: %s", reply)
 	}
 }
+
+func TestReadinessOnlyOnAdminListener(t *testing.T) {
+	manager, _ := newManager(t, portsConfig(t, ""))
+	var ready atomic.Bool
+	rt, _ := startRuntime(t, Options{Source: manager, Proxy: ProxySurface(manager, &routeRecorder{}), Admin: AdminSurfaceReady(manager, okHandler(), nil, ready.Load)})
+	if status := statusOf(rawRequest(t, rt.ProxyAddr(), call("GET", "/readyz"))); status != "404" {
+		t.Fatalf("proxy readiness: %s", status)
+	}
+	reply := rawRequest(t, rt.AdminAddr(), call("GET", "/readyz"))
+	if statusOf(reply) != "503" || !strings.Contains(reply, `{"status":"not_ready"}`) {
+		t.Fatalf("not ready: %s", reply)
+	}
+	ready.Store(true)
+	reply = rawRequest(t, rt.AdminAddr(), call("GET", "/readyz"))
+	if statusOf(reply) != "200" || !strings.Contains(reply, `{"status":"ready"}`) {
+		t.Fatalf("ready: %s", reply)
+	}
+	for _, target := range []string{"/readyz?verbose=1", "/readyz/"} {
+		if status := statusOf(rawRequest(t, rt.AdminAddr(), call("GET", target))); status != "404" {
+			t.Errorf("%s: %s", target, status)
+		}
+	}
+	other, _ := newManager(t, portsConfig(t, ""))
+	single, _ := startRuntime(t, Options{Source: other, Proxy: okHandler(), Admin: AdminSurface(other)})
+	if status := statusOf(rawRequest(t, single.AdminAddr(), call("GET", "/readyz"))); status != "404" {
+		t.Fatal("a single instance keeps no readiness route")
+	}
+}

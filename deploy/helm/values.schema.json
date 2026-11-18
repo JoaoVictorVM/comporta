@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Comporta chart values",
+  "type": "object",
+  "required": ["replicas", "image", "cluster", "storage", "secrets", "config"],
+  "properties": {
+    "replicas": {"type": "integer", "minimum": 2, "description": "At least 2: one replica belongs on the SQLite deployment."},
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "digest": {"type": "string", "pattern": "^(sha256:[0-9a-f]{64})?$"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "cluster": {
+      "type": "object",
+      "required": ["id", "configRevision"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9-]{1,40}$"},
+        "configRevision": {"type": "integer", "minimum": 1}
+      }
+    },
+    "storage": {
+      "type": "object",
+      "properties": {
+        "retentionDays": {"type": "integer", "minimum": 1, "maximum": 365},
+        "postgres": {"type": "object", "properties": {"maxConnections": {"type": "integer", "minimum": 2, "maximum": 100}}},
+        "redis": {
+          "type": "object",
+          "required": ["address"],
+          "properties": {
+            "address": {"type": "string", "pattern": "^[^@/,;?# ]+:[0-9]{1,5}$"},
+            "username": {"type": "string"},
+            "database": {"type": "integer", "minimum": 0, "maximum": 15},
+            "tls": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "serverName": {"type": "string"}}}
+          }
+        }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "required": ["identity", "postgres", "redis", "providers"],
+      "properties": {
+        "identity": {"type": "string", "minLength": 1},
+        "postgres": {"type": "string", "minLength": 1},
+        "redis": {"type": "string", "minLength": 1},
+        "redisCA": {"type": "boolean"},
+        "providers": {"type": "string", "minLength": 1}
+      }
+    },
+    "config": {
+      "type": "object",
+      "not": {"anyOf": [{"required": ["deployment"]}, {"required": ["storage"]}, {"required": ["listeners"]}, {"required": ["data_dir"]}]},
+      "description": "Gateway configuration. deployment, storage, listeners and data_dir are rendered by the chart."
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "proxyFrom": {"type": "array"},
+        "adminFrom": {"type": "array"},
+        "egress": {"type": "array"}
+      }
+    },
+    "podDisruptionBudget": {"type": "object", "properties": {"maxUnavailable": {"type": "integer", "minimum": 1, "maximum": 1}}}
+  }
+}

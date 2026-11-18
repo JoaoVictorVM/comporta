@@ -37,6 +37,12 @@ type Options struct {
 	Logger  *slog.Logger
 	// DrainTimeout bounds how long operations in flight may finish on shutdown.
 	DrainTimeout time.Duration
+	// OnDrain runs when shutdown begins, before the listeners stop: a replica
+	// reports itself not ready first, so the balancer stops sending traffic.
+	OnDrain func()
+	// DrainNotice is how long the listeners keep serving after OnDrain, for the
+	// balancer to notice. Zero for a single instance.
+	DrainNotice time.Duration
 }
 
 // Runtime is a pair of listeners already bound and ready to serve.
@@ -130,6 +136,12 @@ func (rt *Runtime) Run(ctx context.Context) error {
 		outcome = ErrComponentStopped
 	}
 
+	if rt.options.OnDrain != nil {
+		rt.options.OnDrain()
+		if rt.options.DrainNotice > 0 && outcome == nil {
+			time.Sleep(rt.options.DrainNotice)
+		}
+	}
 	rt.drain(proxyServer, adminServer, cancelOperations, &inFlight)
 	serving.Wait()
 	cancelWorkers()
