@@ -69,6 +69,21 @@ tasks:
     cmds:
       - docker run --rm --entrypoint promtool -w /rules -v "{{.ROOT_DIR}}/examples/observability:/rules:ro" prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06 test rules alerts_test.yml
 
+  test-distributed:
+    desc: Run the shared stores, the coordinator, recovery and two serve processes against real Postgres and Redis containers. Needs Docker
+    cmds:
+      - go test -tags distributed -count=1 -timeout 40m ./internal/storage/... ./internal/distributed ./tests/distributed
+
+  chart:
+    desc: Lint and render the Helm chart, validate the rendered configuration and check that invalid values are refused. Needs helm
+    cmds:
+      - bash scripts/check-chart.sh
+
+  test-kubernetes:
+    desc: Install the chart on a throwaway kind cluster with two replicas. Needs Docker, kind, kubectl and helm
+    cmds:
+      - go test -tags kubernetes -count=1 -timeout 40m ./tests/kubernetes
+
   vuln:
     desc: Scan dependencies for known vulnerabilities
     cmds:

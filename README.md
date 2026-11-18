@@ -570,6 +570,22 @@ pricing:
   fake-claude: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}
 ```
 
+## Multiple replicas
+
+Before this release limits lived in the memory of one process, so two replicas would each grant the full budget and a 10 USD daily budget would become 20. A replica count above 1 with SQLite still aborts at start with `SQLite storage does not support multiple replicas; configure redis and postgres`.
+
+With `deployment.mode: distributed`, replicas share budgets, rate limits, concurrency, pauses, user deletions, loop guard counts, app keys and the admin credential through Postgres (durable journal, ledger and history) and a standalone Redis (the projection admissions decide on). The response cache stays local to each replica. Nothing is sent upstream before an admission is durable in Postgres, so the overshoot guarantee of a single instance holds across replicas under `fail_closed`. Redis unavailable refuses with 503 under `fail_closed`; under `fail_open` the cluster runs degraded and may exceed budgets until Redis is back and the spend is reconciled. Postgres unavailable refuses new requests at once, while completions already admitted wait in memory.
+
+```sh
+comporta storage migrate --config comporta.yaml
+comporta admin reset-token --config comporta.yaml
+comporta keys create my-app --config comporta.yaml
+comporta serve --config comporta.yaml   # on every replica
+helm install comporta ./deploy/helm -f examples/kubernetes/values.yaml
+```
+
+[`examples/distributed.yaml`](examples/distributed.yaml) is a complete configuration and [`deploy/helm`](deploy/helm) the official chart: two or more replicas, non-root, read-only root filesystem, no capabilities, secrets mounted as files, network policies and readiness on `/readyz`. There is no automatic migration of an existing SQLite installation: a distributed cluster starts with empty budgets. See [docs/multi-instance.md](docs/multi-instance.md) for requirements, failures, recovery, rollouts and cutover.
+
 ## Container
 
 The image is distroless and runs as a non-root user. `compose.yaml` sets a read-only root filesystem, drops all capabilities, allows writes only to the `/data` volume and publishes both ports on `127.0.0.1` only. Inside the container the service binds `0.0.0.0`, as [`examples/comporta-container.yaml`](examples/comporta-container.yaml) shows.
@@ -586,6 +602,6 @@ App keys, `hmac.key` and SQLite DB/WAL/SHM live in the volume and survive recrea
 
 ## Development
 
-The repository uses [Task](https://taskfile.dev). `task --list` shows the available tasks, and `task check` runs formatting, static checks, tests, example validation and the vulnerability and secret scanners. The race detector needs a C toolchain: `task test-race`. `task test-privacy` runs the privacy test, `task test-sdk` runs the official Python SDKs at the versions pinned in `tests/sdk/requirements.txt`, and `task test-container` builds the image and verifies its restrictions; none of them needs provider credentials. A test that adds a prompt builds it with `internal/testkit`, or the marked `prompt` helper in the SDK suite, and new destinations for data go in `tests/privacy/coverage.json` in the same change.
+The repository uses [Task](https://taskfile.dev). `task --list` shows the available tasks, and `task check` runs formatting, static checks, tests, example validation and the vulnerability and secret scanners. The race detector needs a C toolchain: `task test-race`. `task test-privacy` runs the privacy test, `task test-sdk` runs the official Python SDKs at the versions pinned in `tests/sdk/requirements.txt`, and `task test-container` builds the image and verifies its restrictions, `task test-distributed` runs the shared stores and two `serve` processes against real Postgres and Redis containers, `task chart` checks the Helm chart and `task test-kubernetes` installs it on a throwaway kind cluster; none of them needs provider credentials. A test that adds a prompt builds it with `internal/testkit`, or the marked `prompt` helper in the SDK suite, and new destinations for data go in `tests/privacy/coverage.json` in the same change.
 
 `go test ./tests/integration -run '^$' -bench '^BenchmarkHTTPMetering$' -benchtime 500x` compares real HTTP and streaming latency with and without durable accounting and reports p95/TTFB. Sync latency depends on the deployment filesystem, so use low-latency local storage and measure there. This diagnostic does not certify the sustained 200 requests/second, five-minute load target.

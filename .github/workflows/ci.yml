@@ -101,6 +101,58 @@ jobs:
       - name: Verify the image, compose restrictions, key persistence, privacy and the observability profile
         run: go test -tags container -timeout 40m ./tests/integration -run 'Compose|Container|Observability'
 
+  distributed:
+    name: Distributed (Postgres and Redis)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Choose the privacy marker of this run
+        shell: bash
+        run: echo "COMPORTA_PRIVACY_MARKER=cmpcanary$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')" >> "$GITHUB_ENV"
+      - name: Vet the distributed tests
+        run: go vet -tags distributed ./...
+      # Real containers, never mocks: a missing Docker fails the job.
+      - name: Stores, coordinator, recovery and two serve processes
+        env:
+          COMPORTA_OVERSHOOT_CALLS: "500"
+          COMPORTA_OVERSHOOT_REPEAT: "10"
+        run: go test -tags distributed -count=1 -timeout 40m ./internal/storage/... ./internal/distributed ./tests/distributed
+      - name: Race detector on the coordinator
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race -tags distributed -count=1 -timeout 30m ./internal/distributed
+
+  kubernetes:
+    name: Helm chart on kind
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Choose the privacy marker of this run
+        shell: bash
+        run: echo "COMPORTA_PRIVACY_MARKER=cmpcanary$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')" >> "$GITHUB_ENV"
+      # Built from their modules at a fixed version, verified by the Go
+      # checksum database.
+      - name: Install kind and helm
+        run: |
+          go install sigs.k8s.io/kind@v0.33.0
+          go install helm.sh/helm/v3/cmd/helm@v3.22.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Lint and render the chart, valid and invalid values
+        shell: bash
+        run: scripts/check-chart.sh
+      - name: Install on kind with two replicas, hardened context and network policy
+        run: go test -tags kubernetes -count=1 -timeout 40m ./tests/kubernetes
+
   scan:
     name: Scanners
     runs-on: ubuntu-latest

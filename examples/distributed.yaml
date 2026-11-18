@@ -1,0 +1,52 @@
+# Two or more replicas sharing budgets, pauses and loop guard state through
+# Redis and Postgres. Every replica runs this same file: same revision, same
+# secrets. No secret value is written here.
+timezone: America/Sao_Paulo
+
+providers:
+  anthropic:
+    api_format: anthropic
+    base_url: https://api.anthropic.com
+    api_key_file: /run/secrets/providers/anthropic
+    models: [claude-sonnet-4-5, claude-haiku-4-5]
+
+apps:
+  support-bot:
+    allowed_models: [claude-sonnet-4-5, claude-haiku-4-5]
+    require_user: true
+    on_limit: downgrade
+    downgrade_to: claude-haiku-4-5
+    budget: {usd_per_day: 20.00}
+    hard_cap: {usd_per_day: 25.00}
+    per_user:
+      budget: {usd_per_day: 1.00}
+
+listeners:
+  proxy: {bind: 0.0.0.0, port: 8080}
+  admin: {bind: 0.0.0.0, port: 8081}
+  allowed_hosts: [comporta-proxy, comporta-admin]
+
+deployment:
+  mode: distributed
+  replicas: 2
+  cluster_id: gateway-prod
+  # Raise it to roll out a change; replicas on an older revision stop taking
+  # traffic until they get the new file.
+  config_revision: 1
+  hmac_key_file: /run/secrets/identity/hmac.key
+  cursor_key_file: /run/secrets/identity/cursor.key
+
+storage:
+  backend: postgres
+  retention_days: 30
+  postgres:
+    # postgres://user:password@host:5432/db?sslmode=verify-full
+    dsn_file: /run/secrets/postgres/dsn
+    max_connections: 10
+  redis:
+    address: redis.internal:6379
+    username: comporta
+    password_file: /run/secrets/redis/password
+    tls:
+      enabled: true
+      ca_file: /run/secrets/redis/ca.crt
