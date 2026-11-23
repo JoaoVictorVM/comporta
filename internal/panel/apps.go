@@ -65,7 +65,7 @@ func (s *Service) App(ctx context.Context, name string) (AppDetail, error) {
 		return AppDetail{}, ErrNotFound
 	}
 	pause := s.pause.PauseState()
-	out := AppDetail{App: name, Paused: appPaused(pause, name), GlobalPaused: pause.Global, Policy: policyName(app.OnLimit), DowngradeTo: app.DowngradeTo,
+	out := AppDetail{At: s.now().UTC(), App: name, Paused: appPaused(pause, name), GlobalPaused: pause.Global, Policy: policyName(app.OnLimit), DowngradeTo: app.DowngradeTo,
 		FailMode: string(app.FailMode), Timezone: appTimezone(snapshot, app)}
 	state, availability := s.limitState(snapshot, name, nil)
 	out.Limits = availability

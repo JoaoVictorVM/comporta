@@ -1,0 +1,44 @@
+@import "tailwindcss" source(none);
+@source "../*.templ";
+
+/* The panel uses the system font stack: nothing is fetched and nothing extra
+   is embedded in the binary. */
+@theme {
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --color-ink: #111827;
+  --color-muted: #4b5563;
+  --color-line: #d1d5db;
+  --color-surface: #ffffff;
+  --color-canvas: #f3f4f6;
+  --color-brand: #1d4ed8;
+  --color-ok: #166534;
+  --color-ok-bg: #dcfce7;
+  --color-warn: #92400e;
+  --color-warn-bg: #fef3c7;
+  --color-bad: #991b1b;
+  --color-bad-bg: #fee2e2;
+  --color-unknown: #374151;
+  --color-unknown-bg: #e5e7eb;
+}
+
+@layer base {
+  html {
+    color: var(--color-ink);
+    background: var(--color-canvas);
+  }
+  :focus-visible {
+    outline: 3px solid var(--color-brand);
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

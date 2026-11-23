@@ -1,0 +1,38 @@
+package ui
+
+import "github.com/JoaoVictorVM/comporta/internal/panel"
+
+templ configurationPage(c panel.Configuration) {
+	<p class="mb-4 text-sm text-muted">Read only. Change comporta.yaml and the gateway reloads it; this screen never edits it.</p>
+	<section id="configuration-live" data-live-scope="configuration" hx-get="/panel/fragment/configuration" hx-trigger="live-refresh" aria-live="polite">
+		@configurationBody(c)
+	</section>
+}
+
+templ configurationBody(c panel.Configuration) {
+	if !c.Available {
+		@unavailable("The configuration")
+	} else {
+		if c.Rejected {
+			<div role="alert" class="mb-4 rounded border border-bad bg-bad-bg p-4 text-bad">
+				<p class="font-semibold">The last reload was rejected. Generation { count(c.Generation) } is still active.</p>
+				<ul class="mt-2 list-disc pl-5 text-sm">
+					for _, d := range c.Diagnostics {
+						<li><span class="font-mono">{ d.Code }</span> at <span class="font-mono">{ orDash(d.Path) }</span>: { d.Message }</li>
+					}
+				</ul>
+			</div>
+		}
+		<dl class="mb-4 grid grid-cols-1 gap-3 rounded border border-line bg-surface p-4 text-sm sm:grid-cols-4">
+			<div><dt class="text-muted">Active generation</dt><dd>{ count(c.Generation) }</dd></div>
+			<div><dt class="text-muted">Last result</dt><dd>{ orDash(c.Result) }</dd></div>
+			<div><dt class="text-muted">Last attempt</dt><dd><time datetime={ iso(c.LastAttemptAt) }>{ stamp(c.LastAttemptAt) }</time></dd></div>
+			<div><dt class="text-muted">Last success</dt><dd><time datetime={ iso(c.LastSuccessAt) }>{ stamp(c.LastSuccessAt) }</time></dd></div>
+		</dl>
+		<h2 class="mb-2 text-lg font-semibold">Effective configuration</h2>
+		<p class="mb-2 text-sm text-muted">Secrets are shown as [REDACTED].</p>
+		<div role="region" aria-label="Effective configuration" tabindex="0" class="overflow-x-auto rounded border border-line bg-surface">
+			<pre class="p-4 font-mono text-xs">{ c.YAML }</pre>
+		</div>
+	}
+}

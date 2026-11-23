@@ -1,0 +1,60 @@
+package ui
+
+import "github.com/JoaoVictorVM/comporta/internal/panel"
+
+templ providersPage(p panel.Providers) {
+	<p class="mb-4 text-sm text-muted">Health is observed from the traffic of the last hour, not from an active check. A provider without traffic is unknown.</p>
+	<section id="providers-live" data-live-scope="providers" hx-get="/panel/fragment/providers" hx-trigger="live-refresh" aria-live="polite">
+		@providersBody(p)
+	</section>
+}
+
+templ providersBody(p panel.Providers) {
+	if p.Stats == panel.Unavailable {
+		@unavailable("Provider statistics")
+	}
+	if len(p.Cards) == 0 {
+		@empty("No providers configured.")
+	} else {
+		<div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+			for i, c := range p.Cards {
+				<article class="rounded border border-line bg-surface p-4">
+					<div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+						<h2 class="text-lg font-semibold">{ c.Name }</h2>
+						<span>
+							@badge(c.Health.Label(), healthClass(c.Health))
+							if c.Removed {
+								<span class="ml-1 text-xs text-muted">removed from the configuration</span>
+							}
+						</span>
+					</div>
+					<dl class="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3">
+						<div><dt class="text-muted">Attempts</dt><dd>{ count(c.Attempts) }</dd></div>
+						<div><dt class="text-muted">Failures</dt><dd>{ count(c.Failures) }</dd></div>
+						<div><dt class="text-muted">Error rate</dt><dd>{ c.ErrorRate }</dd></div>
+						<div><dt class="text-muted">p50 latency ms</dt><dd>{ c.P50MS }</dd></div>
+						<div><dt class="text-muted">p95 latency ms</dt><dd>{ c.P95MS }</dd></div>
+						<div><dt class="text-muted">Prompt cache read ratio</dt><dd>{ c.CacheReadRatio }</dd></div>
+					</dl>
+					<div class="mt-3" data-chart-table={ "series-" + number(i) } aria-hidden="true"></div>
+					<details class="mt-2 text-sm">
+						<summary class="cursor-pointer text-brand">Five-minute series as a table</summary>
+						<table id={ "series-" + number(i) } class="mt-2 w-full text-left">
+							<caption class="sr-only">Attempts and failures of { c.Name } per five minutes</caption>
+							<thead><tr><th scope="col">Start</th><th scope="col">Attempts</th><th scope="col">Failures</th></tr></thead>
+							<tbody>
+								for _, b := range c.Buckets {
+									if b.Present {
+										<tr data-x={ count(b.Start.Unix()) } data-present="true"><th scope="row" class="font-normal">{ stamp(b.Start) }</th><td>{ count(b.Attempts) }</td><td>{ count(b.Failures) }</td></tr>
+									} else {
+										<tr data-x={ count(b.Start.Unix()) } data-present="false"><th scope="row" class="font-normal">{ stamp(b.Start) }</th><td>-</td><td>-</td></tr>
+									}
+								}
+							</tbody>
+						</table>
+					</details>
+				</article>
+			}
+		</div>
+	}
+}

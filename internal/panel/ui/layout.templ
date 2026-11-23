@@ -1,0 +1,79 @@
+package ui
+
+import "github.com/JoaoVictorVM/comporta/internal/panel"
+
+templ head(title string) {
+	<meta charset="utf-8"/>
+	<meta name="viewport" content="width=device-width, initial-scale=1"/>
+	<meta name="referrer" content="no-referrer"/>
+	<meta name="htmx-config" content={ htmxConfig }/>
+	<title>{ title } · Comporta</title>
+	<link rel="stylesheet" href={ panel.AssetURL("app.css") }/>
+	<link rel="stylesheet" href={ panel.AssetURL("uPlot.min.css") }/>
+	<script src={ panel.AssetURL("htmx.min.js") } defer></script>
+	<script src={ panel.AssetURL("htmx-ext-sse.min.js") } defer></script>
+	<script src={ panel.AssetURL("uPlot.iife.min.js") } defer></script>
+	<script src={ panel.AssetURL("app.js") } defer></script>
+}
+
+// layout is the shell of every authenticated page: skip link, navigation,
+// the global pause banner and the live connection, then the screen.
+templ layout(f panel.Frame, title string, body templ.Component) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			@head(title)
+		</head>
+		<body class="min-h-screen bg-canvas font-sans text-ink">
+			<a href="#main" class="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-50 focus:rounded focus:bg-surface focus:px-3 focus:py-2">Skip to content</a>
+			<header class="border-b border-line bg-surface">
+				<div class="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3">
+					<p class="text-lg font-semibold">Comporta <span class="text-sm font-normal text-muted">admin panel</span></p>
+					<div class="flex items-center gap-3 text-sm">
+						if f.LiveURL != "" {
+							<span class="rounded bg-unknown-bg px-2 py-1 text-unknown"><span class="sr-only">Live updates: </span><span id="live-status">Connecting</span></span>
+						}
+						<form method="post" action="/logout">
+							<button type="submit" class="rounded border border-line px-3 py-1 hover:bg-canvas">Log out</button>
+						</form>
+					</div>
+				</div>
+				<nav aria-label="Screens" class="mx-auto max-w-7xl overflow-x-auto px-4">
+					<ul class="flex gap-1 text-sm">
+						for _, s := range panel.Screens {
+							<li>
+								if s == f.Screen {
+									<a href={ templ.SafeURL(s.Path()) } aria-current="page" class="block border-b-2 border-brand px-3 py-2 font-semibold text-brand">{ s.Title() }</a>
+								} else {
+									<a href={ templ.SafeURL(s.Path()) } class="block border-b-2 border-transparent px-3 py-2 text-muted hover:text-ink">{ s.Title() }</a>
+								}
+							</li>
+						}
+					</ul>
+				</nav>
+			</header>
+			if f.GlobalPaused {
+				<div role="alert" class="bg-bad px-4 py-3 text-center font-semibold text-white">Paused: every app is paused by an operator. Requests are refused until it is resumed.</div>
+			}
+			if f.LiveURL != "" {
+				<div hx-ext="sse" sse-connect={ f.LiveURL } sse-close="session-expired">
+					<div hidden hx-trigger="sse:refresh"></div>
+				</div>
+			}
+			<main id="main" tabindex="-1" class="mx-auto max-w-7xl px-4 py-6">
+				<h1 class="mb-4 text-2xl font-bold">{ title }</h1>
+				@body
+			</main>
+			<footer class="mx-auto max-w-7xl px-4 pb-6 text-xs text-muted">
+				Rendered at <time datetime={ iso(f.At) }>{ stamp(f.At) }</time>. Costs are estimates; new data can take up to two seconds to appear.
+			</footer>
+		</body>
+	</html>
+}
+
+templ errorBody(e panel.ErrorPage) {
+	<div role="alert" class="rounded border border-line bg-surface p-4">
+		<p class="font-semibold">{ e.Title }</p>
+		<p class="text-muted">{ e.Message }</p>
+	</div>
+}

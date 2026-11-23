@@ -1,0 +1,97 @@
+package ui
+
+import "github.com/JoaoVictorVM/comporta/internal/panel"
+
+// usersPage posts the typed identifier in the body only. The result region
+// never repeats it: the field keeps what was typed until the answer arrives.
+templ usersPage(f panel.Frame, result *panel.UserSearch) {
+	<form method="post" action="/panel/users/search" hx-post="/panel/users/search" hx-target="#user-result" class="mb-4 grid grid-cols-1 gap-3 rounded border border-line bg-surface p-4 sm:grid-cols-3" autocomplete="off">
+		<div class="sm:col-span-2">
+			<label for="user" class="mb-1 block font-medium">End user ID</label>
+			<input id="user" name="user" type="search" required maxlength="256" autocomplete="off" spellcheck="false" aria-describedby="user-help" class="w-full rounded border border-line px-3 py-2 font-mono"/>
+			<p id="user-help" class="mt-1 text-sm text-muted">The ID your app sends. It is hashed per app here and never shown, stored or put in a URL.</p>
+		</div>
+		<div>
+			<label for="user-app" class="mb-1 block font-medium">App</label>
+			<select id="user-app" name="app" class="w-full rounded border border-line px-3 py-2">
+				@appOptions(f.Apps, "")
+			</select>
+		</div>
+		<div class="sm:col-span-3">
+			<button type="submit" class="rounded bg-brand px-4 py-2 font-semibold text-white hover:opacity-90">Search</button>
+		</div>
+	</form>
+	<form method="post" action="/panel/users/search" hx-post="/panel/users/search" hx-target="#user-result" class="mb-6 flex flex-wrap items-end gap-3 rounded border border-line bg-surface p-4">
+		<div>
+			<label for="anonymous-app" class="mb-1 block font-medium">Anonymous bucket of app</label>
+			<select id="anonymous-app" name="anonymous_app" required class="rounded border border-line px-3 py-2">
+				for _, a := range f.Apps {
+					<option value={ a }>{ a }</option>
+				}
+			</select>
+		</div>
+		<button type="submit" class="rounded border border-line px-4 py-2 hover:bg-canvas">Show anonymous bucket</button>
+	</form>
+	<section id="user-result" aria-live="polite">
+		if result != nil {
+			@userResult(*result)
+		}
+	</section>
+}
+
+templ userResult(r panel.UserSearch) {
+	switch {
+		case r.Invalid:
+			<p role="alert" class="rounded bg-bad-bg p-3 text-bad">Invalid user ID. Use the ID your app sends; emails and documents are not accepted.</p>
+		case r.Spend == panel.Unavailable && len(r.Groups) == 0:
+			@unavailable("User history")
+		case len(r.Groups) == 0:
+			@empty("No app has history for this user.")
+		default:
+			if r.Spend == panel.Unavailable {
+				@unavailable("User history")
+			}
+			for _, g := range r.Groups {
+				<article class="mb-4 rounded border border-line bg-surface p-4">
+					<h2 class="mb-2 text-lg font-semibold">
+						{ g.App }
+						if g.Removed {
+							<span class="ml-2 text-xs font-normal text-muted">removed from the configuration</span>
+						}
+					</h2>
+					<dl class="mb-3 grid grid-cols-1 gap-2 text-sm sm:grid-cols-3">
+						<div><dt class="text-muted">Pseudonym</dt><dd class="font-mono">{ g.Hash }</dd></div>
+						<div><dt class="text-muted">Anonymous bucket</dt><dd>{ yesNo(g.Anonymous) }</dd></div>
+						<div><dt class="text-muted">Estimated cost today</dt><dd>{ usd(g.Today) }</dd></div>
+					</dl>
+					if !g.Removed {
+						<h3 class="mb-2 font-semibold">Per-user limits</h3>
+						if g.Limits != panel.Available {
+							@notVerifiable()
+						}
+						if len(g.LimitRows) > 0 {
+							@limitTable("Per-user limits in "+g.App, g.LimitRows, r.At)
+						} else if g.Limits == panel.Available {
+							@empty("This app has no per-user limits.")
+						}
+					}
+					<h3 class="mb-2 mt-4 font-semibold">History this month</h3>
+					if len(g.History) == 0 {
+						@empty("No usage this month.")
+					} else {
+						@scrollRegion("History in "+g.App) {
+							<table class="w-full text-left text-sm">
+								<caption class="sr-only">Daily usage in { g.App }</caption>
+								<thead class="bg-canvas"><tr><th scope="col" class="px-3 py-2">Day</th><th scope="col" class="px-3 py-2">Requests</th><th scope="col" class="px-3 py-2">Tokens</th><th scope="col" class="px-3 py-2">Estimated cost</th></tr></thead>
+								<tbody>
+									for _, d := range g.History {
+										<tr class="border-t border-line"><th scope="row" class="px-3 py-2 font-normal">{ d.Day }</th><td class="px-3 py-2">{ count(d.Requests) }</td><td class="px-3 py-2">{ count(d.Tokens) }</td><td class="px-3 py-2">{ usd(d.Cost) }</td></tr>
+									}
+								</tbody>
+							</table>
+						}
+					}
+				</article>
+			}
+	}
+}

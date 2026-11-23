@@ -191,6 +191,7 @@ type AppSummary struct {
 
 // AppDetail is the screen of one app.
 type AppDetail struct {
+	At              time.Time
 	App             string
 	Paused          bool
 	GlobalPaused    bool
@@ -246,6 +247,7 @@ type UserCost struct {
 // UserSearch is the result of a user search, grouped by app. It never holds
 // the identifier that was typed.
 type UserSearch struct {
+	At      time.Time
 	Invalid bool
 	Spend   Availability
 	Groups  []UserGroup

@@ -258,6 +258,20 @@ func (s *Store) SessionValid(ctx context.Context, digest [32]byte) (bool, error)
 	return valid, nil
 }
 
+// SessionExpiry returns the absolute end of a live session of the current
+// credential epoch.
+func (s *Store) SessionExpiry(ctx context.Context, digest [32]byte) (time.Time, bool, error) {
+	var expires int64
+	err := s.db.QueryRowContext(ctx, `SELECT se.expires_at FROM admin_sessions se JOIN admin_credentials c ON c.id=1 AND c.epoch=se.credential_epoch WHERE se.digest=$1 AND se.expires_at>$2`, digest[:], nowMicros()).Scan(&expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, storage.ErrUnavailable
+	}
+	return time.UnixMicro(expires).UTC(), true, nil
+}
+
 // DeleteSession removes one session.
 func (s *Store) DeleteSession(ctx context.Context, digest [32]byte) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM admin_sessions WHERE digest=$1`, digest[:]); err != nil {

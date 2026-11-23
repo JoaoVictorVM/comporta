@@ -1,0 +1,91 @@
+package ui
+
+import "github.com/JoaoVictorVM/comporta/internal/panel"
+
+templ overviewPage(o panel.Overview) {
+	<section id="overview-live" data-live-scope="overview" hx-get="/panel/fragment/overview" hx-trigger="live-refresh" aria-live="polite">
+		@overviewBody(o)
+	</section>
+}
+
+templ overviewBody(o panel.Overview) {
+	if o.GlobalPaused {
+		<p class="mb-4 rounded bg-bad px-4 py-3 font-semibold text-white" role="status">Global pause is active. Every app refuses requests.</p>
+	} else if names := pausedSpend(o.Apps); len(names) > 0 {
+		@pausedBanner(names)
+	}
+	if o.Spend == panel.Unavailable {
+		@unavailable("Spend")
+	} else {
+		<div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+			@card("Estimated cost today", usd(o.TodayCost))
+			@card("Estimated cost this month", usd(o.MonthCost))
+			@card("Requests today", count(o.TodayRequests))
+			@card("Tokens today", count(o.TodayTokens))
+		</div>
+		if o.Incomplete > 0 {
+			<p class="mt-3 rounded bg-warn-bg p-3 text-sm text-warn">{ count(o.Incomplete) } requests today have missing or recovered usage; their cost is the conservative reservation, not a measured value.</p>
+		}
+	}
+	<h2 class="mb-2 mt-6 text-lg font-semibold">Spend per app against budget</h2>
+	if len(o.Apps) == 0 {
+		@empty("No apps configured. Add an app to comporta.yaml.")
+	} else {
+		<ul class="grid grid-cols-1 gap-3 md:grid-cols-2">
+			for _, a := range o.Apps {
+				<li class="rounded border border-line bg-surface p-4">
+					<div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+						<a href={ appURL(a.App) } class="font-semibold text-brand underline">{ a.App }</a>
+						if a.Paused {
+							@pausedBadge()
+						}
+					</div>
+					<p class="mb-2 text-sm text-muted">Day { a.Day } in { a.Timezone }</p>
+					<dl class="mb-3 grid grid-cols-2 gap-2 text-sm">
+						<div><dt class="text-muted">Today</dt><dd>{ usd(a.Today) }</dd></div>
+						<div><dt class="text-muted">This month</dt><dd>{ usd(a.Month) }</dd></div>
+					</dl>
+					if a.DayBudget > 0 {
+						@bar("Daily budget "+usd(a.DayBudget), a.DayPressure)
+					} else {
+						<p class="text-sm text-muted">No daily budget.</p>
+					}
+					if a.MonthBudget > 0 {
+						<div class="mt-2">
+							@bar("Monthly budget "+usd(a.MonthBudget), a.MonthPressure)
+						</div>
+					}
+				</li>
+			}
+		</ul>
+	}
+	<h2 class="mb-2 mt-6 text-lg font-semibold">Estimated potential savings this month</h2>
+	<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+		<div class="rounded border border-line bg-surface p-4">
+			<p class="text-sm text-muted">From the response cache</p>
+			<p class="mt-1 text-xl font-semibold">{ usd(o.CacheSaved) }</p>
+			<p class="mt-1 text-xs text-muted" title="The conservative reservation each cache hit released. An estimate, not a measured avoided cost.">The conservative reservation each cache hit released.</p>
+		</div>
+		<div class="rounded border border-line bg-surface p-4">
+			<p class="text-sm text-muted">From downgrades</p>
+			<p class="mt-1 text-xl font-semibold">{ usd(o.DowngradeSaved) }</p>
+			<p class="mt-1 text-xs text-muted" title="The reservation of the requested model minus the one of the model sent. An estimate, not a measured avoided cost.">Reservation of the requested model minus the model sent.</p>
+		</div>
+	</div>
+	<p class="mt-2 text-xs text-muted">Savings are available from this version on; earlier history counts as zero.</p>
+	<h2 class="mb-2 mt-6 text-lg font-semibold">Last alerts</h2>
+	switch {
+		case !o.Alerts.Enabled:
+			@empty("Alerts are not enabled yet.")
+		case o.Alerts.Failed:
+			@unavailable("Alerts")
+		case len(o.Alerts.Items) == 0:
+			@empty("No alerts sent.")
+		default:
+			<ul class="divide-y divide-line rounded border border-line bg-surface">
+				for _, a := range o.Alerts.Items {
+					<li class="p-3 text-sm"><time datetime={ iso(a.At) }>{ stamp(a.At) }</time> · { a.Severity } · { a.Title } <span class="text-muted">{ a.App }</span></li>
+				}
+			</ul>
+	}
+}

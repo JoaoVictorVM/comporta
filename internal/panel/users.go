@@ -75,7 +75,7 @@ func (s *Service) SearchUser(ctx context.Context, q UserQuery) UserSearch {
 		_, ok := snapshot.App(app)
 		subjects = append(subjects, subject{app: app, hash: hash.Hex(), anonymous: q.Anonymous, removed: !ok})
 	}
-	out := UserSearch{}
+	out := UserSearch{At: s.now().UTC()}
 	if len(subjects) == 0 {
 		return out
 	}
