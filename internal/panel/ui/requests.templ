@@ -1,0 +1,199 @@
+package ui
+
+import (
+	"github.com/JoaoVictorVM/comporta/internal/panel"
+	"github.com/JoaoVictorVM/comporta/internal/storage"
+)
+
+// requestsPage keeps the filters in a form the live refresh re-sends, so new
+// data never drops them. A user filter is posted, never put in a URL.
+templ requestsPage(f panel.Frame, l panel.RequestList) {
+	<form id="request-filters" method="post" action="/panel/requests/filter" hx-post="/panel/requests/filter" hx-target="#requests-live" class="mb-4 grid grid-cols-1 gap-3 rounded border border-line bg-surface p-4 sm:grid-cols-2 lg:grid-cols-5" autocomplete="off">
+		<div>
+			<label for="filter-app" class="mb-1 block text-sm font-medium">App</label>
+			<select id="filter-app" name="app" class="w-full rounded border border-line px-3 py-2">
+				@appOptions(f.Apps, l.Filters.App)
+			</select>
+		</div>
+		<div>
+			<label for="filter-user" class="mb-1 block text-sm font-medium">User ID</label>
+			<input id="filter-user" name="user" type="search" maxlength="256" autocomplete="off" spellcheck="false" aria-describedby="filter-user-help" class="w-full rounded border border-line px-3 py-2 font-mono"/>
+			<p id="filter-user-help" class="mt-1 text-xs text-muted">Needs an app.</p>
+		</div>
+		<div>
+			<label for="filter-model" class="mb-1 block text-sm font-medium">Model</label>
+			<input id="filter-model" name="model" type="search" maxlength="256" value={ l.Filters.Model } class="w-full rounded border border-line px-3 py-2"/>
+		</div>
+		<div>
+			<label for="filter-outcome" class="mb-1 block text-sm font-medium">Outcome</label>
+			<select id="filter-outcome" name="outcome" class="w-full rounded border border-line px-3 py-2">
+				<option value="">All outcomes</option>
+				for _, o := range storage.PanelOutcomes {
+					<option value={ o } selected?={ o == l.Filters.Outcome }>{ o }</option>
+				}
+			</select>
+		</div>
+		<div class="flex items-end">
+			<button type="submit" class="w-full rounded bg-brand px-4 py-2 font-semibold text-white hover:opacity-90">Filter</button>
+		</div>
+	</form>
+	<p id="requests-notice" hidden class="mb-2 rounded bg-warn-bg p-2 text-sm text-warn">
+		New data available. <button type="button" data-live-apply="requests-live" class="font-semibold underline">Show it</button>
+	</p>
+	<section id="requests-live" data-live-scope="requests" data-live-hold="true" data-live-notice="requests-notice" hx-post="/panel/requests/filter" hx-include="#request-filters" hx-trigger="live-refresh" aria-live="polite">
+		@requestsBody(l)
+	</section>
+}
+
+templ requestsBody(l panel.RequestList) {
+	if l.Invalid {
+		<p role="alert" class="rounded bg-bad-bg p-3 text-bad">Invalid filter. A user ID needs an app, and outcomes come from the list.</p>
+	} else if len(l.Rows) == 0 {
+		@empty("No requests yet. Point an app to http://localhost:8080 or run comporta demo.")
+	} else {
+		<p class="mb-2 text-sm text-muted">Newest first. Showing { number(l.Shown) } of the latest 500 requests.</p>
+		@scrollRegion("Recent requests") {
+			<table class="w-full text-left text-sm">
+				<caption class="sr-only">Recent requests, newest first</caption>
+				<thead class="bg-canvas">
+					<tr>
+						<th scope="col" class="px-3 py-2">Time</th>
+						<th scope="col" class="px-3 py-2">App</th>
+						<th scope="col" class="px-3 py-2">User</th>
+						<th scope="col" class="px-3 py-2">Provider</th>
+						<th scope="col" class="px-3 py-2">Model</th>
+						<th scope="col" class="px-3 py-2">Status</th>
+						<th scope="col" class="px-3 py-2">Outcome</th>
+						<th scope="col" class="px-3 py-2">Cost</th>
+						<th scope="col" class="px-3 py-2">Tokens in/out</th>
+						<th scope="col" class="px-3 py-2">Latency ms</th>
+						<th scope="col" class="px-3 py-2">TTFB ms</th>
+						<th scope="col" class="px-3 py-2">Flags</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, r := range l.Rows {
+						<tr class="border-t border-line">
+							<td class="whitespace-nowrap px-3 py-2"><a href={ requestURL(r) } class="text-brand underline"><time datetime={ iso(r.StartedAt) }>{ stamp(r.StartedAt) }</time></a></td>
+							<td class="px-3 py-2">{ r.App }</td>
+							<td class="px-3 py-2 font-mono">{ orDash(r.User) }</td>
+							<td class="px-3 py-2">{ orDash(r.Provider) }</td>
+							<td class="px-3 py-2">
+								{ orDash(r.ModelUsed) }
+								if r.ModelRequested != r.ModelUsed && r.ModelRequested != "" {
+									<span class="block text-xs text-muted">requested { r.ModelRequested }</span>
+								}
+							</td>
+							<td class="px-3 py-2">{ orDash(r.Status) }</td>
+							<td class="px-3 py-2">
+								@badge(r.Outcome, outcomeClass(r.Outcome))
+								if r.Policy != "" {
+									<span class="block text-xs text-muted">policy { r.Policy }</span>
+								}
+							</td>
+							<td class="px-3 py-2">
+								{ usd(r.Cost) }
+								if !r.CostKnown {
+									<span class="block text-xs text-warn">estimate</span>
+								}
+							</td>
+							<td class="px-3 py-2">{ r.InputTokens } / { r.OutputTokens }</td>
+							<td class="px-3 py-2">{ r.LatencyMS }</td>
+							<td class="px-3 py-2">{ r.TTFBMS }</td>
+							<td class="px-3 py-2 text-xs">
+								for _, flag := range r.Flags {
+									<span class="mr-1 inline-block rounded bg-unknown-bg px-1">{ flag }</span>
+								}
+							</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+		<nav aria-label="Pages" class="mt-3 flex flex-wrap gap-3">
+			if l.Shown > len(l.Rows) {
+				<a href="/requests" class="rounded border border-line bg-surface px-3 py-1">Newest</a>
+			}
+			if l.Next != "" {
+				if l.Filters == (panel.RequestFilters{}) {
+					<a href={ cursorURL(panel.ScreenRequests, l.Next) } class="rounded border border-line bg-surface px-3 py-1">Older</a>
+				} else {
+					<form method="post" action="/panel/requests/filter" hx-post="/panel/requests/filter" hx-target="#requests-live">
+						<input type="hidden" name="app" value={ l.Filters.App }/>
+						if l.Filters.UserHash != "" {
+							<input type="hidden" name="user_hash" value={ l.Filters.UserHash }/>
+						}
+						<input type="hidden" name="model" value={ l.Filters.Model }/>
+						<input type="hidden" name="outcome" value={ l.Filters.Outcome }/>
+						<input type="hidden" name="cursor" value={ l.Next }/>
+						<button type="submit" class="rounded border border-line bg-surface px-3 py-1">Older</button>
+					</form>
+				}
+			}
+			if l.Capped {
+				<p class="text-sm text-muted">The panel shows the latest 500 requests. Use comporta usage for older history.</p>
+			}
+		</nav>
+	}
+}
+
+templ requestPage(d panel.RequestDetail) {
+	<p class="mb-4"><a href="/requests" class="text-brand underline">Back to requests</a></p>
+	<p class="mb-4 text-sm text-muted">Metadata only. Prompts, responses, headers and raw provider errors are never stored.</p>
+	<dl class="grid grid-cols-1 gap-3 rounded border border-line bg-surface p-4 text-sm sm:grid-cols-2 lg:grid-cols-3">
+		<div><dt class="text-muted">Request</dt><dd class="break-all font-mono">{ d.RequestID }</dd></div>
+		<div><dt class="text-muted">Attempt</dt><dd>{ number(d.Attempt) }</dd></div>
+		<div><dt class="text-muted">Terminal attempt</dt><dd>{ yesNo(d.Terminal) }</dd></div>
+		<div><dt class="text-muted">Started</dt><dd><time datetime={ iso(d.StartedAt) }>{ stamp(d.StartedAt) }</time></dd></div>
+		<div><dt class="text-muted">Finished</dt><dd><time datetime={ iso(d.FinishedAt) }>{ stamp(d.FinishedAt) }</time></dd></div>
+		<div><dt class="text-muted">Operation</dt><dd>{ d.Operation }</dd></div>
+		<div><dt class="text-muted">App</dt><dd>{ d.App }</dd></div>
+		<div><dt class="text-muted">User</dt><dd class="font-mono">{ orDash(d.User) }</dd></div>
+		<div><dt class="text-muted">Provider</dt><dd>{ orDash(d.Provider) }</dd></div>
+		<div><dt class="text-muted">Model requested</dt><dd>{ orDash(d.ModelRequested) }</dd></div>
+		<div><dt class="text-muted">Model used</dt><dd>{ orDash(d.ModelUsed) }</dd></div>
+		<div><dt class="text-muted">Status</dt><dd>{ orDash(d.Status) }</dd></div>
+		<div><dt class="text-muted">Outcome</dt><dd>@badge(d.Outcome, outcomeClass(d.Outcome))</dd></div>
+		<div><dt class="text-muted">Error class</dt><dd>{ orDash(d.ErrorClass) }</dd></div>
+		<div><dt class="text-muted">Error code</dt><dd>{ orDash(d.ErrorCode) }</dd></div>
+		if d.TerminalCode != "" || d.TerminalStatus != "" {
+			<div><dt class="text-muted">Answered to the client</dt><dd>{ orDash(d.TerminalStatus) } { d.TerminalCode }</dd></div>
+		}
+		<div><dt class="text-muted">Estimated cost</dt><dd>{ usd(d.Cost) }</dd></div>
+		<div><dt class="text-muted">Reserved cost</dt><dd>{ usd(d.ReservedCost) }</dd></div>
+		<div><dt class="text-muted">Tokens in / out</dt><dd>{ d.InputTokens } / { d.OutputTokens }</dd></div>
+		<div><dt class="text-muted">Cache read / write tokens</dt><dd>{ d.CacheRead } / { d.CacheWrite }</dd></div>
+		<div><dt class="text-muted">Estimate method</dt><dd>{ orDash(d.EstimateMethod) }</dd></div>
+		<div><dt class="text-muted">Estimated input / output</dt><dd>{ count(d.EstimatedInput) } / { count(d.EstimatedOutput) }</dd></div>
+		<div><dt class="text-muted">Latency ms / TTFB ms</dt><dd>{ d.LatencyMS } / { d.TTFBMS }</dd></div>
+		<div><dt class="text-muted">Usage missing</dt><dd>{ yesNo(d.UsageMissing) }</dd></div>
+		<div><dt class="text-muted">Recovered after a restart</dt><dd>{ yesNo(d.Recovered) }</dd></div>
+		<div><dt class="text-muted">Estimate exceeded</dt><dd>{ yesNo(d.EstimateExceeded) }</dd></div>
+		<div><dt class="text-muted">Admitted with limits degraded</dt><dd>{ yesNo(d.LimitsDegraded) }</dd></div>
+		if d.Policy != "" {
+			<div><dt class="text-muted">Policy</dt><dd>{ d.Policy }</dd></div>
+			<div><dt class="text-muted">Policy limit</dt><dd class="break-all font-mono text-xs">{ d.PolicyLimit }</dd></div>
+			<div><dt class="text-muted">Policy scope and reason</dt><dd>{ d.PolicyScope }, { d.PolicyReason }</dd></div>
+		}
+		if d.FallbackFrom != "" {
+			<div><dt class="text-muted">Fallback from</dt><dd>{ d.FallbackFrom }</dd></div>
+			<div><dt class="text-muted">Fallback cause</dt><dd>{ d.FallbackCause }</dd></div>
+		}
+		if d.CacheSaved > 0 {
+			<div><dt class="text-muted">Estimated potential saving from cache</dt><dd>{ usd(d.CacheSaved) }</dd></div>
+		}
+		if d.DowngradeSaved > 0 {
+			<div><dt class="text-muted">Estimated potential saving from downgrade</dt><dd>{ usd(d.DowngradeSaved) }</dd></div>
+		}
+	</dl>
+	<h2 class="mb-2 mt-6 text-lg font-semibold">Sensitive data</h2>
+	if len(d.Detections) == 0 {
+		@empty("Nothing detected.")
+	} else {
+		<ul class="rounded border border-line bg-surface p-4 text-sm">
+			for _, det := range d.Detections {
+				<li>{ det.Category }: { count(det.Count) } ({ det.Action })</li>
+			}
+		</ul>
+	}
+}

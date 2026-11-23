@@ -300,7 +300,7 @@ func TestFallbackMigrationLegacyJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if v, err := checkSchema(ctx, s.db); err != nil || v != 4 {
+	if v, err := checkSchema(ctx, s.db); err != nil || v != latest() {
 		t.Fatalf("version %d %v", v, err)
 	}
 	if err = s.Recover(ctx, time.Now()); err != nil {

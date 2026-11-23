@@ -1,0 +1,40 @@
+package ui
+
+import "github.com/JoaoVictorVM/comporta/internal/panel"
+
+// loginPage never puts the token back in the page: a failure shows a fixed
+// message and an empty field.
+templ loginPage(p panel.LoginPage) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			@head("Log in")
+		</head>
+		<body class="min-h-screen bg-canvas font-sans text-ink">
+			<main id="main" class="mx-auto mt-16 max-w-md px-4">
+				<h1 class="mb-6 text-2xl font-bold">Comporta admin panel</h1>
+				<form method="post" action="/login" class="space-y-4 rounded border border-line bg-surface p-6" autocomplete="off">
+					if p.Failed {
+						<p id="login-error" role="alert" class="rounded bg-bad-bg p-3 text-bad">Invalid admin token.</p>
+					}
+					if p.RateLimited {
+						<p id="login-error" role="alert" class="rounded bg-bad-bg p-3 text-bad">Too many failed attempts. Try again later.</p>
+					}
+					if p.Unavailable {
+						<p id="login-error" role="alert" class="rounded bg-bad-bg p-3 text-bad">Sessions are unavailable right now. Try again later.</p>
+					}
+					<div>
+						<label for="token" class="mb-1 block font-medium">Admin token</label>
+						if p.Failed || p.RateLimited || p.Unavailable {
+							<input id="token" name="token" type="password" required autocomplete="off" spellcheck="false" aria-invalid="true" aria-describedby="login-error token-help" class="w-full rounded border border-line px-3 py-2 font-mono"/>
+						} else {
+							<input id="token" name="token" type="password" required autocomplete="off" spellcheck="false" aria-describedby="token-help" class="w-full rounded border border-line px-3 py-2 font-mono"/>
+						}
+						<p id="token-help" class="mt-1 text-sm text-muted">The token printed once by comporta serve or comporta admin reset-token. It is sent only in this form and never appears in a URL.</p>
+					</div>
+					<button type="submit" class="w-full rounded bg-brand px-4 py-2 font-semibold text-white hover:opacity-90">Log in</button>
+				</form>
+			</main>
+		</body>
+	</html>
+}

@@ -71,6 +71,20 @@ const ReadinessPath = "/readyz"
 // AdminSurfaceReady adds the readiness route. A nil ready function keeps the
 // route absent, which is the behavior of a single instance.
 func AdminSurfaceReady(source SnapshotSource, api, metrics http.Handler, ready func() bool) http.Handler {
+	return AdminSurfacePanel(source, api, metrics, ready, nil)
+}
+
+// PanelSurface is the admin panel. Owns names its exact routes, so a target
+// it does not own keeps the fixed not-found answer of the admin listener.
+type PanelSurface interface {
+	http.Handler
+	Owns(target string) bool
+}
+
+// AdminSurfacePanel adds the admin panel after the API, metrics, readiness and
+// health routes. It exists only on the admin listener; a nil panel keeps it
+// absent.
+func AdminSurfacePanel(source SnapshotSource, api, metrics http.Handler, ready func() bool, panel PanelSurface) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := admit(w, r, source); !ok {
 			return
@@ -94,16 +108,20 @@ func AdminSurfaceReady(source SnapshotSource, api, metrics http.Handler, ready f
 			_, _ = w.Write([]byte(`{"status":"ready"}`))
 			return
 		}
-		if r.Method != http.MethodGet || r.RequestURI != "/healthz" {
-			proxy.WriteFailure(w, auth.FormatOpenAI, proxy.Failure{
-				Status: http.StatusNotFound, Code: proxy.CodeEndpointNotAllowed,
-				Class: proxy.ClassInvalidRequest, Message: "endpoint not allowed by Comporta",
-			})
+		if r.Method == http.MethodGet && r.RequestURI == "/healthz" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
+		if panel != nil && panel.Owns(r.RequestURI) {
+			panel.ServeHTTP(w, r)
+			return
+		}
+		proxy.WriteFailure(w, auth.FormatOpenAI, proxy.Failure{
+			Status: http.StatusNotFound, Code: proxy.CodeEndpointNotAllowed,
+			Class: proxy.ClassInvalidRequest, Message: "endpoint not allowed by Comporta",
+		})
 	})
 }
 

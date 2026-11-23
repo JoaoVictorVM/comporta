@@ -189,3 +189,104 @@ func TestRetentionKeepsOpenObligations(t *testing.T) {
 		t.Fatalf("checkpoint must keep the open reservation charged: %d %v", reserved, err)
 	}
 }
+
+// panelStore is the read side of the panel both backends must answer alike.
+type panelStore interface {
+	storage.PanelStore
+	storage.AdmissionStore
+	storage.CompletionStore
+}
+
+func exercisePanel(t *testing.T, s panelStore) []any {
+	t.Helper()
+	ctx := context.Background()
+	var records []storage.Record
+	for n := 1; n <= 12; n++ {
+		r := fixture(n)
+		r.Provider, r.ModelUsed, r.ModelRequested = "anthropic", "claude-a", "claude-a"
+		if n%4 == 0 {
+			r.ErrorClass = "timeout"
+		}
+		if n == 6 {
+			r.Outcome, r.PolicyOutcome, r.PolicyLimitName, r.PolicyScope, r.PolicyReason = "downgraded", "downgraded", "apps.bot.budget.usd_per_day", "app", "spent"
+			r.ModelUsed, r.DowngradeSaved = "claude-b", 40
+		}
+		if err := s.Admit(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+		done := completed(r)
+		done.LatencyUS = int64(n) * 1000
+		if n == 9 {
+			done.Outcome, done.Cost, done.CacheSaved = "cached", 0, done.ReservedCost
+		}
+		records = append(records, done)
+	}
+	if err := s.Commit(ctx, records); err != nil {
+		t.Fatal(err)
+	}
+	from, until := time.Date(2026, 11, 18, 11, 30, 0, 0, time.UTC), time.Date(2026, 11, 18, 12, 30, 0, 0, time.UTC)
+	requests, err := s.PanelRequests(ctx, storage.PanelRequestFilter{App: "bot", Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := s.PanelRequests(ctx, storage.PanelRequestFilter{App: "bot", Limit: 5, Before: requests.Next})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached, err := s.PanelRequests(ctx, storage.PanelRequestFilter{Outcome: "cached", Model: "claude-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mix, err := s.PanelModelMix(ctx, "bot", from, until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	top, err := s.PanelTopUsers(ctx, "bot", "2026-11-01", "2026-11-30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, buckets, err := s.PanelProviders(ctx, from, until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, found, err := s.PanelRequest(ctx, records[5].RequestID, 1)
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	daily, err := s.QueryDaily(ctx, storage.UsageSelector{Scope: "app", From: "2026-11-01", Through: "2026-11-30"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []any{requests, next, cached, mix, top, stats, buckets, detail, daily}
+}
+
+func TestPanelStoreContract(t *testing.T) {
+	pg, _ := openTest(t)
+	lite, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "private"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lite.Close()
+	a, _ := json.Marshal(exercisePanel(t, pg))
+	b, _ := json.Marshal(exercisePanel(t, lite))
+	if string(a) != string(b) {
+		t.Fatalf("panel reads differ:\npostgres %s\nsqlite   %s", a, b)
+	}
+	w1, err := pg.PanelWatermark(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := fixture(50)
+	r.StartedAt = time.Now().UTC()
+	r.Day = r.StartedAt.Format(time.DateOnly)
+	if err := pg.Admit(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.Commit(context.Background(), []storage.Record{completed(r)}); err != nil {
+		t.Fatal(err)
+	}
+	w2, err := pg.PanelWatermark(context.Background())
+	if err != nil || w1 == w2 {
+		t.Fatalf("watermark did not move: %+v %+v %v", w1, w2, err)
+	}
+}

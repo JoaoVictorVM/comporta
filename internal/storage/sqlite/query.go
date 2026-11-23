@@ -98,7 +98,7 @@ func (s *Store) QueryDaily(ctx context.Context, selector storage.UsageSelector) 
 	if selector.Scope == "user" && len(selector.Subjects) == 0 {
 		return nil, nil
 	}
-	query := `SELECT day,timezone,app_name,scope,subject,anonymous,requests,attempts,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,usage_missing_count,recovered_count,cost_microusd FROM usage_daily WHERE scope=? AND day>=? AND day<=?`
+	query := `SELECT day,timezone,app_name,scope,subject,anonymous,requests,attempts,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,usage_missing_count,recovered_count,cost_microusd,cache_saved_microusd,downgrade_saved_microusd FROM usage_daily WHERE scope=? AND day>=? AND day<=?`
 	args := []any{selector.Scope, selector.From, selector.Through}
 	if len(selector.Subjects) > 0 {
 		var clauses []string
@@ -129,7 +129,7 @@ func (s *Store) QueryDaily(ctx context.Context, selector storage.UsageSelector) 
 	var out []storage.Daily
 	for rows.Next() {
 		var d storage.Daily
-		if err = rows.Scan(&d.Day, &d.Timezone, &d.AppName, &d.Scope, &d.Subject, &d.Anonymous, &d.Requests, &d.Attempts, &d.Input, &d.Output, &d.CacheWrite, &d.CacheRead, &d.UsageMissing, &d.Recovered, &d.Cost); err != nil {
+		if err = rows.Scan(&d.Day, &d.Timezone, &d.AppName, &d.Scope, &d.Subject, &d.Anonymous, &d.Requests, &d.Attempts, &d.Input, &d.Output, &d.CacheWrite, &d.CacheRead, &d.UsageMissing, &d.Recovered, &d.Cost, &d.CacheSaved, &d.DowngradeSaved); err != nil {
 			return nil, storage.ErrUnavailable
 		}
 		out = append(out, d)

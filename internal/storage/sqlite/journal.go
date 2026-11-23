@@ -270,6 +270,17 @@ func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, sessions bo
 			return err
 		}
 	}
+	cacheSaved, downgradeSaved := storage.TerminalSavings(r)
+	savings, err := hasSavings(ctx, tx)
+	if err != nil {
+		return err
+	}
+	dailyColumns, dailyValues, dailyUpdate := dailyInsertColumns, `?,?,?,?,?,?,?,?,?,?,?,?,?,?,?`, ``
+	if savings {
+		dailyColumns += `,cache_saved_microusd,downgrade_saved_microusd`
+		dailyValues += `,?,?`
+		dailyUpdate = `,cache_saved_microusd=cache_saved_microusd+excluded.cache_saved_microusd,downgrade_saved_microusd=downgrade_saved_microusd+excluded.downgrade_saved_microusd`
+	}
 	for _, scope := range []string{"app", "user"} {
 		subject := ""
 		anonymous := false
@@ -277,7 +288,11 @@ func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, sessions bo
 			subject = r.UserHash
 			anonymous = r.Anonymous
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO usage_daily VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(day,timezone,app_name,scope,subject,anonymous) DO UPDATE SET requests=requests+excluded.requests,attempts=attempts+excluded.attempts,input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens,cache_write_tokens=cache_write_tokens+excluded.cache_write_tokens,cache_read_tokens=cache_read_tokens+excluded.cache_read_tokens,usage_missing_count=usage_missing_count+excluded.usage_missing_count,recovered_count=recovered_count+excluded.recovered_count,cost_microusd=cost_microusd+excluded.cost_microusd`, r.Day, r.Timezone, r.AppName, scope, subject, anonymous, r.RequestCount, 1, value(r.Input), value(r.Output), value(r.CacheWrite), value(r.CacheRead), r.UsageMissing, r.Recovered, r.Cost)
+		args := []any{r.Day, r.Timezone, r.AppName, scope, subject, anonymous, r.RequestCount, 1, value(r.Input), value(r.Output), value(r.CacheWrite), value(r.CacheRead), r.UsageMissing, r.Recovered, r.Cost}
+		if savings {
+			args = append(args, cacheSaved, downgradeSaved)
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO usage_daily(`+dailyColumns+`) VALUES(`+dailyValues+`) ON CONFLICT(day,timezone,app_name,scope,subject,anonymous) DO UPDATE SET requests=requests+excluded.requests,attempts=attempts+excluded.attempts,input_tokens=input_tokens+excluded.input_tokens,output_tokens=output_tokens+excluded.output_tokens,cache_write_tokens=cache_write_tokens+excluded.cache_write_tokens,cache_read_tokens=cache_read_tokens+excluded.cache_read_tokens,usage_missing_count=usage_missing_count+excluded.usage_missing_count,recovered_count=recovered_count+excluded.recovered_count,cost_microusd=cost_microusd+excluded.cost_microusd`+dailyUpdate, args...)
 		if err != nil {
 			return databaseError(err)
 		}
@@ -305,9 +320,31 @@ func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, sessions bo
 
 const requestColumns = `request_id,attempt_index,started_at,finished_at,app_name,user_hash,anonymous,operation,provider,model_requested,model_used,upstream_status,downstream_status,outcome,error_class,error_code,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,raw_input_total,counted_input_tokens,cache_write_5m_tokens,cache_write_1h_tokens,cost_microusd,reserved_cost_microusd,usage_missing,recovered,estimate_exceeded,request_count,latency_us,upstream_ttfb_us,client_ttfb_us,usage_day,timezone,price_quote_json,record_json`
 
+const dailyInsertColumns = `day,timezone,app_name,scope,subject,anonymous,requests,attempts,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,usage_missing_count,recovered_count,cost_microusd`
+
+// hasSavings reports whether the database already has the savings columns.
+// Only a database of an earlier release, written in tests before its
+// migration, lacks them.
+func hasSavings(ctx context.Context, tx *sql.Tx) (bool, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('requests') WHERE name='cache_saved_microusd'`).Scan(&n); err != nil {
+		return false, databaseError(err)
+	}
+	return n > 0, nil
+}
+
 func insertRequest(ctx context.Context, tx *sql.Tx, r storage.Record, data, quote string) error {
+	savings, err := hasSavings(ctx, tx)
+	if err != nil {
+		return err
+	}
+	columns := requestColumns
 	args := []any{r.RequestID, r.AttemptIndex, r.StartedAt.UnixMicro(), r.FinishedAt.UnixMicro(), r.AppName, r.UserHash, r.Anonymous, r.Operation, r.Provider, r.ModelRequested, r.ModelUsed, r.UpstreamStatus, r.DownstreamStatus, r.Outcome, r.ErrorClass, r.ErrorCode, r.Input, r.Output, r.CacheWrite, r.CacheRead, r.RawInputTotal, r.CountedInput, r.CacheWrite5m, r.CacheWrite1h, r.Cost, r.ReservedCost, r.UsageMissing, r.Recovered, r.EstimateExceeded, r.RequestCount, r.LatencyUS, r.UpstreamTTFB, r.ClientTTFB, r.Day, r.Timezone, quote, data}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO requests(`+requestColumns+`) VALUES(`+strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+`)`, args...); err != nil {
+	if savings {
+		columns += `,cache_saved_microusd,downgrade_saved_microusd`
+		args = append(args, r.CacheSaved, r.DowngradeSaved)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO requests(`+columns+`) VALUES(`+strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")+`)`, args...); err != nil {
 		return databaseError(err)
 	}
 	return nil

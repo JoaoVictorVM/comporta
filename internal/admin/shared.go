@@ -23,9 +23,17 @@ type SessionStore interface {
 	Delete(id string)
 }
 
+// ExpiringSessions also returns the absolute end of a live session, which the
+// panel uses to close its live stream on time.
+type ExpiringSessions interface {
+	SessionStore
+	Expiry(id string) (time.Time, bool)
+}
+
 var (
-	_ Verifier     = (*Credential)(nil)
-	_ SessionStore = (*Sessions)(nil)
+	_ Verifier         = (*Credential)(nil)
+	_ ExpiringSessions = (*Sessions)(nil)
+	_ ExpiringSessions = (*SharedSessions)(nil)
 )
 
 // SharedCredentials is the database side of the distributed admin credential.
@@ -34,6 +42,7 @@ type SharedCredentials interface {
 	ResetAdminCredential(ctx context.Context, digest [32]byte, initialOnly bool) (int64, error)
 	CreateSession(ctx context.Context, digest [32]byte, epoch int64, expires time.Time) error
 	SessionValid(ctx context.Context, digest [32]byte) (bool, error)
+	SessionExpiry(ctx context.Context, digest [32]byte) (time.Time, bool, error)
 	DeleteSession(ctx context.Context, digest [32]byte) error
 }
 
@@ -155,6 +164,19 @@ func (s *SharedSessions) Valid(id string) bool {
 	defer cancel()
 	ok, err := s.store.SessionValid(ctx, sha256.Sum256([]byte(id)))
 	return err == nil && ok
+}
+
+func (s *SharedSessions) Expiry(id string) (time.Time, bool) {
+	if !sessionPattern.MatchString(id) {
+		return time.Time{}, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	expires, ok, err := s.store.SessionExpiry(ctx, sha256.Sum256([]byte(id)))
+	if err != nil || !ok {
+		return time.Time{}, false
+	}
+	return expires, true
 }
 
 func (s *SharedSessions) Delete(id string) {

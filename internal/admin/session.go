@@ -64,22 +64,39 @@ func (s *Sessions) Create() (string, time.Time, error) {
 
 // Valid reports whether the identifier names a live session.
 func (s *Sessions) Valid(id string) bool {
+	_, ok := s.Expiry(id)
+	return ok
+}
+
+// Expiry returns the absolute end of a live session. It never renews it, and
+// says nothing about an identifier that is not a live session.
+func (s *Sessions) Expiry(id string) (time.Time, bool) {
 	if !sessionPattern.MatchString(id) {
-		return false
+		return time.Time{}, false
 	}
 	key := sha256.Sum256([]byte(id))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	expires, ok := s.entries[key]
 	if !ok {
-		return false
+		return time.Time{}, false
 	}
 	if !s.now().Before(expires) {
 		delete(s.entries, key)
-		return false
+		return time.Time{}, false
 	}
-	return true
+	return expires, true
 }
+
+// SessionCookieFor builds the cookie of a new session, for the panel's own
+// login form.
+func SessionCookieFor(id string, secure bool) *http.Cookie { return sessionCookie(id, secure) }
+
+// ExpiredSessionCookie clears the session cookie.
+func ExpiredSessionCookie(secure bool) *http.Cookie { return expiredCookie(secure) }
+
+// RequestOrigin is the origin the admin listener serves a request on.
+func RequestOrigin(r *http.Request) string { return requestOrigin(r) }
 
 // Delete ends a session. Unknown identifiers are ignored.
 func (s *Sessions) Delete(id string) {

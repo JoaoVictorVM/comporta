@@ -23,12 +23,15 @@ var policiesSchema string
 //go:embed migrations/0004_fallback_operations.sql
 var fallbackSchema string
 
+//go:embed migrations/0005_panel_analytics.sql
+var panelSchema string
+
 var errSchema = errors.New("incompatible database version or migration checksum")
 
 // migrations is the ordered registry. Applied files are never edited: a new
 // change is a new version.
 func migrations() []migration {
-	return []migration{{1, schema}, {2, limitsSchema}, {3, policiesSchema}, {4, fallbackSchema}}
+	return []migration{{1, schema}, {2, limitsSchema}, {3, policiesSchema}, {4, fallbackSchema}, {5, panelSchema}}
 }
 
 // checkSchema accepts any intact prefix of the known migrations, so a database

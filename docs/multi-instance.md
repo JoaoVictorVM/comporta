@@ -68,7 +68,7 @@ comporta serve --config comporta.yaml                  # on every replica
 
 Migrations are applied once even when replicas start together, and a database with a newer or edited migration stops the start without changing anything. To keep schema privileges away from the runtime user, run `storage migrate` as a separate job with a privileged user and give the replicas a user without DDL rights.
 
-`keys` commands write to Postgres in distributed mode and never touch `keys.json`. A key created or revoked on one replica takes effect on all of them within about one second. `admin reset-token` works while replicas run: the new token applies within a second and every panel session ends.
+`keys` commands write to Postgres in distributed mode and never touch `keys.json`. A key created or revoked on one replica takes effect on all of them within about one second. `admin reset-token` works while replicas run: the new token applies within a second and every panel session ends. The admin panel works on every replica with the shared session: each process follows a shared watermark of requests and events once per second, so a write on another replica refreshes open screens, and limit state, which lives in Postgres and Redis, is shown as not verifiable instead of a local copy.
 
 ## Configuration changes
 

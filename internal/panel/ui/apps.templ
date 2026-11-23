@@ -1,0 +1,156 @@
+package ui
+
+import "github.com/JoaoVictorVM/comporta/internal/panel"
+
+templ appsPage(apps []panel.AppSummary, a panel.Availability) {
+	<section id="apps-live" data-live-scope="apps" hx-get="/panel/fragment/apps" hx-trigger="live-refresh" aria-live="polite">
+		@appsBody(apps, a)
+	</section>
+}
+
+templ appsBody(apps []panel.AppSummary, a panel.Availability) {
+	if names := pausedSummaries(apps); len(names) > 0 {
+		@pausedBanner(names)
+	}
+	if a == panel.Unavailable {
+		@unavailable("Spend")
+	}
+	if len(apps) == 0 {
+		@empty("No apps configured. Add an app to comporta.yaml.")
+	} else {
+		@scrollRegion("Configured apps") {
+			<table class="w-full text-left text-sm">
+				<caption class="sr-only">Configured apps</caption>
+				<thead class="bg-canvas">
+					<tr>
+						<th scope="col" class="px-3 py-2">App</th>
+						<th scope="col" class="px-3 py-2">State</th>
+						<th scope="col" class="px-3 py-2">Policy</th>
+						<th scope="col" class="px-3 py-2">Main model</th>
+						<th scope="col" class="px-3 py-2">Today</th>
+						<th scope="col" class="px-3 py-2">This month</th>
+						<th scope="col" class="px-3 py-2">Tightest limit</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, app := range apps {
+						<tr class="border-t border-line">
+							<th scope="row" class="px-3 py-2"><a href={ appURL(app.App) } class="text-brand underline">{ app.App }</a></th>
+							<td class="px-3 py-2">
+								if app.Paused {
+									@pausedBadge()
+								} else {
+									@badge("Active", "bg-ok-bg text-ok")
+								}
+							</td>
+							<td class="px-3 py-2">{ app.Policy }</td>
+							<td class="px-3 py-2">{ orDash(app.PrimaryModel) }</td>
+							<td class="px-3 py-2">{ usd(app.Today) }</td>
+							<td class="px-3 py-2">{ usd(app.Month) }</td>
+							<td class="min-w-40 px-3 py-2">
+								if app.Limits == panel.Available {
+									@bar(orDash(app.PressureName), app.Pressure)
+								} else {
+									<span class="text-unknown">Cannot be verified</span>
+								}
+							</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+	}
+}
+
+templ appPage(d panel.AppDetail) {
+	<p class="mb-4"><a href="/apps" class="text-brand underline">Back to apps</a></p>
+	<section id="app-live" data-live-scope="apps" hx-get={ appFragmentURL(d.App) } hx-trigger="live-refresh" aria-live="polite">
+		@appBody(d)
+	</section>
+}
+
+templ appBody(d panel.AppDetail) {
+	if d.Paused || d.GlobalPaused {
+		<p class="mb-4 rounded bg-bad px-4 py-3 font-semibold text-white" role="status">
+			if d.Paused {
+				Paused: this app refuses requests until it is resumed.
+			} else {
+				Paused by the global pause.
+			}
+		</p>
+	}
+	<dl class="mb-6 grid grid-cols-1 gap-3 rounded border border-line bg-surface p-4 text-sm sm:grid-cols-3">
+		<div><dt class="text-muted">Policy on limit</dt><dd class="font-semibold">{ d.Policy }</dd></div>
+		if d.DowngradeTo != "" {
+			<div><dt class="text-muted">Downgrade target</dt><dd>{ d.DowngradeTo }</dd></div>
+		}
+		<div><dt class="text-muted">Fail mode</dt><dd>{ orDash(d.FailMode) }</dd></div>
+		<div><dt class="text-muted">Timezone</dt><dd>{ d.Timezone }</dd></div>
+		if d.ActiveTimezone != "" {
+			<div><dt class="text-muted">Active timezone</dt><dd>{ d.ActiveTimezone }</dd></div>
+		}
+		if d.PendingTimezone != "" && d.PendingAt != nil {
+			<div><dt class="text-muted">Pending timezone</dt><dd>{ d.PendingTimezone } from <time datetime={ iso(*d.PendingAt) }>{ stamp(*d.PendingAt) }</time></dd></div>
+		}
+		if d.Spend == panel.Available {
+			<div><dt class="text-muted">Estimated cost today</dt><dd>{ usd(d.Today) }</dd></div>
+			<div><dt class="text-muted">Estimated cost this month</dt><dd>{ usd(d.Month) }</dd></div>
+		}
+	</dl>
+	<h2 class="mb-2 text-lg font-semibold">Limits</h2>
+	if d.Limits != panel.Available {
+		@notVerifiable()
+	}
+	if len(d.LimitRows) > 0 {
+		@limitTable("Limits of "+d.App, d.LimitRows, d.At)
+	} else if d.Limits == panel.Available {
+		@empty("This app has no app-level limits.")
+	}
+	if d.Spend == panel.Unavailable {
+		<div class="mt-6">
+			@unavailable("Usage history")
+		</div>
+	} else {
+		<h2 class="mb-2 mt-6 text-lg font-semibold">Model mix, { d.Period }</h2>
+		if len(d.Models) == 0 {
+			@empty("No requests yet. Point an app to http://localhost:8080 or run comporta demo.")
+		} else {
+			@scrollRegion("Model mix") {
+				<table class="w-full text-left text-sm">
+					<caption class="sr-only">Attempts and estimated cost per model</caption>
+					<thead class="bg-canvas"><tr><th scope="col" class="px-3 py-2">Model</th><th scope="col" class="px-3 py-2">Attempts</th><th scope="col" class="px-3 py-2">Share</th><th scope="col" class="px-3 py-2">Estimated cost</th></tr></thead>
+					<tbody>
+						for _, m := range d.Models {
+							<tr class="border-t border-line"><th scope="row" class="px-3 py-2 font-normal">{ orDash(m.Model) }</th><td class="px-3 py-2">{ count(m.Attempts) }</td><td class="px-3 py-2">{ number(m.Percent) }%</td><td class="px-3 py-2">{ usd(m.Cost) }</td></tr>
+						}
+					</tbody>
+				</table>
+			}
+		}
+		<h2 class="mb-2 mt-6 text-lg font-semibold">Top 10 users by cost, { d.Period }</h2>
+		if len(d.TopUsers) == 0 {
+			@empty("No user spend this month.")
+		} else {
+			@scrollRegion("Top users") {
+				<table class="w-full text-left text-sm">
+					<caption class="sr-only">Pseudonymous users ranked by estimated cost</caption>
+					<thead class="bg-canvas"><tr><th scope="col" class="px-3 py-2">User</th><th scope="col" class="px-3 py-2">Requests</th><th scope="col" class="px-3 py-2">Estimated cost</th></tr></thead>
+					<tbody>
+						for _, u := range d.TopUsers {
+							<tr class="border-t border-line">
+								<th scope="row" class="px-3 py-2 font-mono font-normal">
+									{ u.Hash }
+									if u.Anonymous {
+										<span class="ml-1 text-xs text-muted">(anonymous bucket)</span>
+									}
+								</th>
+								<td class="px-3 py-2">{ count(u.Requests) }</td>
+								<td class="px-3 py-2">{ usd(u.Cost) }</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		}
+	}
+}
