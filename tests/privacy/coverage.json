@@ -64,6 +64,7 @@
     "process/invalid-request",
     "process/limits",
     "process/admin-operations",
+    "process/admin-panel",
     "process/loop-cut",
     "process/sensitive-data",
     "process/limit-policies",
@@ -88,6 +89,7 @@
     {"name": "database", "status": "covered", "description": "Records, WAL, aggregates, events, limit reservations, ledger, rate events and checkpoints, examined after checkpoint and close"},
     {"name": "metrics", "status": "covered", "description": "Authenticated scrape of the admin listener: names, labels and values, compared with the stored user hashes"},
     {"name": "traces", "status": "covered", "description": "Raw OTLP/HTTP protobuf bodies received by a local collector, compared with the stored user hashes"},
+    {"name": "panel", "status": "covered", "description": "Admin panel pages, fragments, search answers, request details, the live stream and the embedded assets, read with a session after marked traffic"},
     {"name": "alerts", "status": "unavailable", "required_by": "alerts", "description": "Local webhook receiver: actual payloads"}
   ],
   "jobs": {
@@ -104,6 +106,7 @@
     "A storage-backed HistoryGuard replaces the filesystem guard before the database is created, and its reset keeps spending totals",
     "Each channel above moves to covered when it exists, in the same change, and the suite then requires it",
     "Sensitive data events and records carry categories, counts, actions and secret kinds only; alerts and metrics project app, category, count and action, never the subject",
-    "Policy outcomes (blocked, warned, downgraded) carry the limit path, scope, reason, renewal and configured model names; their events have no user hash, and the panel and the demo read them from records and events"
+    "Policy outcomes (blocked, warned, downgraded) carry the limit path, scope, reason, renewal and configured model names; their events have no user hash, and the panel and the demo read them from records and events",
+    "The panel searches by raw identifier only in a POST body, shows pseudonyms abbreviated with a u_ prefix, and never renders prompts, raw identifiers, tokens or secrets"
   ]
 }

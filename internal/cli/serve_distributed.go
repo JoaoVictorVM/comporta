@@ -12,6 +12,8 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/distributed"
 	"github.com/JoaoVictorVM/comporta/internal/keys"
 	"github.com/JoaoVictorVM/comporta/internal/metering"
+	"github.com/JoaoVictorVM/comporta/internal/panel"
+	"github.com/JoaoVictorVM/comporta/internal/panel/ui"
 	"github.com/JoaoVictorVM/comporta/internal/pricing"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
 	"github.com/JoaoVictorVM/comporta/internal/responsecache"
@@ -170,16 +172,26 @@ func serveDistributed(ctx context.Context, out streams, logger *slog.Logger, man
 	loop := &proxy.LoopStage{Guard: loopGuard, Source: manager, Recorder: accounting}
 	sensitive := &proxy.SensitiveStage{Scanner: sensitivedata.NewScanner(), Recorder: accounting}
 	originKey := identity.Derive("comporta:auth-origin:v1")
+	sessions := admin.NewSharedSessions(sql, credential)
+	adminGuard := auth.NewSharedGuard(sql.AuthWindows(), "admin", originKey, logger,
+		auth.GuardOptions{MaxFailures: admin.GuardMaxFailures, Window: admin.GuardWindow, Cooldown: admin.GuardCooldown})
+	adminService := admin.NewService(admin.ServiceOptions{
+		Control: control, Source: manager, Identity: identity, History: coordinator.History(),
+		Metering: accounting, Limits: sharedLimits{}, Loop: loopGuard, Cache: cache, Usage: sql, Logger: logger,
+		CursorKey: cursorKey, FreshPause: true,
+	})
 	adminHandler := admin.NewHandler(admin.HandlerOptions{
-		Credential: credential, Logger: logger,
-		Sessions: admin.NewSharedSessions(sql, credential),
-		Guard: auth.NewSharedGuard(sql.AuthWindows(), "admin", originKey, logger,
-			auth.GuardOptions{MaxFailures: admin.GuardMaxFailures, Window: admin.GuardWindow, Cooldown: admin.GuardCooldown}),
-		Service: admin.NewService(admin.ServiceOptions{
-			Control: control, Source: manager, Identity: identity, History: coordinator.History(),
-			Metering: accounting, Limits: sharedLimits{}, Loop: loopGuard, Cache: cache, Usage: sql, Logger: logger,
-			CursorKey: cursorKey, FreshPause: true,
+		Credential: credential, Logger: logger, Sessions: sessions, Guard: adminGuard, Service: adminService,
+	})
+	// Other replicas write too: the hub follows the shared watermark once per
+	// second besides the local bus. Limit state lives in the shared stores, so
+	// the panel shows it as not verifiable here instead of a local copy.
+	live := panel.NewLiveHub(panel.LiveOptions{Bus: &sql.Bus, Config: manager, Watermark: sql.PanelWatermark, Logger: logger})
+	panelHandler := panel.NewHandler(panel.HandlerOptions{
+		Service: panel.NewService(panel.Options{
+			Store: sql, Config: manager, Pause: adminService, Identity: identity, History: coordinator.History(), Logger: logger, CursorKey: cursorKey,
 		}),
+		Views: ui.Views{}, Credential: credential, Sessions: sessions, Guard: adminGuard, Live: live, Logger: logger,
 	})
 	cacheWorker := func(ctx context.Context) error {
 		return cache.Run(ctx, func() responsecache.Settings { return responsecache.FromSnapshot(manager.Capture()) })
@@ -191,6 +203,7 @@ func serveDistributed(ctx context.Context, out streams, logger *slog.Logger, man
 		guard:    auth.NewSharedGuard(sql.AuthWindows(), "proxy", originKey, logger, auth.GuardOptions{}),
 		identity: identity, accounting: accounting, gate: control, loop: loop, sensitive: sensitive, cache: cache, observer: observer,
 		adminAPI: adminHandler, metrics: adminHandler.Metrics(observer),
+		panel: panelHandler, live: live,
 		ready:   lifecycle.Ready,
 		onDrain: lifecycle.Drain, drainNotice: drainNotice,
 		extra: []server.Worker{configEvents.Run, lifecycle.Run, cacheWorker, observer.Run, eventsWorker},

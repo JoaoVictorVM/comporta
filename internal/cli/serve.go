@@ -17,6 +17,8 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/limits"
 	"github.com/JoaoVictorVM/comporta/internal/loopguard"
 	"github.com/JoaoVictorVM/comporta/internal/metering"
+	"github.com/JoaoVictorVM/comporta/internal/panel"
+	"github.com/JoaoVictorVM/comporta/internal/panel/ui"
 	"github.com/JoaoVictorVM/comporta/internal/pricing"
 	"github.com/JoaoVictorVM/comporta/internal/proxy"
 	"github.com/JoaoVictorVM/comporta/internal/responsecache"
@@ -131,14 +133,31 @@ func newServeCommand(out streams) *cobra.Command {
 			cacheWorker := func(ctx context.Context) error {
 				return cache.Run(ctx, func() responsecache.Settings { return responsecache.FromSnapshot(manager.Capture()) })
 			}
-			adminHandler := admin.NewHandler(admin.HandlerOptions{
-				Credential: credential, Logger: logger,
-				Service: admin.NewService(admin.ServiceOptions{
-					Control: control, Source: manager, Identity: identity, History: store,
-					Metering: accounting, Limits: coordinator, Loop: guard, Cache: cache, Usage: store, Logger: logger,
-				}),
+			// The panel logs in through the same credential, sessions and guard
+			// as the admin API: one login, one failure count per address.
+			sessions := admin.NewSessions(nil)
+			adminGuard := admin.NewGuard(nil, logger)
+			adminService := admin.NewService(admin.ServiceOptions{
+				Control: control, Source: manager, Identity: identity, History: store,
+				Metering: accounting, Limits: coordinator, Loop: guard, Cache: cache, Usage: store, Logger: logger,
 			})
-			if err := runGateway(command.Context(), logger, manager, keyManager, identity, accounting, control, loop, sensitive, cache, observer, adminHandler, adminHandler.Metrics(observer), configEvents.Run, coordinator.Run, guard.Run, cacheWorker, observer.Run, eventsWorker); err != nil {
+			adminHandler := admin.NewHandler(admin.HandlerOptions{
+				Credential: credential, Sessions: sessions, Guard: adminGuard, Logger: logger, Service: adminService,
+			})
+			live := panel.NewLiveHub(panel.LiveOptions{Bus: &store.Bus, Config: manager, Logger: logger})
+			panelHandler := panel.NewHandler(panel.HandlerOptions{
+				Service: panel.NewService(panel.Options{
+					Store: store, Config: manager, Pause: adminService, Limits: coordinator, Identity: identity, History: store, Logger: logger,
+				}),
+				Views: ui.Views{}, Credential: credential, Sessions: sessions, Guard: adminGuard, Live: live, Logger: logger,
+			})
+			err = runGatewayWith(command.Context(), logger, manager, gatewayParts{
+				keys: keyManager, keysRun: keyManager.Run, guard: auth.NewGuard(nil, logger), identity: identity, accounting: accounting, gate: control,
+				loop: loop, sensitive: sensitive, cache: cache, observer: observer, adminAPI: adminHandler, metrics: adminHandler.Metrics(observer),
+				panel: panelHandler, live: live,
+				extra: []server.Worker{configEvents.Run, coordinator.Run, guard.Run, cacheWorker, observer.Run, eventsWorker},
+			})
+			if err != nil {
 				return err
 			}
 			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -160,13 +179,6 @@ func newServeCommand(out streams) *cobra.Command {
 	return command
 }
 
-func runGateway(ctx context.Context, logger *slog.Logger, manager *config.Manager, keyManager *keys.Manager, identity *useridentity.Service, accounting *metering.Service, gate proxy.Gate, loop *proxy.LoopStage, sensitive *proxy.SensitiveStage, cache *responsecache.Cache, observer *telemetry.Service, adminAPI, metrics http.Handler, extra ...server.Worker) error {
-	return runGatewayWith(ctx, logger, manager, gatewayParts{
-		keys: keyManager, keysRun: keyManager.Run, guard: auth.NewGuard(nil, logger), identity: identity, accounting: accounting, gate: gate,
-		loop: loop, sensitive: sensitive, cache: cache, observer: observer, adminAPI: adminAPI, metrics: metrics, extra: extra,
-	})
-}
-
 // gatewayParts are the components a gateway runs with, whatever the
 // deployment mode provides them from.
 type gatewayParts struct {
@@ -183,6 +195,8 @@ type gatewayParts struct {
 	adminAPI    http.Handler
 	metrics     http.Handler
 	ready       func() bool
+	panel       *panel.Handler
+	live        *panel.LiveHub
 	onDrain     func()
 	drainNotice time.Duration
 	extra       []server.Worker
@@ -193,13 +207,31 @@ func runGatewayWith(ctx context.Context, logger *slog.Logger, manager *config.Ma
 	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Identity: p.identity, Logger: logger, Accounting: p.accounting, Gate: p.gate, Loop: p.loop, Sensitive: p.sensitive, Source: manager, Cache: p.cache, Telemetry: p.observer})
 	defer handler.Close()
 	defer p.cache.Close()
+	var surface server.PanelSurface
+	workers := append([]server.Worker{manager.Run, p.keysRun, p.accounting.Run}, p.extra...)
+	onDrain := p.onDrain
+	if p.panel != nil {
+		surface = p.panel
+	}
+	if p.live != nil {
+		workers = append(workers, p.live.Run)
+		// Open live streams never end on their own; a drain closes them first so
+		// it never waits on a browser.
+		drain := onDrain
+		onDrain = func() {
+			p.live.Shutdown()
+			if drain != nil {
+				drain()
+			}
+		}
+	}
 	gateway, err := server.Open(ctx, server.Options{
 		Source:      manager,
 		Proxy:       server.ProxySurface(manager, handler),
-		Admin:       server.AdminSurfaceReady(manager, p.adminAPI, p.metrics, p.ready),
-		Workers:     append([]server.Worker{manager.Run, p.keysRun, p.accounting.Run}, p.extra...),
+		Admin:       server.AdminSurfacePanel(manager, p.adminAPI, p.metrics, p.ready, surface),
+		Workers:     workers,
 		Logger:      logger,
-		OnDrain:     p.onDrain,
+		OnDrain:     onDrain,
 		DrainNotice: p.drainNotice,
 	})
 	if err != nil {
