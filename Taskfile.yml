@@ -35,6 +35,16 @@ tasks:
     cmds:
       - go vet ./...
 
+  panel-assets:
+    desc: Regenerate the panel templates and stylesheet with the pinned templ and Tailwind standalone CLI (downloaded once into bin/ and checked by its checksum)
+    cmds:
+      - bash scripts/panel-assets.sh
+
+  panel-check:
+    desc: Fail when the committed panel templates or stylesheet differ from what the pinned tools generate
+    cmds:
+      - bash scripts/panel-assets.sh --check
+
   test:
     desc: Run the test suite
     cmds:
@@ -98,6 +108,7 @@ tasks:
     desc: Run every local verification
     cmds:
       - task: fmt-check
+      - task: panel-check
       - task: lint
       - task: test
       - task: test-privacy

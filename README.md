@@ -2,9 +2,9 @@
 
 Open-source LLM gateway, in development.
 
-**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, sensitive data detection with redaction and blocking, limit policies (block, downgrade and warn, allowed models and output caps), fallback routing across a chain of models of the same API format, an exact-match response cache in memory, operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API, and observability: Prometheus metrics on the admin listener, optional OpenTelemetry traces and a Compose profile with Prometheus, Grafana and Jaeger. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
+**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, sensitive data detection with redaction and blocking, limit policies (block, downgrade and warn, allowed models and output caps), fallback routing across a chain of models of the same API format, an exact-match response cache in memory, operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API, a read-only admin panel with live updates, and observability: Prometheus metrics on the admin listener, optional OpenTelemetry traces and a Compose profile with Prometheus, Grafana and Jaeger. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
 
-**Not implemented yet:** alerts, the admin panel and fallback to a model of another API format. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
+**Not implemented yet:** alerts and fallback to a model of another API format. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
 
 ## Commands
 
@@ -255,7 +255,7 @@ Every refusal before an attempt is stored as a blocked record with attempt 0, ze
 
 **Measured cost:** admission and settlement reuse the two synchronous `synchronous=FULL` commits that metering already made, now carrying the reservation. On the reference Windows machine, sequential non-streaming calls through the fake provider measured a p95 of 6.7 ms against 2.0 ms without metering and limits, and streaming time to first byte a p95 of 3.6 ms against 2.6 ms. The coordinator alone takes about 27 µs per reserve and settle. The sustained load target of 200 requests per second for 5 minutes was not measured in this release.
 
-**For later features:** the panel, alerts and multiple instances consume typed decisions, a consistent state per app and user (used, reserved, limit, renewal, degradation, active and pending timezone) and a reservation handle with reserve, settle and release. `comporta users forget` removes a user's limit state together with the user's records, see Operations.
+**For later features:** alerts consume, as the panel and multiple instances do, typed decisions, a consistent state per app and user (used, reserved, limit, renewal, degradation, active and pending timezone) and a reservation handle with reserve, settle and release. `comporta users forget` removes a user's limit state together with the user's records, see Operations.
 
 ### Limit policies
 
@@ -544,7 +544,38 @@ Requests and answers are JSON (at most 16 KiB, `Content-Type: application/json`,
 
 Requests authenticated with the session cookie must send a matching `Origin` on every POST and DELETE. IDs never go in a URL. Counts and money in usage answers are decimal strings. Usage cursors are signed with a per-process key and stop working after a restart. Sessions live in memory and end on restart.
 
-These routes are what the future panel will use. Pauses and sessions are local to one gateway process: keeping them consistent across several instances belongs to multi-instance support, not delivered yet.
+The admin panel below logs in through the same credential, sessions and address guard as these routes.
+
+## Admin panel
+
+The panel is served by the same binary on the admin listener, at `http://127.0.0.1:8081/` by default. It is read only: no screen changes the configuration, pauses an app or deletes a user. It does not exist on the proxy port.
+
+Open `/login` and paste the admin token. The form posts it in the body, never in a URL, under the same guard as the API (ten failures from one address in 60 seconds block it for 5 minutes). A valid token becomes the usual session cookie (`HttpOnly`, `SameSite=Strict`, `Secure` over TLS, 12 hours, never renewed) and the token is never shown back. A bearer token does not open pages. Log out with the button in the header.
+
+| Screen | Shows |
+|---|---|
+| Overview | Estimated cost today and this month, requests and tokens today, one bar per app against its daily and monthly budget, estimated savings from cache and downgrade, the last 10 alerts (once alerts exist) and a red banner for paused apps or the global pause |
+| Apps | Every app with its policy, main model, cost and tightest limit; per app, each limit with used, reserved, ceiling and `renews in`, the active and pending timezone, the model mix and the top 10 user pseudonyms by cost this month |
+| Users | A search box that hashes the typed ID for every app, current or removed, and shows the pseudonym, today's cost, each per-user limit and the month's history. The anonymous bucket has its own control |
+| Requests | The latest 500 attempts, newest first, 50 per page, filtered by app, user, model and outcome (`ok`, `blocked`, `cached`, `fallback`, `downgraded`, `loop_cut`); a row opens its metadata |
+| Events | Loop cuts, fallbacks, blocks, downgrades, warnings, cache hits, configuration changes, pauses and limit degradation, newest first, 50 per page |
+| Providers | Per provider over the last hour: health, attempts, error rate, p50 and p95 latency, prompt cache read ratio and a five-minute series |
+| Configuration | The effective YAML with secrets shown as `[REDACTED]`, the active generation and the last reload, with its errors highlighted when it was rejected |
+
+What the numbers mean:
+
+- Days and months follow each app's timezone; totals add each app's own window.
+- Costs are estimates in dollars from the price catalog, never an invoice. A request recovered after a crash or without usage from the provider is marked and counts its conservative reservation.
+- Savings are potential and estimated: a cache hit saves the reservation it released, a downgrade saves the reservation of the requested model minus the one sent. Both are frozen when the request is decided and counted once per logical request. History written before this version counts as zero.
+- Provider health is observed from traffic, not from an active check: no attempt in the hour is `unknown`, under 5% of overload, timeout, connection and 5xx failures is `healthy`, up to 20% is `degraded`, above that or three attempts without a success is `unhealthy`. Client errors do not lower it. The ratio is `cache_read / (input + cache_read)`.
+- Limit state that cannot be proven shows as not verifiable, never as free budget. With several replicas limits live in the shared stores and the panel shows them that way.
+- Users appear only as an app-scoped pseudonym such as `u_9f2c41ab`. The typed ID stays in the search field, is posted in the body and is never returned, stored, logged or put in a URL. Prompts, responses, headers and raw provider errors are never stored, so the panel cannot show them.
+
+Screens update live. One stream per browser (`/panel/live`, at most 128 per process) carries only which screens are stale, at most once per second; the browser then fetches the fragment. Filters are kept, and a list you are reading shows "New data available" instead of moving. New data can take up to two seconds to appear. With several replicas each process also follows a shared watermark once per second, so a write on another replica refreshes the screen too. A full stream answers 503 and manual reload keeps working. When the session expires the stream says so and the page goes to the login form.
+
+Everything the browser loads is embedded in the binary: HTML rendered on the server with [templ](https://templ.guide), [HTMX](https://htmx.org) 2.0.11 with its SSE extension 2.2.4, [uPlot](https://github.com/leeoniya/uPlot) 1.6.32 and a stylesheet built with the Tailwind CSS standalone CLI 4.3.5. No CDN, Node.js or network access is needed to build or run. Pages send a Content-Security-Policy without `unsafe-inline` or `unsafe-eval`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store`; HTMX runs with eval, script tags in content and the history cache disabled. Charts have an equivalent table, and the panel stays usable without JavaScript, with manual reload.
+
+Limitations: sessions of a single instance live in memory and end on restart; the panel has no accounts or roles; reaching it from another machine needs the admin listener exposed on purpose, which is not recommended.
 
 ## Observability
 
@@ -602,6 +633,6 @@ App keys, `hmac.key` and SQLite DB/WAL/SHM live in the volume and survive recrea
 
 ## Development
 
-The repository uses [Task](https://taskfile.dev). `task --list` shows the available tasks, and `task check` runs formatting, static checks, tests, example validation and the vulnerability and secret scanners. The race detector needs a C toolchain: `task test-race`. `task test-privacy` runs the privacy test, `task test-sdk` runs the official Python SDKs at the versions pinned in `tests/sdk/requirements.txt`, and `task test-container` builds the image and verifies its restrictions, `task test-distributed` runs the shared stores and two `serve` processes against real Postgres and Redis containers, `task chart` checks the Helm chart and `task test-kubernetes` installs it on a throwaway kind cluster; none of them needs provider credentials. A test that adds a prompt builds it with `internal/testkit`, or the marked `prompt` helper in the SDK suite, and new destinations for data go in `tests/privacy/coverage.json` in the same change.
+The repository uses [Task](https://taskfile.dev). `task --list` shows the available tasks, and `task check` runs formatting, static checks, tests, example validation and the vulnerability and secret scanners. The panel's generated files are committed: after changing a `.templ` file or the stylesheet run `task panel-assets`, which uses templ 0.3.906 through `go run` and downloads the Tailwind CSS standalone CLI 4.3.5 once into `bin/`, checking it against the checksum of its release; `task panel-check` fails when the committed output differs. The race detector needs a C toolchain: `task test-race`. `task test-privacy` runs the privacy test, `task test-sdk` runs the official Python SDKs at the versions pinned in `tests/sdk/requirements.txt`, and `task test-container` builds the image and verifies its restrictions, `task test-distributed` runs the shared stores and two `serve` processes against real Postgres and Redis containers, `task chart` checks the Helm chart and `task test-kubernetes` installs it on a throwaway kind cluster; none of them needs provider credentials. A test that adds a prompt builds it with `internal/testkit`, or the marked `prompt` helper in the SDK suite, and new destinations for data go in `tests/privacy/coverage.json` in the same change.
 
 `go test ./tests/integration -run '^$' -bench '^BenchmarkHTTPMetering$' -benchtime 500x` compares real HTTP and streaming latency with and without durable accounting and reports p95/TTFB. Sync latency depends on the deployment filesystem, so use low-latency local storage and measure there. This diagnostic does not certify the sustained 200 requests/second, five-minute load target.
