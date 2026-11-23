@@ -280,18 +280,20 @@ func commitRecord(ctx context.Context, tx *sql.Tx, r storage.Record, inserted *b
 			return err
 		}
 	}
+	cacheSaved, downgradeSaved := storage.TerminalSavings(r)
 	for _, scope := range []string{"app", "user"} {
 		subject, anonymous := "", false
 		if scope == "user" {
 			subject, anonymous = r.UserHash, r.Anonymous
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO usage_daily VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		_, err = tx.ExecContext(ctx, `INSERT INTO usage_daily(day,timezone,app_name,scope,subject,anonymous,requests,attempts,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,usage_missing_count,recovered_count,cost_microusd,cache_saved_microusd,downgrade_saved_microusd) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 ON CONFLICT(day,timezone,app_name,scope,subject,anonymous) DO UPDATE SET requests=usage_daily.requests+excluded.requests,attempts=usage_daily.attempts+excluded.attempts,
 input_tokens=usage_daily.input_tokens+excluded.input_tokens,output_tokens=usage_daily.output_tokens+excluded.output_tokens,
 cache_write_tokens=usage_daily.cache_write_tokens+excluded.cache_write_tokens,cache_read_tokens=usage_daily.cache_read_tokens+excluded.cache_read_tokens,
 usage_missing_count=usage_daily.usage_missing_count+excluded.usage_missing_count,recovered_count=usage_daily.recovered_count+excluded.recovered_count,
-cost_microusd=usage_daily.cost_microusd+excluded.cost_microusd`,
-			r.Day, r.Timezone, r.AppName, scope, subject, anonymous, r.RequestCount, 1, storage.Value(r.Input), storage.Value(r.Output), storage.Value(r.CacheWrite), storage.Value(r.CacheRead), boolInt(r.UsageMissing), boolInt(r.Recovered), int64(r.Cost))
+cost_microusd=usage_daily.cost_microusd+excluded.cost_microusd,cache_saved_microusd=usage_daily.cache_saved_microusd+excluded.cache_saved_microusd,
+downgrade_saved_microusd=usage_daily.downgrade_saved_microusd+excluded.downgrade_saved_microusd`,
+			r.Day, r.Timezone, r.AppName, scope, subject, anonymous, r.RequestCount, 1, storage.Value(r.Input), storage.Value(r.Output), storage.Value(r.CacheWrite), storage.Value(r.CacheRead), boolInt(r.UsageMissing), boolInt(r.Recovered), int64(r.Cost), int64(cacheSaved), int64(downgradeSaved))
 		if err != nil {
 			return databaseError(err)
 		}
@@ -324,7 +326,7 @@ func boolInt(b bool) int64 {
 	return 0
 }
 
-const requestColumns = `request_id,attempt_index,started_at,finished_at,app_name,user_hash,anonymous,operation,provider,model_requested,model_used,upstream_status,downstream_status,outcome,error_class,error_code,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,raw_input_total,counted_input_tokens,cache_write_5m_tokens,cache_write_1h_tokens,cost_microusd,reserved_cost_microusd,usage_missing,recovered,estimate_exceeded,request_count,latency_us,upstream_ttfb_us,client_ttfb_us,usage_day,timezone,price_quote_json,record_json`
+const requestColumns = `request_id,attempt_index,started_at,finished_at,app_name,user_hash,anonymous,operation,provider,model_requested,model_used,upstream_status,downstream_status,outcome,error_class,error_code,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,raw_input_total,counted_input_tokens,cache_write_5m_tokens,cache_write_1h_tokens,cost_microusd,reserved_cost_microusd,usage_missing,recovered,estimate_exceeded,request_count,latency_us,upstream_ttfb_us,client_ttfb_us,usage_day,timezone,price_quote_json,record_json,cache_saved_microusd,downgrade_saved_microusd`
 
 func placeholders(n int) string { return placeholdersFrom(1, n) }
 
@@ -343,7 +345,7 @@ func placeholdersFrom(first, n int) string {
 func insertRequest(ctx context.Context, tx *sql.Tx, r storage.Record, data, quote string) error {
 	args := []any{r.RequestID, r.AttemptIndex, micros(r.StartedAt), micros(r.FinishedAt), r.AppName, r.UserHash, r.Anonymous, r.Operation, r.Provider, r.ModelRequested, r.ModelUsed,
 		r.UpstreamStatus, r.DownstreamStatus, r.Outcome, r.ErrorClass, r.ErrorCode, r.Input, r.Output, r.CacheWrite, r.CacheRead, r.RawInputTotal, r.CountedInput, r.CacheWrite5m, r.CacheWrite1h,
-		int64(r.Cost), int64(r.ReservedCost), r.UsageMissing, r.Recovered, r.EstimateExceeded, r.RequestCount, r.LatencyUS, r.UpstreamTTFB, r.ClientTTFB, r.Day, r.Timezone, quote, data}
+		int64(r.Cost), int64(r.ReservedCost), r.UsageMissing, r.Recovered, r.EstimateExceeded, r.RequestCount, r.LatencyUS, r.UpstreamTTFB, r.ClientTTFB, r.Day, r.Timezone, quote, data, int64(r.CacheSaved), int64(r.DowngradeSaved)}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO requests(`+requestColumns+`) VALUES(`+placeholders(len(args))+`)`, args...); err != nil {
 		return databaseError(err)
 	}

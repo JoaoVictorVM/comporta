@@ -160,11 +160,16 @@ func (s *Service) price(snapshot *config.Snapshot, e *proxy.Envelope, c proxy.Ca
 // withPolicy fills the record of the chosen candidate. It is pure, so a repeat
 // that finds the reservation already made builds the same record.
 func withPolicy(r storage.Record, chosen priced, sel limits.Selection) storage.Record {
+	original := r.ReservedCost
 	r.Provider, r.ModelUsed = chosen.candidate.ProviderName, chosen.candidate.Model
 	r.ReservedCost, r.Quote = chosen.reserved, chosen.frozen
 	r.PolicyOutcome = string(sel.Outcome)
+	r.DowngradeSaved = 0
 	if sel.Outcome == limits.PolicyDowngraded {
 		r.Outcome = "downgraded"
+		// The saving is the reservation of the original candidate minus the one
+		// sent, both priced at admission: an estimate, never a measured cost.
+		r.DowngradeSaved = max(0, original-chosen.reserved)
 	}
 	if v := sel.Trigger; v != nil {
 		r.PolicyLimitName, r.PolicyScope, r.PolicyReason = v.LimitName, string(v.Scope), string(v.Reason)
@@ -447,6 +452,8 @@ func (s *Service) conclude(r storage.Record, q pricing.Quote, handle limits.Atte
 		var input, output, write, read int64
 		r.Input, r.Output, r.CacheWrite, r.CacheRead = &input, &output, &write, &read
 		r.Cost, r.Outcome, r.UsageMissing, r.EstimateExceeded = 0, "cached", false, false
+		// The conservative reservation the hit released is the potential saving.
+		r.CacheSaved = r.ReservedCost
 	} else if result.NotSent {
 		r.Cost = 0
 		r.Outcome = "blocked"

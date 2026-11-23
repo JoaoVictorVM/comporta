@@ -20,7 +20,7 @@ import (
 var HexID = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 func ValidateRecord(r Record) error {
-	if !HexID.MatchString(r.RequestID) || !HexID.MatchString(r.UserHash) || r.AppName == "" || r.AttemptIndex < 0 || r.Cost < 0 || r.ReservedCost < 0 || r.StartedAt.IsZero() || r.LatencyUS < 0 {
+	if !HexID.MatchString(r.RequestID) || !HexID.MatchString(r.UserHash) || r.AppName == "" || r.AttemptIndex < 0 || r.Cost < 0 || r.ReservedCost < 0 || r.CacheSaved < 0 || r.DowngradeSaved < 0 || r.StartedAt.IsZero() || r.LatencyUS < 0 {
 		return ErrInvalid
 	}
 	if r.Operation != "generation" && r.Operation != "count_tokens" {
@@ -64,7 +64,7 @@ func ValidateRecord(r Record) error {
 	// Attempt 0 is a request refused locally before any attempt: it is terminal,
 	// costs nothing and never counts as a request in the generation totals. A
 	// loop cut is only ever attempt 0.
-	if r.AttemptIndex == 0 && ((r.Outcome != "blocked" && r.Outcome != "loop_cut") || r.RequestCount != 0 || r.Cost != 0 || r.ReservedCost != 0 || r.FinishedAt.IsZero()) {
+	if r.AttemptIndex == 0 && ((r.Outcome != "blocked" && r.Outcome != "loop_cut") || r.RequestCount != 0 || r.Cost != 0 || r.ReservedCost != 0 || r.CacheSaved != 0 || r.DowngradeSaved != 0 || r.FinishedAt.IsZero()) {
 		return ErrInvalid
 	}
 	if !r.FinishedAt.IsZero() && r.FinishedAt.Before(r.StartedAt) {
@@ -143,6 +143,16 @@ func CompletionEvent(r Record) events.Event {
 
 func CachedEvent(r Record) events.Event {
 	return events.CacheHit(r.RequestID, r.AttemptIndex, r.FinishedAt, r.AppName)
+}
+
+// TerminalSavings is what a record adds to the savings of its daily
+// aggregate. Only the attempt that ended the logical request counts, so a
+// request is never credited twice.
+func TerminalSavings(r Record) (cache, downgrade config.Microusd) {
+	if r.RequestCount != 1 {
+		return 0, 0
+	}
+	return r.CacheSaved, r.DowngradeSaved
 }
 
 func Value(p *int64) int64 {

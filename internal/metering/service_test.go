@@ -313,3 +313,91 @@ func TestRejectedCandidateLeavesNoJournal(t *testing.T) {
 		t.Fatalf("journal: %+v", pending)
 	}
 }
+
+func dailySavings(t *testing.T, store *sqlite.Store) (cache, downgrade config.Microusd) {
+	t.Helper()
+	rows, err := store.QueryDaily(context.Background(), storage.UsageSelector{Scope: "app", From: "2000-01-01", Through: "2999-12-31"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range rows {
+		cache += d.CacheSaved
+		downgrade += d.DowngradeSaved
+	}
+	return cache, downgrade
+}
+
+func TestCacheAndDowngradeSavingsMaterializeOnce(t *testing.T) {
+	t.Run("downgrade", func(t *testing.T) {
+		s, store, snapshot, e := policySetup(t, exceededBudget+"    on_limit: downgrade\n    downgrade_to: cheap")
+		admission, reject := s.AdmitCandidates(context.Background(), snapshot, e, candidates(snapshot, e, true))
+		if reject != nil || admission.Policy != proxy.PolicyDowngraded {
+			t.Fatalf("downgrade: %+v %+v", admission, reject)
+		}
+		pending, err := store.Pending(context.Background())
+		if err != nil || len(pending) != 1 {
+			t.Fatal(err)
+		}
+		admitted := pending[0].Admission
+		admission.Complete(proxy.AttemptResult{Operation: proxy.OperationGeneration, UsageComplete: true, Usage: proxy.Usage{Input: known(10), Output: known(0), CacheWrite: known(0), CacheRead: known(0)}})
+		r := onlyRecord(t, s, store)
+		// main reserves 8500 for this request; the saving is that minus the
+		// reservation of the target actually sent.
+		if r.DowngradeSaved <= 0 || r.DowngradeSaved != 8500-admitted.ReservedCost || r.CacheSaved != 0 {
+			t.Fatalf("downgrade saving: %d (reserved %d)", r.DowngradeSaved, admitted.ReservedCost)
+		}
+		for range 2 {
+			if err := store.Commit(context.Background(), []storage.Record{r}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if cache, downgrade := dailySavings(t, store); cache != 0 || downgrade != r.DowngradeSaved {
+			t.Fatalf("daily savings counted again: cache %d downgrade %d", cache, downgrade)
+		}
+	})
+	t.Run("cache", func(t *testing.T) {
+		s, store, snapshot, e := policySetup(t, "    budget: {usd_per_day: 100}\n")
+		admission, _ := s.AdmitCandidates(context.Background(), snapshot, e, candidates(snapshot, e, false))
+		if err := admission.Conclude(replayed()); err != nil {
+			t.Fatal(err)
+		}
+		r := onlyRecord(t, s, store)
+		if r.CacheSaved != r.ReservedCost || r.CacheSaved == 0 || r.DowngradeSaved != 0 {
+			t.Fatalf("cache saving: %d of reserved %d", r.CacheSaved, r.ReservedCost)
+		}
+		if cache, downgrade := dailySavings(t, store); cache != r.CacheSaved || downgrade != 0 {
+			t.Fatalf("daily savings: cache %d downgrade %d", cache, downgrade)
+		}
+	})
+	t.Run("plain", func(t *testing.T) {
+		s, store, snapshot, e := policySetup(t, "    budget: {usd_per_day: 100}\n")
+		admission, _ := s.AdmitCandidates(context.Background(), snapshot, e, candidates(snapshot, e, false))
+		admission.Complete(proxy.AttemptResult{Operation: proxy.OperationGeneration, UsageComplete: true, Usage: proxy.Usage{Input: known(10), Output: known(0), CacheWrite: known(0), CacheRead: known(0)}})
+		if r := onlyRecord(t, s, store); r.CacheSaved != 0 || r.DowngradeSaved != 0 {
+			t.Fatalf("a plain request saved %d and %d", r.CacheSaved, r.DowngradeSaved)
+		}
+	})
+}
+
+func TestRecoveryDoesNotRepriceSavings(t *testing.T) {
+	s, store, snapshot, e := policySetup(t, exceededBudget+"    on_limit: downgrade\n    downgrade_to: cheap")
+	if _, reject := s.AdmitCandidates(context.Background(), snapshot, e, candidates(snapshot, e, true)); reject != nil {
+		t.Fatal(reject)
+	}
+	pending, err := store.Pending(context.Background())
+	if err != nil || len(pending) != 1 || pending[0].Admission.DowngradeSaved <= 0 {
+		t.Fatalf("admission did not freeze the saving: %+v %v", pending, err)
+	}
+	frozen := pending[0].Admission.DowngradeSaved
+	// The process stops before the attempt ends; recovery uses the frozen value.
+	if err := store.Recover(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.Records(context.Background(), storage.RecordFilter{AppName: "bot", Limit: 10})
+	if err != nil || len(page.Records) != 1 || !page.Records[0].Recovered || page.Records[0].DowngradeSaved != frozen {
+		t.Fatalf("recovered saving: %+v %v", page.Records, err)
+	}
+	if _, downgrade := dailySavings(t, store); downgrade != frozen {
+		t.Fatalf("daily saving after recovery: %d", downgrade)
+	}
+}

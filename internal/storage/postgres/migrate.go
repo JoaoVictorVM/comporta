@@ -16,6 +16,9 @@ var usageSchema string
 //go:embed migrations/0002_distributed.sql
 var distributedSchema string
 
+//go:embed migrations/0003_panel_analytics.sql
+var panelSchema string
+
 // ErrSchema reports a future version or a changed checksum. The database is
 // left as it was.
 var ErrSchema = errors.New("incompatible database version or migration checksum")
@@ -31,7 +34,7 @@ type migration struct {
 
 // migrations is the ordered registry. An applied file is never edited.
 func migrations() []migration {
-	return []migration{{1, usageSchema}, {2, distributedSchema}}
+	return []migration{{1, usageSchema}, {2, distributedSchema}, {3, panelSchema}}
 }
 
 func checksum(sql string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(sql))) }

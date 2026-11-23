@@ -55,6 +55,12 @@ type Record struct {
 	// chain. Only the terminal attempt carries them.
 	TerminalErrorCode string `json:",omitempty"`
 	TerminalStatus    *int   `json:",omitempty"`
+	// CacheSaved and DowngradeSaved are the estimated potential savings frozen
+	// when the outcome was decided: the conservative reservation a cache hit
+	// released, and the reservation a downgrade avoided. They are never
+	// recomputed from current prices. Absent in older records, they read as zero.
+	CacheSaved     config.Microusd `json:",omitempty"`
+	DowngradeSaved config.Microusd `json:",omitempty"`
 }
 
 var policyLimitName = regexp.MustCompile(`^apps\.[a-z0-9-]{1,40}\.(per_user\.)?(limits|budget|hard_cap)\.[a-z_]{1,32}$`)
@@ -96,6 +102,7 @@ type Daily struct {
 	Anonymous                                                                         bool
 	Requests, Attempts, Input, Output, CacheWrite, CacheRead, UsageMissing, Recovered int64
 	Cost                                                                              config.Microusd
+	CacheSaved, DowngradeSaved                                                        config.Microusd
 }
 
 type Filter struct {

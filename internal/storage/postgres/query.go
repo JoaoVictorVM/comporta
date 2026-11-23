@@ -14,11 +14,11 @@ func scanDaily(rows *sql.Rows) ([]storage.Daily, error) {
 	var out []storage.Daily
 	for rows.Next() {
 		var d storage.Daily
-		var cost int64
-		if err := rows.Scan(&d.Day, &d.Timezone, &d.AppName, &d.Scope, &d.Subject, &d.Anonymous, &d.Requests, &d.Attempts, &d.Input, &d.Output, &d.CacheWrite, &d.CacheRead, &d.UsageMissing, &d.Recovered, &cost); err != nil {
+		var cost, cacheSaved, downgradeSaved int64
+		if err := rows.Scan(&d.Day, &d.Timezone, &d.AppName, &d.Scope, &d.Subject, &d.Anonymous, &d.Requests, &d.Attempts, &d.Input, &d.Output, &d.CacheWrite, &d.CacheRead, &d.UsageMissing, &d.Recovered, &cost, &cacheSaved, &downgradeSaved); err != nil {
 			return nil, storage.ErrUnavailable
 		}
-		d.Cost = configMicrousd(cost)
+		d.Cost, d.CacheSaved, d.DowngradeSaved = configMicrousd(cost), configMicrousd(cacheSaved), configMicrousd(downgradeSaved)
 		out = append(out, d)
 	}
 	if rows.Err() != nil {
@@ -27,7 +27,7 @@ func scanDaily(rows *sql.Rows) ([]storage.Daily, error) {
 	return out, nil
 }
 
-const dailyColumns = `day,timezone,app_name,scope,subject,anonymous,requests,attempts,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,usage_missing_count,recovered_count,cost_microusd`
+const dailyColumns = `day,timezone,app_name,scope,subject,anonymous,requests,attempts,input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,usage_missing_count,recovered_count,cost_microusd,cache_saved_microusd,downgrade_saved_microusd`
 
 func (s *Store) Daily(ctx context.Context, f storage.Filter) ([]storage.Daily, error) {
 	if f.AppName == "" || (f.UserHash != "" && !storage.HexID.MatchString(f.UserHash)) {
