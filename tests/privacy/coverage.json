@@ -39,7 +39,8 @@
     "internal/proxy/cache_bench_test.go",
     "tests/integration/limits_cache_test.go",
     "tests/privacy/canary_cache_test.go",
-    "tests/privacy/canary_alerts_test.go"
+    "tests/privacy/canary_alerts_test.go",
+    "tests/integration/alerts_webhook_test.go"
   ],
   "parser_only_go_files": [
     {
