@@ -87,6 +87,7 @@ func alertApps(t *testing.T, rc *clusterReceiver, budget string) string {
 
 // Both replicas evaluate the completions they and the other one wrote; the
 // shared unique key leaves one occurrence and one delivery for the channel.
+// The repeated prompt may also cut a loop, which is another alert.
 func TestTwoReplicasSendOneDeliveryPerChannel(t *testing.T) {
 	rc := newClusterReceiver(t)
 	c := newCluster(t, 2, alertApps(t, rc, "0.002"))
@@ -106,7 +107,7 @@ func TestTwoReplicasSendOneDeliveryPerChannel(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM alert_occurrences WHERE trigger='budget_threshold'`).Scan(&occurrences); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT count(*) FROM alert_deliveries WHERE state='delivered'`).Scan(&deliveries); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM alert_deliveries d JOIN alert_occurrences o ON o.occurrence_id=d.occurrence_id WHERE d.state='delivered' AND o.trigger='budget_threshold'`).Scan(&deliveries); err != nil {
 		t.Fatal(err)
 	}
 	if occurrences != 1 || deliveries != 1 {

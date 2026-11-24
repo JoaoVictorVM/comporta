@@ -197,6 +197,8 @@ type gatewayOptions struct {
 	// adjusts the worker.
 	alerts       bool
 	alertOptions func(*alerts.Options)
+	// alertsIdle builds the worker without running it, for tests that step it.
+	alertsIdle bool
 }
 
 func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gatewayOptions) *gateway {
@@ -317,7 +319,10 @@ func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gat
 			options.alertOptions(&settings)
 		}
 		alertWorker = alerts.New(settings)
-		workers = append(workers, configEvents.Run, alertWorker.Run)
+		workers = append(workers, configEvents.Run)
+		if !options.alertsIdle {
+			workers = append(workers, alertWorker.Run)
+		}
 	}
 	var observer *telemetry.Service
 	if options.telemetry != nil {

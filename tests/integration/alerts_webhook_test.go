@@ -202,9 +202,9 @@ func TestRetriesResumeAfterRestart(t *testing.T) {
 		}
 		return http.StatusNoContent
 	})
-	// The gateway's own worker stays parked: this test plays two worker lives
+	// The gateway's own worker never runs: this test plays two worker lives
 	// over the same store.
-	g := startAlertGateway(t, h, "[50, 80, 100]", gatewayOptions{alertOptions: func(o *alerts.Options) { o.Poll, o.Bus = time.Hour, nil }}, fakeprovider.Options{})
+	g := startAlertGateway(t, h, "[50, 80, 100]", gatewayOptions{alertsIdle: true}, fakeprovider.Options{})
 	rejectReload(t, g)
 	ctx := context.Background()
 	first := alerts.New(alerts.Options{Store: g.usage, Source: g.config, Logger: slog.New(slog.DiscardHandler)})
