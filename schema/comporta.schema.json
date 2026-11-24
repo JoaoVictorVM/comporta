@@ -251,18 +251,18 @@
       "properties": {
         "channels": {
           "type": "object",
-          "description": "Alert channels by name. A channel is enabled by being present.",
+          "description": "Alert channels by name. A channel is enabled by being present. The name is its identity: renaming creates another channel, and a pending delivery of a removed channel or of a channel whose type changed is canceled.",
           "propertyNames": {"pattern": "^[a-z0-9-]{1,40}$"},
           "additionalProperties": {"$ref": "#/$defs/alertChannel"}
         },
         "thresholds": {
           "type": "array",
-          "description": "Budget percentages, strictly increasing. Default: [50, 80, 100].",
+          "description": "Budget percentages, strictly increasing, that alert once per window when the confirmed spend of an app or user budget reaches them. Default: [50, 80, 100].",
           "items": {"type": "integer", "minimum": 1, "maximum": 100},
           "uniqueItems": true
         },
-        "anomaly_multiplier": {"$ref": "#/$defs/positiveInteger", "description": "Default: 5."},
-        "anomaly_min_usd": {"$ref": "#/$defs/nonNegativeMoney", "description": "Default: 0.50."}
+        "anomaly_multiplier": {"$ref": "#/$defs/positiveInteger", "description": "An anomaly alerts when an app's last hour of spend is greater than this multiple of its 7-day hourly average. Default: 5."},
+        "anomaly_min_usd": {"$ref": "#/$defs/nonNegativeMoney", "description": "Minimum spend in the last hour for an anomaly to alert. Default: 0.50."}
       }
     },
     "alertChannel": {
@@ -272,10 +272,10 @@
           "additionalProperties": false,
           "required": ["type"],
           "properties": {
-            "type": {"const": "webhook"},
-            "url": {"$ref": "#/$defs/secretRef"},
+            "type": {"const": "webhook", "description": "Generic webhook: POST of the JSON payload signed with X-Comporta-Signature (HMAC-SHA256 over timestamp, a dot and the body) and X-Comporta-Timestamp."},
+            "url": {"$ref": "#/$defs/secretRef", "description": "Receiver URL, treated as a secret. Plain http only for localhost, loopback or private IP literals."},
             "url_file": {"$ref": "#/$defs/secretFile"},
-            "signing_secret": {"$ref": "#/$defs/secretRef"},
+            "signing_secret": {"$ref": "#/$defs/secretRef", "description": "HMAC key shared with the receiver."},
             "signing_secret_file": {"$ref": "#/$defs/secretFile"}
           },
           "allOf": [
@@ -288,8 +288,8 @@
           "additionalProperties": false,
           "required": ["type"],
           "properties": {
-            "type": {"enum": ["discord", "slack"]},
-            "url": {"$ref": "#/$defs/secretRef"},
+            "type": {"enum": ["discord", "slack"], "description": "Incoming webhook with a formatted message."},
+            "url": {"$ref": "#/$defs/secretRef", "description": "Incoming webhook URL, treated as a secret."},
             "url_file": {"$ref": "#/$defs/secretFile"}
           },
           "oneOf": [{"required": ["url"]}, {"required": ["url_file"]}]
@@ -300,9 +300,9 @@
           "required": ["type", "server_url", "topic"],
           "properties": {
             "type": {"const": "ntfy"},
-            "server_url": {"type": "string", "description": "Server URL without credentials, query or fragment."},
-            "topic": {"type": "string", "minLength": 1},
-            "token": {"$ref": "#/$defs/secretRef"},
+            "server_url": {"type": "string", "description": "ntfy server URL, public or self-hosted, without credentials, query or fragment. Plain http only for localhost, loopback or private IP literals."},
+            "topic": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$", "description": "Topic to publish to: 1 to 64 ASCII letters, digits, underscores or hyphens."},
+            "token": {"$ref": "#/$defs/secretRef", "description": "Optional access token, sent as a bearer token."},
             "token_file": {"$ref": "#/$defs/secretFile"}
           },
           "not": {"required": ["token", "token_file"]}

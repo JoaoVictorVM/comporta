@@ -127,11 +127,18 @@ apps:
 cache:
   max_bytes: 256000000
 
+# Every alert goes once to every channel below. Budget thresholds alert once
+# per window; loop cuts, fallback bursts, anomalies, rejected reloads and
+# fail_open alert at most once per app every 15 minutes. URLs and tokens are
+# secrets: they come from the environment or from files, never from this file.
 alerts:
   thresholds: [50, 80, 100]
   anomaly_multiplier: 5
   anomaly_min_usd: 0.50
   channels:
+    # Signed JSON: verify X-Comporta-Signature over the timestamp, a dot and
+    # the body, reject timestamps older than 5 minutes and deduplicate on
+    # X-Comporta-Delivery-ID.
     ops-webhook:
       type: webhook
       url: ${ALERT_WEBHOOK_URL}
@@ -142,9 +149,10 @@ alerts:
     ops-slack:
       type: slack
       url_file: /run/secrets/slack-webhook
+    # The public ntfy server or a self-hosted one.
     ops-ntfy:
       type: ntfy
-      server_url: https://ntfy.sh
+      server_url: https://ntfy.example.com
       topic: comporta-alerts
       token: ${NTFY_TOKEN}
 

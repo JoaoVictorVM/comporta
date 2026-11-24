@@ -165,7 +165,8 @@ func (s *Service) attempt(ctx context.Context, d storage.AlertDelivery) storage.
 	return s.classify(d, r, err)
 }
 
-func zonesOf(snapshot *config.Snapshot) Zones {
+// SnapshotZones resolves the budget timezone of each app in a snapshot.
+func SnapshotZones(snapshot *config.Snapshot) Zones {
 	return func(app string) string {
 		if a, ok := snapshot.App(app); ok && a.Timezone != "" {
 			return a.Timezone
@@ -178,7 +179,7 @@ func zonesOf(snapshot *config.Snapshot) Zones {
 }
 
 func (s *Service) outbound(snapshot *config.Snapshot, d storage.AlertDelivery, channel config.AlertChannel, p Payload) (outbound, bool) {
-	zones := zonesOf(snapshot)
+	zones := SnapshotZones(snapshot)
 	switch channel.Type {
 	case config.AlertWebhook:
 		target, ok := snapshot.AlertSecret(d.Channel, "url")
