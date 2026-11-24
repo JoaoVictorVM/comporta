@@ -252,7 +252,7 @@ func TestMigration0005PreservesHistoryAndDefaultsSavings(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if v, err := checkSchema(ctx, s.db); err != nil || v != 5 {
+	if v, err := checkSchema(ctx, s.db); err != nil || v != latest() {
 		t.Fatalf("version %d %v", v, err)
 	}
 	if n := count(t, s, `SELECT count(*) FROM requests WHERE cache_saved_microusd=0 AND downgrade_saved_microusd=0`); n != 1 {
