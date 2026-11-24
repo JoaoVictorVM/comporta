@@ -96,8 +96,11 @@ func New(o Options) *Service {
 		metrics = noMetrics{}
 	}
 	client := o.Client
+	if client == nil {
+		client = NewClient()
+	}
 	if o.Version == "" {
-		o.Version = "dev"
+		o.Version = buildVersion()
 	}
 	return &Service{o: o, evaluator: Evaluator{Store: o.Store}, client: client, logger: o.Logger, metrics: metrics, healthy: true}
 }
@@ -242,8 +245,9 @@ func (s *Service) EvaluateAnomalies(ctx context.Context, at time.Time) error {
 	})
 }
 
-// Run is the supervised worker: it keeps running until ctx ends. Store
-// failures make it unhealthy, never fatal.
+// Run is the supervised worker: it keeps running until ctx ends, then lets
+// deliveries in flight finish within ShutdownGrace and returns the rest of
+// its claims to pending. Store failures make it unhealthy, never fatal.
 func (s *Service) Run(ctx context.Context) error {
 	wake := make(chan struct{}, 1)
 	if s.o.Bus != nil {
@@ -257,6 +261,8 @@ func (s *Service) Run(ctx context.Context) error {
 			}
 		}()
 	}
+	pool := newPool(MaxConcurrent)
+	defer pool.shutdown(s.o.After, ShutdownGrace)
 	nextAnomaly := s.o.Now().Truncate(AnomalyStep).Add(AnomalyStep)
 	var nextBudget, nextRetention time.Time
 	for {
@@ -281,6 +287,7 @@ func (s *Service) Run(ctx context.Context) error {
 				break
 			}
 		}
+		s.deliverDue(ctx, pool)
 		if backlog, err := s.o.Store.AlertBacklog(ctx, now); err == nil {
 			s.metrics.AlertBacklog(backlog)
 		}
@@ -288,6 +295,7 @@ func (s *Service) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-wake:
+		case <-pool.idle():
 		case <-s.o.After(s.o.Poll):
 		}
 	}
