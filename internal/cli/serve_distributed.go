@@ -168,6 +168,9 @@ func serveDistributed(ctx context.Context, out streams, logger *slog.Logger, man
 		h.OutboxAge, h.OutboxPending, _ = sql.OldestPending(ctx)
 		return h
 	}))
+	// Every replica evaluates and delivers alerts from the shared store; claims
+	// and unique keys keep them from repeating an alert or a call.
+	alertWorker := newAlerts(sql, manager, &sql.Bus, logger, observer)
 	loopGuard := distributed.NewLoopGuard(redis, manager, identity.Derive("comporta:loop-signature:v1"), logger)
 	loop := &proxy.LoopStage{Guard: loopGuard, Source: manager, Recorder: accounting}
 	sensitive := &proxy.SensitiveStage{Scanner: sensitivedata.NewScanner(), Recorder: accounting}
@@ -190,6 +193,7 @@ func serveDistributed(ctx context.Context, out streams, logger *slog.Logger, man
 	panelHandler := panel.NewHandler(panel.HandlerOptions{
 		Service: panel.NewService(panel.Options{
 			Store: sql, Config: manager, Pause: adminService, Identity: identity, History: coordinator.History(), Logger: logger, CursorKey: cursorKey,
+			Alerts: alertReader{store: sql, source: manager},
 		}),
 		Views: ui.Views{}, Credential: credential, Sessions: sessions, Guard: adminGuard, Live: live, Logger: logger,
 	})
@@ -206,7 +210,7 @@ func serveDistributed(ctx context.Context, out streams, logger *slog.Logger, man
 		panel: panelHandler, live: live,
 		ready:   lifecycle.Ready,
 		onDrain: lifecycle.Drain, drainNotice: drainNotice,
-		extra: []server.Worker{configEvents.Run, lifecycle.Run, cacheWorker, observer.Run, eventsWorker},
+		extra: []server.Worker{configEvents.Run, lifecycle.Run, cacheWorker, observer.Run, eventsWorker, alertWorker.Run},
 	})
 }
 

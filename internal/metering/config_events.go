@@ -31,6 +31,11 @@ func (s *ConfigEvents) Publish(ctx context.Context, change config.Event) error {
 	e.Payload.Generation = change.Generation
 	e.Payload.Result = result
 	e.Payload.Changes = append([]config.Change(nil), change.Changes...)
+	if kind == events.ConfigReloadFailed {
+		// Only the number of diagnostics travels: their text can quote rejected
+		// values, which no alert may carry.
+		e.Payload.Count = int64(len(change.Errors))
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

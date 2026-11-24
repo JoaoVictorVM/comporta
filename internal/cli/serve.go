@@ -112,6 +112,9 @@ func newServeCommand(out streams) *cobra.Command {
 			defer observer.Close()
 			accounting.UseTelemetry(observer)
 			eventsWorker := func(ctx context.Context) error { return observer.RunEvents(ctx, &store.Bus) }
+			// Alerts read the durable inbox the store fills with every relevant event;
+			// the bus only wakes the worker, and delivery never blocks a request.
+			alertWorker := newAlerts(store, manager, &store.Bus, logger, observer)
 			// Pauses load before the listeners: a paused app never takes a request
 			// after a restart, and an unreadable state keeps the service down.
 			control := runtimecontrol.New(store)
@@ -148,6 +151,7 @@ func newServeCommand(out streams) *cobra.Command {
 			panelHandler := panel.NewHandler(panel.HandlerOptions{
 				Service: panel.NewService(panel.Options{
 					Store: store, Config: manager, Pause: adminService, Limits: coordinator, Identity: identity, History: store, Logger: logger,
+					Alerts: alertReader{store: store, source: manager},
 				}),
 				Views: ui.Views{}, Credential: credential, Sessions: sessions, Guard: adminGuard, Live: live, Logger: logger,
 			})
@@ -155,7 +159,7 @@ func newServeCommand(out streams) *cobra.Command {
 				keys: keyManager, keysRun: keyManager.Run, guard: auth.NewGuard(nil, logger), identity: identity, accounting: accounting, gate: control,
 				loop: loop, sensitive: sensitive, cache: cache, observer: observer, adminAPI: adminHandler, metrics: adminHandler.Metrics(observer),
 				panel: panelHandler, live: live,
-				extra: []server.Worker{configEvents.Run, coordinator.Run, guard.Run, cacheWorker, observer.Run, eventsWorker},
+				extra: []server.Worker{configEvents.Run, coordinator.Run, guard.Run, cacheWorker, observer.Run, eventsWorker, alertWorker.Run},
 			})
 			if err != nil {
 				return err

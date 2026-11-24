@@ -347,6 +347,11 @@ func limitCode(v limits.Violation) proxy.Code {
 // refuse answers a limit violation with 429 and records it as a local block.
 func (s *Service) refuse(r storage.Record, now time.Time, v limits.Violation) (proxy.Admission, *proxy.Rejection, bool) {
 	code := limitCode(v)
+	r.BlockLimitName, r.BlockScope, r.BlockRenewsAt = v.LimitName, string(v.Scope), nil
+	if v.RenewsAt != nil {
+		renew := v.RenewsAt.UTC()
+		r.BlockRenewsAt = &renew
+	}
 	s.block(r, now, 429, string(code), string(proxy.ClassRateLimit), string(v.Reason))
 	rejection := &proxy.Rejection{Status: 429, Code: code, Class: proxy.ClassRateLimit, Message: limits.Message(v, r.AppName, now),
 		Limit: &proxy.LimitDetail{LimitName: v.LimitName, Scope: string(v.Scope), Reason: string(v.Reason), RenewsAt: v.RenewsAt}}

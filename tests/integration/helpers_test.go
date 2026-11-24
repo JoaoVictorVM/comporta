@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JoaoVictorVM/comporta/internal/alerts"
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/fakeprovider"
@@ -94,6 +95,7 @@ type gateway struct {
 	loop       *loopguard.Manager
 	cache      *responsecache.Cache
 	telemetry  *telemetry.Service
+	alerts     *alerts.Service
 	userHeader string
 	handler    *proxy.Handler
 	t          testing.TB
@@ -190,6 +192,13 @@ type gatewayOptions struct {
 	telemetry *telemetry.Options
 	// admin replaces the admin surface, for tests of the scrape endpoint.
 	admin func(*gateway) http.Handler
+	// alerts runs the alert worker over the usage store, as serve does, with
+	// the configuration events of every reload; it needs metered. alertOptions
+	// adjusts the worker.
+	alerts       bool
+	alertOptions func(*alerts.Options)
+	// alertsIdle builds the worker without running it, for tests that step it.
+	alertsIdle bool
 }
 
 func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gatewayOptions) *gateway {
@@ -230,7 +239,12 @@ func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gat
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := config.NewManager(config.ManagerOptions{Path: path})
+	configEvents := &metering.ConfigEvents{Logger: slog.New(slog.DiscardHandler)}
+	var sink config.ChangeSink
+	if options.alerts {
+		sink = configEvents
+	}
+	manager, err := config.NewManager(config.ManagerOptions{Path: path, Sink: sink})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,6 +311,19 @@ func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gat
 			return cache.Run(ctx, func() responsecache.Settings { return responsecache.FromSnapshot(manager.Capture()) })
 		})
 	}
+	var alertWorker *alerts.Service
+	if options.alerts && metered {
+		configEvents.Publisher = usage
+		settings := alerts.Options{Store: usage, Source: manager, Bus: &usage.Bus, Logger: slog.New(slog.DiscardHandler)}
+		if options.alertOptions != nil {
+			options.alertOptions(&settings)
+		}
+		alertWorker = alerts.New(settings)
+		workers = append(workers, configEvents.Run)
+		if !options.alertsIdle {
+			workers = append(workers, alertWorker.Run)
+		}
+	}
 	var observer *telemetry.Service
 	if options.telemetry != nil {
 		settings := *options.telemetry
@@ -315,7 +342,7 @@ func startConfiguredGateway(t testing.TB, fake fakeprovider.Options, options gat
 	authHTTP := auth.NewHTTP(keyManager, auth.NewAuthenticator(keyManager, nil), auth.NewGuard(nil, nil))
 	handler := proxy.NewHandler(proxy.Options{Auth: authHTTP, Sink: results, Identity: identity, Hooks: hooks, Accounting: accountant, Loop: stage, Sensitive: inspection, Source: manager, Cache: cache, Telemetry: observer})
 	built := &gateway{
-		usage: usage, accounting: accounting, limits: coordinator, loop: guard, cache: cache, telemetry: observer,
+		usage: usage, accounting: accounting, limits: coordinator, loop: guard, cache: cache, telemetry: observer, alerts: alertWorker,
 		handler: handler, t: t, path: path, dir: dir, config: manager, store: store, keyManager: keyManager,
 		identity: identity, results: results, upstream: upstream, requests: requests, baseYAML: text,
 	}

@@ -1,2 +1,4 @@
 # Synthetic admin token used by a CLI test, already in published history.
 86834ab37a27e01d350b2bbfdb545230c7ad0ffc:internal/cli/admin_test.go:generic-api-key:15
+# Synthetic signing secret of an alert delivery test, already in published history.
+088c9dc546b877bed06e0899eb83237a97403ba7:internal/alerts/delivery_test.go:generic-api-key:81

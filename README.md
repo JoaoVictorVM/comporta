@@ -2,9 +2,9 @@
 
 Open-source LLM gateway, in development.
 
-**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, sensitive data detection with redaction and blocking, limit policies (block, downgrade and warn, allowed models and output caps), fallback routing across a chain of models of the same API format, an exact-match response cache in memory, operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API, a read-only admin panel with live updates, and observability: Prometheus metrics on the admin listener, optional OpenTelemetry traces and a Compose profile with Prometheus, Grafana and Jaeger. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
+**Current state:** this repository delivers the configuration runtime, the app key lifecycle, the request proxy, usage metering, per-app and per-user limits and budgets, a loop guard for runaway agents, sensitive data detection with redaction and blocking, limit policies (block, downgrade and warn, allowed models and output caps), fallback routing across a chain of models of the same API format, an exact-match response cache in memory, operator commands (pause, resume, user deletion and usage queries) through an authenticated admin API, a read-only admin panel with live updates, alerts to signed webhooks, Discord, Slack and ntfy, and observability: Prometheus metrics on the admin listener, optional OpenTelemetry traces and a Compose profile with Prometheus, Grafana and Jaeger. `comporta serve` opens the proxy and admin listeners and forwards SDK traffic to the configured providers, with authentication, streaming, hot reload and a built-in fake provider.
 
-**Not implemented yet:** alerts and fallback to a model of another API format. Their settings are validated and made available **without taking effect**, so do not rely on them as protection.
+**Not implemented yet:** fallback to a model of another API format. Its settings are validated and made available **without taking effect**, so do not rely on it as protection.
 
 ## Commands
 
@@ -169,7 +169,7 @@ Every other path or method returns 404 `endpoint not allowed by Comporta`, witho
 
 Each provider call produces a private SQLite record with counters, timing, categories and the user's app-scoped pseudonym, never content, raw user identifiers, request digests or raw errors. A counter the provider did not report stays unknown. Observed counters are preserved even when the final cost must use a conservative estimate. `count_tokens` has its own operation and advisory counter, with zero generation cost and zero consumption tokens. Listing models is free and creates no consumption.
 
-Prompts and responses stay in memory for the duration of the request and are not logged, and no option enables logging them. A privacy test sends marked prompts and identifiers through the gateway, including error paths, and fails if a marker appears in logs, answers built by the gateway, results, database artifacts or generated files. It requires nonempty persisted usage, aggregates and events and scans the DB/WAL before and after recovery. [`tests/privacy/coverage.json`](tests/privacy/coverage.json) tracks these channels and the future metrics, traces and alert consumers.
+Prompts and responses stay in memory for the duration of the request and are not logged, and no option enables logging them. A privacy test sends marked prompts and identifiers through the gateway, including error paths, and fails if a marker appears in logs, answers built by the gateway, results, database artifacts or generated files. It requires nonempty persisted usage, aggregates and events and scans the DB/WAL before and after recovery. [`tests/privacy/coverage.json`](tests/privacy/coverage.json) tracks these channels, including the metrics, the traces and the bodies delivered to alert receivers.
 
 ### Prices and estimated cost
 
@@ -249,7 +249,7 @@ Every refusal before an attempt is stored as a blocked record with attempt 0, ze
 
 **Clock and reload:** a wall clock that moves back more than 5 seconds logs a warning, at most one every 30 seconds; windows keep monotonic time and a closed budget window is never reopened, including after a restart with an earlier clock. A new ceiling applies to new admissions and keeps what was spent and reserved; removing a limit and adding it back keeps the history. A call that started under an older configuration generation than one the coordinator already applied is admitted again under the current one. A new timezone takes effect when the active windows of the configured budgets end, and the window then in force starts with the spending of the old windows it overlaps; the limit state reports the active and pending timezone.
 
-**Fail modes:** with `fail_closed`, the default, a call is refused with 503 when limit state cannot be read or written, for example when a checkpoint fails or a failed settlement also fails its retry. With `fail_open` the call proceeds, its record is marked degraded, limits are still evaluated from memory, and a `limit_state_unavailable` event (severity warning, per app) and a log warning are emitted; `limit_state_recovered` follows once state is persisted again. `fail_open` never bypasses the usage journal: if usage cannot be admitted durably the call gets 503 `usage_storage_unavailable`. Arithmetic overflow and integrity failures never fail open. Delivery of these events to Slack or webhooks belongs to the alerts feature.
+**Fail modes:** with `fail_closed`, the default, a call is refused with 503 when limit state cannot be read or written, for example when a checkpoint fails or a failed settlement also fails its retry. With `fail_open` the call proceeds, its record is marked degraded, limits are still evaluated from memory, and a `limit_state_unavailable` event (severity warning, per app) and a log warning are emitted; `limit_state_recovered` follows once state is persisted again. `fail_open` never bypasses the usage journal: if usage cannot be admitted durably the call gets 503 `usage_storage_unavailable`. Arithmetic overflow and integrity failures never fail open. For apps in `fail_open`, the per-app event is also delivered as an alert, see [Alerts](#alerts).
 
 **Guarantee and its limits:** admissions are serialized with their reservations, so when real usage stays within the reservation, concurrent calls cannot overrun a budget. A test fires 500 simultaneous calls at one budget in 100 consecutive rounds against SQLite and the fake provider and checks that spend never exceeds the budget by more than the largest single reservation; on the reference Windows machine every round stayed within the budget. When a provider reports more usage than estimated, the real cost is charged and the budget then refuses new calls, but several calls in flight that all exceed their estimate can together exceed the budget by more than one reservation; a test demonstrates this case. `fail_open` also suspends the guarantee while degraded. Token estimation is a heuristic, not a tokenizer.
 
@@ -384,7 +384,7 @@ The per-minute variant reads `loop detected: more than 60 requests in 60s; ...`.
 | `loop_guard_unavailable` | 503 | The guard reached its internal memory ceiling (100,000 users or 1,000,000 recorded arrivals); no protected user is evicted to make room |
 | `usage_storage_unavailable` | 503 | The cut could not be recorded; the user stays in cooldown and nothing is forwarded |
 
-**Records and events:** every cut request is stored with outcome `loop_cut`, attempt 0, status 429, zero cost and no reservation; it never enters the daily totals or the budgets. The first cut of an episode also writes one `loop_cut` event, in the same transaction, with the app, the user hash, the anonymous flag, the reason (`similar_requests` or `request_rate`), the count (11 or 61), the window and the cooldown in milliseconds. Retries in the same episode add records but no event. The event is announced to subscribers only after it is committed. Alert delivery for these events belongs to the alerts feature.
+**Records and events:** every cut request is stored with outcome `loop_cut`, attempt 0, status 429, zero cost and no reservation; it never enters the daily totals or the budgets. The first cut of an episode also writes one `loop_cut` event, in the same transaction, with the app, the user hash, the anonymous flag, the reason (`similar_requests` or `request_rate`), the count (11 or 61), the window and the cooldown in milliseconds. Retries in the same episode add records but no event. The event is announced to subscribers only after it is committed. The first cut of each app in every 15 minutes is also delivered as an alert, see [Alerts](#alerts).
 
 **Memory only:** signatures and arrival times live in memory for at most their window and are never written to disk, logs, events or errors; a cut drops them at once. A restart clears all counters and cooldowns, so the guard complements budgets, which persist, and does not replace them. A configuration reload applies to the next request: disabling an app clears its state, including cooldowns; changing thresholds or windows discards the counts but keeps cooldowns already running; changing only the cooldown affects new cuts. `comporta users forget` clears the user's counters and cooldowns once the deletion has committed, and keeps them if it fails.
 
@@ -454,6 +454,51 @@ go test ./internal/sensitivedata -run '^TestCorpusReport$' -count=1 -args -detec
 The test suite fails when the published report no longer matches the corpus and the rules. On the current corpus every positive case is found; the false positive rates per document are 0 for cpf, cnpj and secret, 9.1% for card, 7.1% for email, 8.0% for phone and 12.5% for pix, all of them on the ambiguous negatives the corpus labels on purpose (order numbers that pass Luhn, protocol numbers shaped like phones, file names like `foto@2x.png`, UUIDs used as trace IDs). The corpus is synthetic and was written knowing the rules, so these numbers describe the rules, not production traffic.
 
 **Performance:** on an Intel Core i5-9400F (6 cores) under Windows with Go 1.26.11, the scan alone takes about 0.9 ms on a 400 KB prompt without matches in detect mode, and about 7 ms on 400 KB packed with malformed or real candidates (`go test ./internal/sensitivedata -run XXX -bench .`). The end-to-end scenario in `tests/integration/sensitive_bench_test.go` sends the same 400,000-byte request, with one email and one CPF in it, sequentially to one gateway with every category `off` and then in `detect`, so detect also pays the synchronous commit of its event. Five repetitions of 1,000 requests per mode on that machine measured a p50 of about 17.5 ms off and 22.3 ms in detect, and p95 differences between -18 ms and +67 ms: the SQLite commits of that disk vary more than the scan costs. The worst p95 increase, 67 ms, is far from the 5 ms criterion, and this is not the reference benchmark, so the default stays `off`. Reproduce it with `COMPORTA_SENSITIVE_BENCH=1 go test ./tests/integration -run '^TestSensitiveLatencyScenario$' -count=1 -timeout 60m`; the defaults are five repetitions of 10,000 requests, and `COMPORTA_SENSITIVE_BENCH_OUT` writes the result as JSON.
+
+### Alerts
+
+Comporta tells you about spend and protection events through the channels you configure, outside the request path: a slow or broken receiver never delays, blocks or fails a request.
+
+```yaml
+alerts:
+  thresholds: [50, 80, 100]      # default; budget percentages, strictly increasing
+  anomaly_multiplier: 5          # default
+  anomaly_min_usd: 0.50          # default
+  channels:
+    ops-webhook:
+      type: webhook
+      url: ${ALERT_WEBHOOK_URL}
+      signing_secret_file: /run/secrets/alert-signing
+    ops-discord:
+      type: discord
+      url: ${DISCORD_WEBHOOK_URL}
+    ops-slack:
+      type: slack
+      url_file: /run/secrets/slack-webhook
+    ops-ntfy:
+      type: ntfy
+      server_url: https://ntfy.example.com   # the public server or a self-hosted one
+      topic: comporta-alerts
+      token: ${NTFY_TOKEN}                   # optional
+```
+
+Every alert goes once to every channel. The triggers:
+
+| Trigger | When | Deduplication |
+|---|---|---|
+| `budget_threshold` | The confirmed spend of an app budget, or of one user's per-user budget, reaches a threshold. A jump past several thresholds sends each of them | Once per app, scope, user, dimension, window and threshold |
+| `hard_cap` | A request is refused by a hard cap | Once per app, scope, user, dimension and window |
+| `anomaly` | The last hour's spend of an app is at least `anomaly_min_usd` and greater than `anomaly_multiplier` times its 7-day hourly average (hours without spend count as zero). Evaluated every 5 minutes | Once per app every 15 minutes |
+| `loop_cut` | The loop guard cuts a user's requests | Once per app every 15 minutes |
+| `fallback_burst` | At least 5 fallbacks of one app in 5 minutes | Once per app every 15 minutes |
+| `config_reload_failed` | A changed configuration file is rejected | Once every 15 minutes |
+| `fail_open` | Limit state cannot be verified for an app whose fail mode is `fail_open` | Once per app every 15 minutes |
+
+Discord and Slack receive a formatted message such as `⚠️ bot-discord reached 80% of its daily budget ($1.60 of $2.00). Renews at 00:00.`, in the budget's timezone; ntfy receives `Comporta: loop cut in bot-discord (user u_9f2c4f…, 10 repeats in 30s)`. The generic webhook receives the JSON payload, signed: `X-Comporta-Signature` is `sha256=` followed by the HMAC-SHA256, in lowercase hex, of `X-Comporta-Timestamp`, a dot and the exact body. Receivers should compare in constant time, reject timestamps more than 5 minutes away and deduplicate on `X-Comporta-Delivery-ID`.
+
+Alerts carry metadata only: app names, closed categories, amounts, times and, for user budgets and loop cuts, the user's pseudonym (abbreviated in chat messages). Never prompts, responses, raw user IDs, keys, URLs, configuration values or external error messages.
+
+A delivery that fails with a timeout, a connection error, 408, 425, 429 or 5xx is retried three times, after at least 2, 8 and 32 seconds (or the receiver's `Retry-After`, up to 5 minutes); other answers, redirects included, fail at once. Alerts survive restarts: the evaluation queue and the deliveries live in the usage store, so a restart resumes pending retries and never repeats an alert already confirmed. Removing a channel, or changing its type, cancels its pending deliveries; a new URL or token is used from the next attempt on. See [docs/alerts.md](docs/alerts.md) for the payload, the verification of signatures, multiple instances and operation.
 
 ### End users
 
@@ -554,7 +599,7 @@ Open `/login` and paste the admin token. The form posts it in the body, never in
 
 | Screen | Shows |
 |---|---|
-| Overview | Estimated cost today and this month, requests and tokens today, one bar per app against its daily and monthly budget, estimated savings from cache and downgrade, the last 10 alerts (once alerts exist) and a red banner for paused apps or the global pause |
+| Overview | Estimated cost today and this month, requests and tokens today, one bar per app against its daily and monthly budget, estimated savings from cache and downgrade, the last 10 alerts and a red banner for paused apps or the global pause |
 | Apps | Every app with its policy, main model, cost and tightest limit; per app, each limit with used, reserved, ceiling and `renews in`, the active and pending timezone, the model mix and the top 10 user pseudonyms by cost this month |
 | Users | A search box that hashes the typed ID for every app, current or removed, and shows the pseudonym, today's cost, each per-user limit and the month's history. The anonymous bucket has its own control |
 | Requests | The latest 500 attempts, newest first, 50 per page, filtered by app, user, model and outcome (`ok`, `blocked`, `cached`, `fallback`, `downgraded`, `loop_cut`); a row opens its metadata |

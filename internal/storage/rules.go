@@ -48,6 +48,11 @@ func ValidateRecord(r Record) error {
 	default:
 		return ErrInvalid
 	}
+	if r.BlockLimitName != "" || r.BlockScope != "" || r.BlockRenewsAt != nil {
+		if r.AttemptIndex != 0 || r.Outcome != "blocked" || !policyLimitName.MatchString(r.BlockLimitName) || (r.BlockScope != "app" && r.BlockScope != "user") {
+			return ErrInvalid
+		}
+	}
 	if r.Detections != nil && (len(r.Detections) == 0 || r.Detections.Validate() != nil) {
 		return ErrInvalid
 	}

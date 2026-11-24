@@ -238,6 +238,9 @@ func TestAlertAndTelemetryRules(t *testing.T) {
 	requireDiagnostic(t, channel("      type: ntfy\n      server_url: http://ntfy.example\n      topic: t\n"), CodeInvalidValue, "alerts.channels.ops.server_url")
 	requireDiagnostic(t, channel("      type: ntfy\n      server_url: https://u:p@ntfy.example\n      topic: t\n"), CodeInvalidValue, "alerts.channels.ops.server_url")
 	requireDiagnostic(t, channel("      type: ntfy\n      server_url: https://ntfy.example\n"), CodeInvalidValue, "alerts.channels.ops.topic")
+	requireDiagnostic(t, channel("      type: ntfy\n      server_url: https://ntfy.example\n      topic: ../admin\n"), CodeInvalidValue, "alerts.channels.ops.topic")
+	requireDiagnostic(t, channel("      type: ntfy\n      server_url: https://ntfy.example\n      topic: "+strings.Repeat("t", 65)+"\n"), CodeInvalidValue, "alerts.channels.ops.topic")
+	requireValid(t, channel("      type: ntfy\n      server_url: http://127.0.0.1:8090\n      topic: comporta_Alerts-1\n"))
 	requireDiagnostic(t, channel("      type: ntfy\n      server_url: https://ntfy.example\n      topic: t\n      token: literal\n"), CodeLiteralSecret, "alerts.channels.ops.token")
 
 	requireDiagnostic(t, baseYAML+"alerts: {thresholds: [80, 50]}\n", CodeInvalidValue, "alerts.thresholds[1]")

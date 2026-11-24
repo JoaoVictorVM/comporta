@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -409,15 +410,25 @@ func validateHardCap(budget Budget, hardCap *Budget, path string, derive bool, d
 	checkInt("tokens_per_month", budget.TokensPerMonth, &hardCap.TokensPerMonth)
 }
 
+// ntfyTopic is a single safe path segment: the topic travels as a JSON field,
+// but a receiver may still route on it.
+var ntfyTopic = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
 func validateAlerts(cfg *Config, d *decoder) {
 	for _, name := range slices.Sorted(maps.Keys(cfg.Alerts.Channels)) {
 		channel := cfg.Alerts.Channels[name]
-		if channel.Type != AlertNtfy || channel.ServerURL == "" {
+		if channel.Type != AlertNtfy {
 			continue
 		}
-		path := joinPath(joinPath("alerts.channels", name), "server_url")
+		base := joinPath("alerts.channels", name)
+		if channel.Topic != "" && !ntfyTopic.MatchString(channel.Topic) {
+			d.reportAt(CodeInvalidValue, joinPath(base, "topic"), "must be 1 to 64 ASCII letters, digits, underscores or hyphens")
+		}
+		if channel.ServerURL == "" {
+			continue
+		}
 		if _, problem := checkEndpoint(channel.ServerURL, false); problem != "" {
-			d.reportAt(CodeInvalidValue, path, problem)
+			d.reportAt(CodeInvalidValue, joinPath(base, "server_url"), problem)
 		}
 	}
 }

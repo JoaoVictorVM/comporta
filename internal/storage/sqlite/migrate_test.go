@@ -231,7 +231,7 @@ func TestPolicyMigrationPreservesConfigChangesAndOpenJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if v, err := checkSchema(context.Background(), s.db); err != nil || v != latest() || latest() != 5 {
+	if v, err := checkSchema(context.Background(), s.db); err != nil || v != latest() || latest() != 6 {
 		t.Fatalf("version %d %v", v, err)
 	}
 	for query, want := range map[string]int{

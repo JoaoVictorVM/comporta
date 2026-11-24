@@ -36,6 +36,12 @@ type Record struct {
 	// pending reservations. Absent in older records, they read as false and empty.
 	LimitsDegraded bool   `json:",omitempty"`
 	BlockReason    string `json:",omitempty"`
+	// BlockLimitName, BlockScope and BlockRenewsAt name the ceiling that refused
+	// a request locally, so a hard cap alert can tell which window was hit. Only
+	// limit refusals carry them; older records read as empty.
+	BlockLimitName string     `json:",omitempty"`
+	BlockScope     string     `json:",omitempty"`
+	BlockRenewsAt  *time.Time `json:",omitempty"`
 	// Detections is the safe summary of the request's sensitive data inspection.
 	// Absent when nothing matched and in records written before inspection existed.
 	Detections sensitivedata.Summary `json:",omitempty"`

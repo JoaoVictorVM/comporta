@@ -38,7 +38,9 @@
     "internal/proxy/cache_test.go",
     "internal/proxy/cache_bench_test.go",
     "tests/integration/limits_cache_test.go",
-    "tests/privacy/canary_cache_test.go"
+    "tests/privacy/canary_cache_test.go",
+    "tests/privacy/canary_alerts_test.go",
+    "tests/integration/alerts_webhook_test.go"
   ],
   "parser_only_go_files": [
     {
@@ -68,7 +70,7 @@
     "process/loop-cut",
     "process/sensitive-data",
     "process/limit-policies",
-    "process/fallback", "process/response-cache", "process/response-cache-shared", "process/response-cache-errors", "process/telemetry",
+    "process/fallback", "process/response-cache", "process/response-cache-shared", "process/response-cache-errors", "process/telemetry", "process/alerts",
     "pipeline/provider-receives-prompt",
     "pipeline/upstream-error-echo",
     "pipeline/stream-error-echo",
@@ -90,7 +92,7 @@
     {"name": "metrics", "status": "covered", "description": "Authenticated scrape of the admin listener: names, labels and values, compared with the stored user hashes"},
     {"name": "traces", "status": "covered", "description": "Raw OTLP/HTTP protobuf bodies received by a local collector, compared with the stored user hashes"},
     {"name": "panel", "status": "covered", "description": "Admin panel pages, fragments, search answers, request details, the live stream and the embedded assets, read with a session after marked traffic"},
-    {"name": "alerts", "status": "unavailable", "required_by": "alerts", "description": "Local webhook receiver: actual payloads"}
+    {"name": "alerts", "status": "covered", "description": "Local webhook and Slack receivers: actual bodies and headers of every alert delivered"}
   ],
   "jobs": {
     "test": "Go canary on Linux, Windows and macOS",
