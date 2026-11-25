@@ -1,0 +1,10 @@
+{
+  "id": "msg_01XYZ",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-4-5",
+  "content": [{"type": "text", "text": "Está ensolarado."}],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {"input_tokens": 20, "output_tokens": 6, "cache_read_input_tokens": 4, "cache_creation_input_tokens": 0}
+}

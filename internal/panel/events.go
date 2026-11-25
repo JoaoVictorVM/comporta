@@ -28,6 +28,7 @@ var EventTypes = []EventType{
 	{events.Paused, "Pause"},
 	{events.LimitStateUnavailable, "Limit state unavailable"},
 	{events.LimitStateRecovered, "Limit state recovered"},
+	{events.TranslationSkipped, "Translation skipped"},
 }
 
 func eventLabel(kind events.Type) (string, bool) {
@@ -130,6 +131,10 @@ func formatEvent(e events.Event) (EventRow, bool) {
 		if e.UserHash != "" {
 			row.User = ShortHash(e.UserHash)
 		}
+	case events.TranslationSkipped:
+		add("model", p.Model)
+		add("target", p.TargetFormat)
+		add("feature", p.Feature)
 	case events.Fallback:
 		add("from", p.FromModel)
 		add("to", p.ToModel)

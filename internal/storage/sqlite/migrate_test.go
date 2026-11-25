@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,7 +232,7 @@ func TestPolicyMigrationPreservesConfigChangesAndOpenJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if v, err := checkSchema(context.Background(), s.db); err != nil || v != latest() || latest() != 6 {
+	if v, err := checkSchema(context.Background(), s.db); err != nil || v != latest() || latest() != 7 {
 		t.Fatalf("version %d %v", v, err)
 	}
 	for query, want := range map[string]int{
@@ -288,5 +289,82 @@ func TestPolicyMigrationRollback(t *testing.T) {
 	}
 	if _, err = s.db.Exec(`INSERT INTO events(event_id,type,occurred_at,payload_json) VALUES('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','warned',1,'{}')`); err == nil {
 		t.Fatal("migration 0003 survived a later failure")
+	}
+}
+
+// schemaSixStore builds a database of the release before translation events,
+// holding an event of every kind that other tables depend on.
+func schemaSixStore(t *testing.T) string {
+	t.Helper()
+	migrateTarget = 6
+	defer func() { migrateTarget = 0 }()
+	dir := filepath.Join(t.TempDir(), "private")
+	s, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	changed := events.New(events.ConfigChanged, time.Now())
+	changed.Payload.Generation, changed.Payload.Result = 1, config.ResultInitial
+	fallback := events.NewFallback(time.Now(), strings.Repeat("a", 32), "bot", 2, "model-a", "model-b", "429")
+	for _, e := range []events.Event{changed, fallback} {
+		if err = s.Publish(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+func TestTranslationEventMigrationFromVersionSix(t *testing.T) {
+	s, err := Open(context.Background(), schemaSixStore(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if v, err := checkSchema(context.Background(), s.db); err != nil || v != 7 {
+		t.Fatalf("version %d %v", v, err)
+	}
+	skip := events.NewTranslationSkip(time.Now(), strings.Repeat("b", 32), "bot", 2, "gpt-4.1", "anthropic_messages", "openai_chat", "provider_beta")
+	if err := s.Publish(context.Background(), skip); err != nil {
+		t.Fatalf("the new type is refused: %v", err)
+	}
+	if err := s.Publish(context.Background(), skip); err != nil {
+		t.Fatalf("a repeated skip must confirm the same event: %v", err)
+	}
+	var alerts int
+	if err := s.db.QueryRow(`SELECT count(*) FROM alert_inputs WHERE event_id=?`, skip.ID).Scan(&alerts); err != nil || alerts != 0 {
+		t.Fatalf("a translation skip must not feed alerts: %d %v", alerts, err)
+	}
+}
+
+func TestTranslationEventMigrationPreservesDependencies(t *testing.T) {
+	s, err := Open(context.Background(), schemaSixStore(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for query, want := range map[string]int{
+		`SELECT count(*) FROM events`:         2,
+		`SELECT count(*) FROM config_changes`: 1,
+		`SELECT count(*) FROM alert_inputs`:   2,
+		`SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('ix_events_time','ix_events_app_type','ix_events_user','ix_alert_inputs_pending','ix_alert_inputs_lease')`: 5,
+		`SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name='tr_alert_inputs'`:                                                                                           1,
+		`SELECT count(*) FROM pragma_foreign_key_list('config_changes') WHERE "table"='events'`:                                                                                        1,
+		`SELECT count(*) FROM pragma_foreign_key_list('alert_inputs') WHERE "table"='events'`:                                                                                          1,
+	} {
+		var got int
+		if err := s.db.QueryRow(query).Scan(&got); err != nil || got != want {
+			t.Fatalf("%s = %d, want %d (%v)", query, got, want, err)
+		}
+	}
+	// Alerts still reach the queue for the types they always did.
+	again := events.NewFallback(time.Now(), strings.Repeat("c", 32), "bot", 2, "model-a", "model-b", "timeout")
+	if err := s.Publish(context.Background(), again); err != nil {
+		t.Fatal(err)
+	}
+	var queued int
+	if err := s.db.QueryRow(`SELECT count(*) FROM alert_inputs WHERE event_id=?`, again.ID).Scan(&queued); err != nil || queued != 1 {
+		t.Fatalf("trigger lost: %d %v", queued, err)
 	}
 }

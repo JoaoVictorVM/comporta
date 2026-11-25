@@ -50,6 +50,18 @@ const (
 	StageFallback     Stage = "fallback"
 	StageDeliver      Stage = "deliver"
 	StageSettle       Stage = "settle"
+	// StageTranslateRequest and StageTranslateResponse convert between the
+	// client's protocol and the provider's.
+	StageTranslateRequest  Stage = "translate_request"
+	StageTranslateResponse Stage = "translate_response"
+)
+
+// TranslationResult is the closed outcome of one protocol conversion.
+type TranslationResult string
+
+const (
+	TranslationOK     TranslationResult = "ok"
+	TranslationFailed TranslationResult = "failed"
 )
 
 // BlockType is the primary reason of a terminal refusal.
@@ -203,7 +215,7 @@ var (
 	blockTypes   = set(BlockRate, BlockConcurrency, BlockBudget, BlockHardCap, BlockReservation, BlockLoop, BlockSensitive, BlockPaused, BlockAuthentication, BlockValidation)
 	blockScopes  = set(ScopeApp, ScopeUser, ScopeRequest)
 	attempts     = set(AttemptOK, AttemptClientError, AttemptServerError, AttemptTransportError, AttemptCanceled)
-	stages       = set(StageAuthenticate, StageIdentity, StageValidate, StagePause, StageSensitive, StageLoopGuard, StageRoute, StageAdmit, StageCacheLookup, StageFallback, StageDeliver, StageSettle)
+	stages       = set(StageAuthenticate, StageIdentity, StageValidate, StagePause, StageSensitive, StageLoopGuard, StageRoute, StageAdmit, StageCacheLookup, StageFallback, StageDeliver, StageSettle, StageTranslateRequest, StageTranslateResponse)
 	components   = set(ComponentTracing, ComponentMetrics, ComponentAccounting, ComponentReload)
 	failures     = set(ReasonExportFailed, ReasonScrapeFailed, ReasonProviderInit, ReasonShutdownTimeout, ReasonStaleSnapshot, ReasonRetired, ReasonSettlementUnconfirmed, ReasonPricingFailed)
 	dropReasons  = set(DropQueueFull, DropExportFailed, DropReloadRetired, DropShutdownTimeout)

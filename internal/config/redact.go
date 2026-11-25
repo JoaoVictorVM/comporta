@@ -25,6 +25,9 @@ func publicTree(cfg *Config) map[string]any {
 			"models":          stringsToAny(provider.Models),
 			"tls_min_version": provider.TLSMinVersion,
 		}
+		if provider.APIFormat == FormatAnthropic {
+			entry["anthropic_version"] = provider.AnthropicVersion
+		}
 		addSecret(entry, "api_key", provider.APIKey)
 		providers[name] = entry
 	}

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -58,6 +59,7 @@ func (u *modelUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	u.bodies = append(u.bodies, body)
 	reply := u.replies[parsed.Model]
 	u.mu.Unlock()
+	r.Body = io.NopCloser(bytes.NewReader(body))
 	if reply == nil {
 		reply = answerJSON(parsed.Model)
 	}
@@ -174,15 +176,16 @@ func TestFallbackInitialOutsideChain(t *testing.T) {
 	}
 }
 
-func TestFallbackSkipsDuplicatesAndFormats(t *testing.T) {
-	got := chainOf(t, []string{"gpt-a", "model-a", "model-b"}, "model-a", auth.FormatAnthropic)
+func TestFallbackSkipsDuplicatesAndKeepsFormats(t *testing.T) {
+	got := chainOf(t, []string{"gpt-a", "model-a", "model-b", "model-b"}, "model-a", auth.FormatAnthropic)
 	if !slices.Equal(got, []string{"model-b"}) {
 		t.Fatalf("anthropic chain %v", got)
 	}
-	if got := chainOf(t, []string{"model-a", "gpt-b"}, "gpt-a", auth.FormatOpenAI); !slices.Equal(got, []string{"gpt-b"}) {
+	// Entries of another format stay in the chain: they are translated.
+	if got := chainOf(t, []string{"model-a", "gpt-b"}, "gpt-a", auth.FormatOpenAI); !slices.Equal(got, []string{"model-a", "gpt-b"}) {
 		t.Fatalf("openai chain %v", got)
 	}
-	// Nothing of another format is ever sent, even when every other model failed.
+	// A model before the initial one in the chain is never sent.
 	fx, upstream := fallbackFixture(t, "gpt-a, model-a, model-b", map[string]http.HandlerFunc{"model-a": answerStatus(529), "model-b": answerStatus(503)}, "")
 	response, body := fx.post("/v1/messages", "anthropic", messages("model-a", false))
 	if response.StatusCode != 502 || !slices.Equal(upstream.sent(), []string{"model-a", "model-b"}) || comportaCode(t, body) != string(CodeFallbackExhausted) {

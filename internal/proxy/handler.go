@@ -20,6 +20,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/responsecache"
 	"github.com/JoaoVictorVM/comporta/internal/runtimecontrol"
 	"github.com/JoaoVictorVM/comporta/internal/telemetry"
+	"github.com/JoaoVictorVM/comporta/internal/translation"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
@@ -275,6 +276,15 @@ type operation struct {
 	unauthenticated bool
 	cacheHit        bool
 	fallbacks       int
+	// providerBeta is set when an Anthropic client asked for a beta, which no
+	// other protocol can honor.
+	providerBeta bool
+	// canonical is the request in canonical form, built once per preparation
+	// when a candidate needs another protocol. It never outlives the request.
+	canonical *translation.Request
+	// translator converts the stream of the attempt being sent, when its
+	// protocol differs from the client's.
+	translator *translation.StreamTranslator
 }
 
 // finish publishes the attempt and keeps a panic to this request. It is the one
@@ -328,6 +338,9 @@ func (o *operation) answerPanic() bool {
 		if o.attempt != nil {
 			o.attempt.markClientByte(failure.Status)
 		}
+	case o.stream && o.translator != nil:
+		_, _ = o.w.Write(o.translator.ErrorEvent(string(failure.Code), failure.Message))
+		_ = o.w.flush()
 	case o.stream:
 		_, _ = o.w.Write(sseErrorEvent(o.format, failure))
 		_ = o.w.flush()
@@ -366,6 +379,7 @@ func (o *operation) serve(r *http.Request) {
 	}
 	envelope := request.envelope
 	o.stream = envelope.Stream
+	o.providerBeta = o.route == RouteMessages && len(r.Header.Values("Anthropic-Beta")) > 0
 	stage = o.tel.Stage(telemetry.StageIdentity)
 	failure = request.applyIdentity(o.handler.identity, o.route, o.snapshot)
 	stage.End()
@@ -471,7 +485,7 @@ func (o *operation) serve(r *http.Request) {
 	// Later attempts need their own durable reservation, which only a session
 	// provides; without accounting there is nothing to reserve.
 	if len(chain) == 0 || (o.handler.accounting != nil && o.session == nil) {
-		o.send(r, choice.envelope, choice.providerName, choice.provider, choice.body, listeners, false)
+		o.send(r, choice, listeners, false)
 		return
 	}
 	o.fallback(r, plan, app, choice, chain, listeners)
@@ -493,7 +507,7 @@ func (o *operation) fallback(r *http.Request, plan *preparation, app config.App,
 		o.index = index
 		model := current.envelope.ModelEffective
 		sent[model] = true
-		held := o.send(r, current.envelope, current.providerName, current.provider, current.body, listeners, true)
+		held := o.send(r, current, listeners, true)
 		if held == nil {
 			return
 		}
@@ -501,15 +515,27 @@ func (o *operation) fallback(r *http.Request, plan *preparation, app config.App,
 		// answers under the key of the one that failed.
 		o.cache.abort()
 		o.cache = nil
-		next := ""
-		for _, candidate := range chain {
-			if !sent[candidate] && !considered[candidate] {
-				next = candidate
-				break
-			}
-		}
 		cause, eligible := fallbackCause(o.attempt.result)
-		if !eligible || (next == "" && len(transitions) == 0) {
+		if !eligible {
+			held.write(o.w, o.format, o.attempt)
+			return
+		}
+		// Entries that cannot represent the request are recorded and passed
+		// over here; they never count as sends.
+		next := ""
+		if index < maxAttempts && r.Context().Err() == nil {
+			candidate, rejection := o.nextCandidate(r.Context(), plan, app, chain, sent, considered)
+			if rejection != nil {
+				if rejection.Code == CodeClientDisconnected {
+					o.attempt.clientGone()
+					return
+				}
+				o.answerTerminal(rejection.failure(), held.writeLimit, true)
+				return
+			}
+			next = candidate
+		}
+		if next == "" && len(transitions) == 0 && r.Context().Err() == nil {
 			held.write(o.w, o.format, o.attempt)
 			return
 		}
@@ -582,7 +608,11 @@ func (o *operation) continueWith(r *http.Request, plan *preparation, app config.
 	if failure != nil {
 		return chosen{}, asRejection(*failure)
 	}
-	out := chosen{request: request, envelope: request.envelope, body: request.effectiveBody(), providerName: name, provider: provider}
+	body, translated, rejection := o.render(request, provider)
+	if rejection != nil {
+		return chosen{}, rejection
+	}
+	out := chosen{request: request, envelope: request.envelope, body: body, providerName: name, provider: provider, translated: translated}
 	if o.session == nil {
 		return out, nil
 	}
@@ -608,7 +638,7 @@ func (o *operation) continueWith(r *http.Request, plan *preparation, app config.
 	if target == nil || target.request == nil {
 		return chosen{}, asRejection(internalFailure())
 	}
-	return chosen{request: target.request, envelope: target.request.envelope, body: target.effective, providerName: target.providerName, provider: target.provider, downgraded: true}, nil
+	return chosen{request: target.request, envelope: target.request.envelope, body: target.effective, providerName: target.providerName, provider: target.provider, downgraded: true, translated: target.translated}, nil
 }
 
 // reject answers a refusal unless the client already left.
@@ -622,6 +652,7 @@ func (o *operation) reject(rejection *Rejection) {
 // reload restarted the admission: the client hooks do not run twice.
 func (o *operation) prepare(r *http.Request, request *prepared, first bool) (*preparation, *Rejection) {
 	envelope := request.envelope
+	o.canonical = nil
 	app, ok := o.snapshot.App(envelope.AppName)
 	if !ok {
 		return nil, asRejection(internalFailure())
@@ -668,8 +699,11 @@ func (o *operation) prepare(r *http.Request, request *prepared, first bool) (*pr
 		effective = request.effectiveBody()
 	}
 	plan := &preparation{request: request, effective: effective, providerName: providerName, provider: provider}
+	if plan, rejection = o.translatePlan(r.Context(), plan, app); rejection != nil {
+		return nil, rejection
+	}
 	if _, policy := o.handler.accounting.(PolicyAccounting); policy {
-		plan.target = o.downgradeTarget(request, app)
+		plan.target = o.downgradeTarget(plan.request, app)
 	}
 	return plan, nil
 }
@@ -763,7 +797,9 @@ func (o *operation) resolveProvider(model string) (string, config.Provider, *Fai
 		failure := internalFailure()
 		return "", config.Provider{}, &failure
 	}
-	if provider.APIFormat != providerFormat(o.format) {
+	// Conversations are translated between formats; the advisory token count
+	// keeps its native path only.
+	if o.route == RouteCountTokens && provider.APIFormat != providerFormat(o.format) {
 		failure := Failure{http.StatusBadRequest, CodeProviderFormatMismatch, ClassInvalidRequest,
 			"model belongs to a provider with a different API format than this endpoint"}
 		return "", config.Provider{}, &failure
@@ -773,7 +809,8 @@ func (o *operation) resolveProvider(model string) (string, config.Provider, *Fai
 
 // send makes one attempt. With hold, a failure before anything reached the
 // client is returned instead of written, for the operation to decide on.
-func (o *operation) send(r *http.Request, envelope *Envelope, name string, provider config.Provider, body []byte, listeners config.Listeners, hold bool) *heldFailure {
+func (o *operation) send(r *http.Request, choice chosen, listeners config.Listeners, hold bool) *heldFailure {
+	envelope, name, provider, body := choice.envelope, choice.providerName, choice.provider, choice.body
 	handler := o.handler
 	o.attempt = newAttempt(envelope, name, o.admission, handler.now, handler.sink, handler.logger)
 	o.attempt.result.AttemptIndex = max(o.index, 1)
@@ -802,12 +839,18 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 		handler: handler, w: o.w, format: o.format, envelope: envelope, attempt: o.attempt,
 		provider: name, clientCtx: r.Context(), upstreamCtx: upstreamCtx, cancelCause: cancelCause, writeLimit: idle,
 		restore: o.sensitive.restoring(), hold: hold,
+		upstream: authFormat(provider.APIFormat), client: o.route.wire(), target: providerWire(provider.APIFormat), translated: choice.translated,
 	}
+	o.translator = nil
 	if o.index <= 1 {
 		current.cache = o.cache
 	}
 
-	target, err := upstreamURL(provider.BaseURL, o.route)
+	path := o.route.path()
+	if choice.translated {
+		path = translation.UpstreamPath(current.target)
+	}
+	target, err := upstreamURL(provider.BaseURL, path)
 	if err != nil {
 		current.failBeforeCommit(internalFailure(), "")
 		return current.held
@@ -817,7 +860,8 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 	traced := httptrace.WithClientTrace(upstreamCtx, &httptrace.ClientTrace{
 		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
 	})
-	request, err := newUpstreamRequest(traced, target, r.Header, o.format, secret, hasSecret, envelope.Stream, body)
+	headers := upstreamHeaders{format: current.upstream, translated: choice.translated, anthropicVersion: provider.AnthropicVersion}
+	request, err := newUpstreamRequest(traced, target, r.Header, headers, secret, hasSecret, envelope.Stream, body)
 	if err != nil {
 		current.failBeforeCommit(internalFailure(), "")
 		return current.held
@@ -850,6 +894,15 @@ func (o *operation) send(r *http.Request, envelope *Envelope, name string, provi
 	case response.StatusCode < 200 || response.StatusCode >= 300:
 		current.serveUpstreamError(response)
 	case envelope.Stream:
+		if choice.translated {
+			current.translator, err = translation.NewStreamTranslator(current.target, current.client, translation.StreamOptions{
+				Model: envelope.ModelEffective, IncludeUsage: envelope.ClientAskedUsage, Now: handler.now(), MaxOutputBytes: maxResponseBytes})
+			if err != nil {
+				current.failBeforeCommit(internalFailure(), "")
+				return current.held
+			}
+			o.translator = current.translator
+		}
 		current.serveStream(response)
 	default:
 		current.serveNormal(response)

@@ -87,7 +87,12 @@ func TestCacheJSONHitAndMiss(t *testing.T) {
 	if second.Header.Get("X-Request-Id") != "" {
 		t.Fatal("the provider's request id is never replayed")
 	}
+	// The hit is concluded when its operation ends, which can be after the
+	// client already read the answer.
 	results := accounting.all()
+	for deadline := time.Now().Add(5 * time.Second); len(results) < 2 && time.Now().Before(deadline); results = accounting.all() {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if len(results) != 2 || results[0].CacheHit || !results[1].CacheHit || !results[1].NotSent || results[1].UpstreamStatus.Known || results[1].DownstreamStatus != known(200) {
 		t.Fatalf("results = %+v", results)
 	}
@@ -304,5 +309,32 @@ func TestFailedDetectScanBypassesCache(t *testing.T) {
 	}
 	if upstream.count() != 2 || cache.Stats().Entries != 0 {
 		t.Fatal("a scan that could not finish never reads nor feeds the cache")
+	}
+}
+
+func TestTranslatedHeaderOnReplay(t *testing.T) {
+	fx, upstream, _, cache := cacheFixture(t, cacheSettings, jsonReply(cachedOpenAI))
+	body := `{"model":"fake-gpt","input":"` + cachePrompt + `","temperature":0,"max_output_tokens":16}`
+	first, firstBody := fx.post("/v1/responses", "openai", body)
+	settled(t, cache)
+	second, secondBody := fx.post("/v1/responses", "openai", body)
+	if upstream.count() != 1 || second.Header.Get(cacheHeader) != cacheHit || secondBody != firstBody {
+		t.Fatalf("translated answer not replayed: %d calls, %q", upstream.count(), second.Header.Get(cacheHeader))
+	}
+	if first.Header.Get(translatedHeader) != "openai-chat->openai-responses" || second.Header.Get(translatedHeader) != first.Header.Get(translatedHeader) {
+		t.Fatalf("translated header %q then %q", first.Header.Get(translatedHeader), second.Header.Get(translatedHeader))
+	}
+	if !strings.Contains(secondBody, `"object":"response"`) {
+		t.Fatalf("the replay must be in the client's format: %s", secondBody)
+	}
+}
+
+func TestTranslationFormatsDoNotShareCacheKey(t *testing.T) {
+	fx, upstream, _, cache := cacheFixture(t, cacheSettings, jsonReply(cachedOpenAI))
+	fx.post("/v1/chat/completions", "openai", zeroTempOpenAI)
+	settled(t, cache)
+	response, body := fx.post("/v1/responses", "openai", `{"model":"fake-gpt","input":[{"role":"user","content":"`+cachePrompt+`"}],"temperature":0,"max_output_tokens":16}`)
+	if upstream.count() != 2 || response.Header.Get(cacheHeader) != "" || strings.Contains(body, "chat.completion") {
+		t.Fatalf("a Chat answer served a Responses request: %d calls, %s", upstream.count(), body)
 	}
 }

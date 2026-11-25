@@ -210,6 +210,8 @@ type families struct {
 	blocks           *family
 	cacheHits        *family
 	fallbacks        *family
+	translations     *family
+	skips            *family
 	events           *family
 	eventsLost       *family
 	failures         *family
@@ -230,6 +232,8 @@ func newFamilies() *families {
 		blocks:           newFamily("blocks_total", "Terminal refusals by primary reason.", kindCounter, nil, "app", "type", "scope"),
 		cacheHits:        newFamily("cache_hits_total", "Responses served from the response cache.", kindCounter, nil, "app", "model"),
 		fallbacks:        newFamily("fallbacks_total", "Transitions to an admitted fallback model, even if it later failed.", kindCounter, nil, "app", "cause"),
+		translations:     newFamily("translations_total", "Responses converted from the provider's protocol to the client's.", kindCounter, nil, "source", "target", "result"),
+		skips:            newFamily("translation_skips_total", "Models passed over because they cannot represent a request.", kindCounter, nil, "feature"),
 		events:           newFamily("events_total", "Operational events received by this process; best effort diagnostics, not financial counters.", kindCounter, nil, "type"),
 		eventsLost:       newFamily("event_notifications_lost_total", "Event notifications this process failed to receive.", kindCounter, nil),
 		failures:         newFamily("telemetry_failures_total", "Failures of the telemetry itself.", kindCounter, nil, "component", "reason"),
@@ -250,5 +254,5 @@ func newFamilies() *families {
 
 func (f *families) all() []*family {
 	return []*family{f.requests, f.requestDuration, f.ttfb, f.upstreamAttempts, f.upstreamDuration, f.cost, f.tokens, f.usageMissing,
-		f.blocks, f.cacheHits, f.fallbacks, f.events, f.eventsLost, f.failures, f.droppedSpans, f.labelOverflow}
+		f.blocks, f.cacheHits, f.fallbacks, f.translations, f.skips, f.events, f.eventsLost, f.failures, f.droppedSpans, f.labelOverflow}
 }

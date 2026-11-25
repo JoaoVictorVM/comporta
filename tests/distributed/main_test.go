@@ -116,6 +116,10 @@ func newCluster(t *testing.T, n int, apps string) *cluster {
 	t.Helper()
 	c := &cluster{t: t, dir: t.TempDir(), dsn: testkit.Postgres(t)}
 	addr, db := testkit.Redis(t)
+	// The configuration accepts databases 0 to 15 only. Clusters never run in
+	// parallel and each one flushes its database below, so reusing an index
+	// after sixteen clusters is safe.
+	db %= 16
 	c.upstream = httptest.NewServer(fakeprovider.New(fakeprovider.Options{}))
 	t.Cleanup(c.upstream.Close)
 	secrets := filepath.Join(c.dir, "secrets")
@@ -139,8 +143,14 @@ providers:
     base_url: %[1]s
     api_key: ${COMPORTA_INTEGRATION_KEY}
     models: [fake-claude]
+  openai:
+    api_format: openai
+    base_url: %[1]s
+    api_key: ${COMPORTA_INTEGRATION_KEY}
+    models: [fake-gpt]
 pricing:
   fake-claude: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}
+  fake-gpt: {input: 2, output: 6, cache_write: 2.5, cache_read: 0.2}
 %[6]s
 listeners:
   proxy: {port: %[2]d}

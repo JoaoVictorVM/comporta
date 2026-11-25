@@ -16,6 +16,8 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/responsecache"
 	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
+	"github.com/JoaoVictorVM/comporta/internal/telemetry"
+	"github.com/JoaoVictorVM/comporta/internal/translation"
 )
 
 const (
@@ -111,6 +113,43 @@ type call struct {
 	held *heldFailure
 	// cache captures what this attempt delivers, when it may be stored.
 	cache *cacheState
+	// upstream is the provider's format, which its answer, usage and errors
+	// are read in. client and target are the protocols of the client and the
+	// provider; translated is set when they differ for this attempt.
+	upstream   auth.Format
+	client     translation.WireFormat
+	target     translation.WireFormat
+	translated bool
+	translator *translation.StreamTranslator
+}
+
+// translateBody converts a validated provider answer for the client. Usage was
+// already read from the provider's own counters.
+func (c *call) translateBody(body []byte, usage Usage) ([]byte, error) {
+	stage := c.attempt.tel.StageAttempt(telemetry.StageTranslateResponse, c.attempt.result.AttemptIndex)
+	defer stage.End()
+	parsed, err := translation.ParseResponse(c.target, body)
+	if err == nil {
+		body, err = translation.RenderResponse(parsed, c.client, translation.RenderOptions{Model: c.envelope.ModelEffective, Now: c.handler.now(), Usage: toTranslationUsage(usage)})
+	}
+	if err == nil && len(body) > maxResponseBytes {
+		err = errors.New("translated response over the size limit")
+	}
+	result := telemetry.TranslationOK
+	if err != nil {
+		result = telemetry.TranslationFailed
+	}
+	c.attempt.tel.Translation(string(c.target), string(c.client), result)
+	return body, err
+}
+
+// errorFrame renders a failure for a stream already committed, in the
+// client's protocol.
+func (c *call) errorFrame(failure Failure) []byte {
+	if c.translator != nil {
+		return c.translator.ErrorEvent(string(failure.Code), failure.Message)
+	}
+	return sseErrorEvent(c.format, failure)
 }
 
 // heldFailure is an answer not written yet: the failure, its Retry-After and
@@ -206,7 +245,7 @@ func (c *call) serveNormal(response *http.Response) {
 		c.failBeforeCommit(invalidUpstream("provider "+c.provider+" sent an invalid response").failure, "")
 		return
 	}
-	usage, counted, err := extractResponseUsage(c.format, c.envelope.Operation, body)
+	usage, counted, err := extractResponseUsage(c.upstream, c.envelope.Operation, body)
 	if err != nil {
 		c.failBeforeCommit(invalidUpstream("provider "+c.provider+" sent invalid usage").failure, "")
 		return
@@ -222,21 +261,33 @@ func (c *call) serveNormal(response *http.Response) {
 	// Usage and the hook saw the provider's own answer; the restored one only goes
 	// to the client. A failure here still settles the usage already read.
 	if c.restore != nil {
-		restored, err := rehydrateResponse(c.format, body, c.restore, maxResponseBytes)
+		restored, err := rehydrateResponse(c.upstream, body, c.restore, maxResponseBytes)
 		if err != nil {
 			c.failBeforeCommit(rehydrationFailure(), "")
 			return
 		}
 		body = restored
 	}
+	contentType := response.Header.Get("Content-Type")
+	if c.translated {
+		translated, err := c.translateBody(body, usage)
+		if err != nil {
+			c.failBeforeCommit(responseTranslationFailed(), "")
+			return
+		}
+		body, contentType = translated, "application/json"
+	}
 
 	// Requests whose content was redacted never capture, so this is the
 	// provider's validated answer and never a restored one.
 	if c.restore == nil {
-		c.cache.capture(responsecache.KindJSON, response.Header.Get("Content-Type"), body)
+		c.cache.capture(responsecache.KindJSON, contentType, body)
 	}
 	copyResponseHeaders(c.w.Header(), response.Header)
-	c.w.Header().Set("Content-Type", response.Header.Get("Content-Type"))
+	if c.translated {
+		c.w.Header().Set(translatedHeader, translatedValue(c.client, c.target))
+	}
+	c.w.Header().Set("Content-Type", contentType)
 	c.w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	c.w.prepareWrite(c.writeLimit)
 	c.w.WriteHeader(response.StatusCode)
@@ -272,7 +323,7 @@ func (c *call) serveStream(response *http.Response) {
 	timer := time.AfterFunc(idle, func() { c.cancelCause(errIdleTimeout) })
 	defer timer.Stop()
 
-	state := &streamState{format: c.format, askedUsage: c.envelope.ClientAskedUsage}
+	state := &streamState{format: c.upstream, askedUsage: c.envelope.ClientAskedUsage}
 	defer func() {
 		result := &c.attempt.result
 		result.Usage, result.TerminalSeen, result.UsageComplete = state.usage, state.terminal, state.usageComplete()
@@ -342,6 +393,9 @@ func (c *call) relayEvent(event sseEvent, state *streamState, header http.Header
 		c.endStream(failure.failure)
 		return false
 	}
+	if c.translator != nil {
+		return c.relayTranslated(event, state, header)
+	}
 	if action == actionDrop {
 		return true
 	}
@@ -358,10 +412,43 @@ func (c *call) relayEvent(event sseEvent, state *streamState, header http.Header
 	return true
 }
 
+// relayTranslated converts one provider event and writes what it produced.
+// A conversion error is a protocol failure: before the first client event it
+// is an HTTP error that never falls back, after it an error event.
+func (c *call) relayTranslated(event sseEvent, state *streamState, header http.Header) bool {
+	if event.Comment {
+		return true
+	}
+	if rejection := c.handler.hooks.streamEvent(c.upstreamCtx, c.envelope, event.Raw); rejection != nil {
+		c.endStream(rejection.failure())
+		return false
+	}
+	frames, err := c.translator.Feed(event.Name, event.Data, toTranslationUsage(state.usage))
+	if err != nil {
+		c.attempt.tel.Translation(string(c.target), string(c.client), telemetry.TranslationFailed)
+		c.endStream(responseTranslationFailed())
+		return false
+	}
+	for _, frame := range frames {
+		if !c.writeEvent(frame, header) {
+			return false
+		}
+		c.cache.capture(responsecache.KindSSE, "text/event-stream", frame)
+	}
+	if c.translator.Done() {
+		c.attempt.tel.Translation(string(c.target), string(c.client), telemetry.TranslationOK)
+	}
+	return true
+}
+
 func (c *call) writeEvent(raw []byte, header http.Header) bool {
 	if !c.w.committed {
 		copyResponseHeaders(c.w.Header(), header)
 		c.w.Header().Set("Content-Type", header.Get("Content-Type"))
+		if c.translated {
+			c.w.Header().Set("Content-Type", "text/event-stream")
+			c.w.Header().Set(translatedHeader, translatedValue(c.client, c.target))
+		}
 		c.w.Header().Set("Cache-Control", "no-cache")
 		c.w.Header().Set("X-Accel-Buffering", "no")
 		c.w.prepareWrite(c.writeLimit)
@@ -391,7 +478,7 @@ func (c *call) endStream(failure Failure) {
 	}
 	c.attempt.fail(failure)
 	c.w.prepareWrite(c.writeLimit)
-	if _, err := c.w.Write(sseErrorEvent(c.format, failure)); err != nil {
+	if _, err := c.w.Write(c.errorFrame(failure)); err != nil {
 		c.attempt.result.ClientDisconnected = true
 		return
 	}

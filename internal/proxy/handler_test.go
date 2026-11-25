@@ -71,8 +71,8 @@ func TestUnknownModelAndFormatMismatch(t *testing.T) {
 		name, path, format, body, code string
 	}{
 		{"unknown", "/v1/chat/completions", "openai", `{"model":"secret-model-name","messages":[]}`, "model_unknown"},
-		{"anthropic model on openai route", "/v1/chat/completions", "openai", `{"model":"fake-claude","messages":[]}`, "provider_format_mismatch"},
-		{"openai model on anthropic route", "/v1/messages", "anthropic", `{"model":"fake-gpt","max_tokens":1,"messages":[]}`, "provider_format_mismatch"},
+		// Conversations are translated between formats; the token count is not.
+		{"openai model on count_tokens", "/v1/messages/count_tokens", "anthropic", `{"model":"fake-gpt","messages":[]}`, "provider_format_mismatch"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

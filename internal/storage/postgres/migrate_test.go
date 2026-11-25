@@ -5,10 +5,12 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/JoaoVictorVM/comporta/internal/events"
 	"github.com/JoaoVictorVM/comporta/internal/testkit"
 )
 
@@ -123,5 +125,34 @@ func TestPanelMigrationFromPreviousVersion(t *testing.T) {
 	}
 	if _, err := s.db.Exec(`UPDATE usage_daily SET downgrade_saved_microusd=-1`); err == nil {
 		t.Fatal("a negative saving was accepted")
+	}
+}
+
+func TestTranslationEventMigrationConstraint(t *testing.T) {
+	s, _ := openTest(t)
+	ctx := context.Background()
+	if count(t, s, `SELECT count(*) FROM pg_constraint WHERE conname='events_type_check' AND pg_get_constraintdef(oid) LIKE '%translation_skipped%'`) != 1 {
+		t.Fatal("the type constraint does not accept translation skips")
+	}
+	skip := events.NewTranslationSkip(time.Now(), strings.Repeat("b", 32), "bot", 2, "gpt-4.1", "anthropic_messages", "openai_chat", "tool_choice")
+	if err := s.Publish(ctx, skip); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Publish(ctx, skip); err != nil {
+		t.Fatalf("a repeated skip must confirm the same event: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO events(event_id,type,occurred_at,payload_json) VALUES($1,'unknown_type',1,'{}')`, strings.Repeat("c", 32)); err == nil {
+		t.Fatal("the constraint must still refuse unknown types")
+	}
+}
+
+func TestTranslationEventDoesNotEnqueueAlert(t *testing.T) {
+	s, _ := openTest(t)
+	skip := events.NewTranslationSkip(time.Now(), strings.Repeat("d", 32), "bot", 0, "claude-sonnet-4-5", "openai_responses", "anthropic_messages", "stateful_response")
+	if err := s.Publish(context.Background(), skip); err != nil {
+		t.Fatal(err)
+	}
+	if count(t, s, `SELECT count(*) FROM alert_inputs WHERE event_id='`+skip.ID+`'`) != 0 {
+		t.Fatal("a translation skip must not feed alerts")
 	}
 }

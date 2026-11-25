@@ -130,11 +130,12 @@ The proxy listens on `127.0.0.1:8080` and the admin listener on `127.0.0.1:8081`
 | `POST /v1/messages` | Anthropic | Normal and streaming |
 | `POST /v1/messages/count_tokens` | Anthropic | Advisory count, never treated as consumption |
 | `POST /v1/chat/completions` | OpenAI, also used for Ollama | Normal and streaming |
+| `POST /v1/responses` | OpenAI Responses API, conversational subset | Normal and streaming, always translated, see [Cross-provider translation](#cross-provider-translation) |
 | `GET /v1/models` | Chosen by the client | Local list, see below |
 
 Every other path or method returns 404 `endpoint not allowed by Comporta`, without forwarding anything, so an app cannot use your provider key for files, batches or admin APIs. The admin listener has only `GET /healthz`, which answers `{"status":"ok"}` and says nothing about providers.
 
-**What reaches the provider:** the body exactly as received, byte for byte, including unknown fields, with documented patches. End-user fields are replaced by a pseudonym, as [End users](#end-users) describes. On OpenAI-format streaming, `stream_options.include_usage` is set to `true` so that usage can be measured, and if the client did not ask for it, the extra usage chunk is removed before delivery. Generation output is capped by the app's `max_tokens`: a higher value is reduced and an absent OpenAI limit is inserted. An existing `max_completion_tokens` field keeps its name, and the cap bounds the admission quote. With `on_limit: downgrade` the `model` field can be replaced, see [Limit policies](#limit-policies). Only `content-type`, `anthropic-version` and `anthropic-beta` are forwarded; every other client header is dropped, and the app key is replaced by the provider key. The destination comes only from the configuration. Redirects are never followed, proxy environment variables are ignored, and a remote provider name that resolves to a private, loopback or link-local address is refused. A base URL may end in `/v1` or not; the same path results.
+**What reaches the provider:** when the model's provider speaks the route's format, the body exactly as received, byte for byte, including unknown fields, with documented patches. End-user fields are replaced by a pseudonym, as [End users](#end-users) describes. On OpenAI-format streaming, `stream_options.include_usage` is set to `true` so that usage can be measured, and if the client did not ask for it, the extra usage chunk is removed before delivery. Generation output is capped by the app's `max_tokens`: a higher value is reduced and an absent OpenAI limit is inserted. An existing `max_completion_tokens` field keeps its name, and the cap bounds the admission quote. With `on_limit: downgrade` the `model` field can be replaced, see [Limit policies](#limit-policies). Only `content-type`, `anthropic-version` and `anthropic-beta` are forwarded; every other client header is dropped, and the app key is replaced by the provider key. The destination comes only from the configuration. Redirects are never followed, proxy environment variables are ignored, and a remote provider name that resolves to a private, loopback or link-local address is refused. A base URL may end in `/v1` or not; the same path results. A model of another format gets the request translated to its provider's protocol, as [Cross-provider translation](#cross-provider-translation) describes.
 
 **Errors** use the format of the route and carry a `comporta_code`. Provider error messages are never passed on, because they can echo prompts: status and category are preserved and the message is rebuilt. Inside a stream already started, the failure is an error event followed by closing the stream, so a truncated stream never looks like a success.
 
@@ -144,7 +145,7 @@ Every other path or method returns 404 `endpoint not allowed by Comporta`, witho
 | `host_not_allowed` | 421 | `Host` not allowed |
 | `invalid_request` | 400 | Invalid JSON, types, duplicate keys or query |
 | `user_required`, `user_invalid`, `user_email_not_allowed`, `user_document_not_allowed` | 400 | End-user identifier missing or refused, see [End users](#end-users) |
-| `model_unknown`, `provider_format_mismatch` | 400 | Model not declared, or declared in another API format (also a downgrade target in another format) |
+| `model_unknown`, `provider_format_mismatch` | 400 | Model not declared, or declared in another API format on `count_tokens` or as a downgrade target |
 | `model_not_allowed` | 403 | Model outside the app's `allowed_models` |
 | `price_unknown`, `pricing_overflow` | 400 | No effective price, or cost outside the supported integer range |
 | `rate_limited`, `concurrency_exceeded`, `budget_exceeded`, `budget_reserved`, `hard_cap_exceeded` | 429 | A limit or budget, see [Limits and budgets](#limits-and-budgets) |
@@ -155,6 +156,8 @@ Every other path or method returns 404 `endpoint not allowed by Comporta`, witho
 | `provider_unreachable`, `provider_redirect`, `invalid_upstream_response` | 502 | Provider could not be used |
 | `provider_timeout` | 504 | A deadline expired |
 | `provider_rate_limited`, `provider_overloaded`, `provider_error` | Provider's | Provider refused or failed |
+| `no_eligible_fallback_model` | 502 | No model of the request's chain can represent it in its protocol, see [Cross-provider translation](#cross-provider-translation) |
+| `response_translation_failed` | 502 | A provider answer could not be converted to the client's format |
 | `internal_error` | 500 | A panic, limited to that request and logged without content |
 
 **Limits:** request body 10 MB, response headers from the provider 60 s, non-streaming requests 300 s in total including reading the body, stream silence 60 s, all configurable under `listeners`. Fixed: 64 MB per non-streaming response, 10 MB per stream event, JSON nesting of 128 levels, 64 KiB of request headers. On shutdown, requests get 10 s to finish and are then canceled, so a long stream can end when the service stops.
@@ -299,7 +302,7 @@ apps:
 
 - **Where the chain starts:** after the model actually sent. A request for `claude-sonnet-4-5` continues with `claude-haiku-4-5`. A request for a model outside the chain tries the whole chain after it, so at most five models are sent per request. With `on_limit: downgrade`, the downgraded model is the starting point and the requested one is not tried.
 - **What triggers it:** HTTP 429, any 5xx including Anthropic's 529, a connection error or a provider timeout, while nothing has been written to the client. A stream falls back only on an error event the gateway recognizes (rate limit or overload) before its first event reaches the client; once any event was delivered, even a heartbeat or a `message_start` without text, the error is forwarded and no other model is tried. HTTP 400, 401, 403, 404 and 413, refusals inside valid answers, broken or oversized answers, `count_tokens` and every refusal decided by the gateway itself (budgets, rate limits, allowlist, sensitive data, loop guard, pause) never fall back.
-- **Same API format only:** a chain entry in another format than the endpoint is skipped: never sent, reserved or reported. `config validate` warns with `fallback_mixed_format` when a chain mixes formats and with `fallback_disabled` for each format whose requests have no alternative; an app whose chain only holds models of another format runs without fallback. Translating between formats is not implemented.
+- **Formats can mix:** a chain entry in another format than the endpoint is translated, request and answer, as [Cross-provider translation](#cross-provider-translation) describes. An entry that cannot represent the request, such as any other format when the client sent `anthropic-beta`, is skipped before it is quoted or reserved and recorded as a `translation_skipped` event; it never counts as one of the five sends. `config validate` warns with `fallback_disabled` when no allowed model has an alternative in the chain.
 - **Time:** a non-streaming request that can fall back has 120 seconds for all its attempts together, or less when `non_streaming_timeout` is lower, counted from admission. Streams keep the per-attempt header and idle timeouts. When the client leaves, the provider call ends at once and no other model is tried.
 - **What the client sees:** the answer of the model that responded, with its own `model` field, and `x-comporta-fallback: claude-sonnet-4-5->claude-haiku-4-5 (529)` listing every admitted transition (`A->B (529); B->C (timeout)`). Causes are `429`, the 5xx status, `connection` or `timeout`; model names are percent-escaped. Headers of failed attempts, `Retry-After` included, never reach the client, and a provider cannot send its own `x-comporta-*` headers.
 
@@ -318,6 +321,20 @@ Without a chain, or without an alternative, the original error is returned uncha
 **Records and events:** each attempt has its own record. Later attempts have outcome `fallback`, the model they replaced and the cause; the policy outcome stays separate. Only the attempt that ended the request counts as a request in the daily totals, all of them count as attempts, cost and tokens, and when the gateway answered something else than that attempt's own result (an exhausted chain, a refusal) the record keeps both. Each admitted transition writes one `fallback` event, in the same transaction as the next attempt's reservation, with the app, the request ID, the attempt index, `from_model`, `to_model` and the cause, but no user hash or content. It means the next model was admitted, not that it answered. After a crash, attempts in flight are charged at their reservation and the last one admitted becomes the terminal one; nothing is sent again. `comporta users forget` and retention remove these records with the user's requests and keep the app totals.
 
 [`examples/fallback.yaml`](examples/fallback.yaml) runs a chain on the fake provider, without real credentials.
+
+### Cross-provider translation
+
+Requests are translated between Anthropic Messages, OpenAI Chat Completions and the conversational subset of the OpenAI Responses API: system prompts, multi-turn history, images, tool definitions, tool calls and results, tool choice, stop reasons, usage and streaming events. An app keeps its SDK and format; a model of another format receives its provider's protocol and the answer comes back in the client's, with `x-comporta-translated` naming the direction (`openai->anthropic`, `anthropic->openai` or `openai-chat->openai-responses`).
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="cmp_...")
+response = client.responses.create(model="claude-sonnet-4-5", input="Resuma o relatório.")
+print(response.output_text)
+```
+
+Usage is settled from the provider's own counters and shown to the client in its format. Features without an equivalent, such as provider betas, server-side Responses state, built-in tools, reasoning or structured output, make a model ineligible for that request: it is skipped before any reservation and a `translation_skipped` event records the closed feature, or the request ends with 502 `no_eligible_fallback_model` when no model remains. Anthropic providers send `anthropic_version` (default `2026-10-21`) with translated requests. [docs/cross-provider-translation.md](docs/cross-provider-translation.md) has the full matrix, the Responses subset, every feature code and the stream error behavior; [`examples/translation.yaml`](examples/translation.yaml) runs a mixed chain on the fake provider.
 
 ### Response cache
 

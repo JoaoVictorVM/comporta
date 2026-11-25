@@ -1,0 +1,28 @@
+{
+  "model": "gpt-4.1",
+  "max_completion_tokens": 300,
+  "messages": [
+    {"role": "developer", "content": "Seja breve."},
+    {"role": "system", "content": [{"type": "text", "text": "Responda em português."}]},
+    {"role": "user", "content": [
+      {"type": "text", "text": "Compare o clima."},
+      {"type": "image_url", "image_url": {"url": "https://example.com/mapa.png", "detail": "low"}}
+    ]},
+    {"role": "assistant", "content": null, "tool_calls": [
+      {"id": "call_a", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Recife\"}"}},
+      {"id": "call_b", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"Natal\"}"}}
+    ]},
+    {"role": "tool", "tool_call_id": "call_a", "content": "28 graus"},
+    {"role": "tool", "tool_call_id": "call_b", "content": [{"type": "text", "text": "30 graus"}]}
+  ],
+  "tools": [
+    {"type": "function", "function": {"name": "get_weather", "description": "Consulta o clima", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}, "strict": true}}
+  ],
+  "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+  "parallel_tool_calls": true,
+  "temperature": 0,
+  "stop": "FIM",
+  "user": "5f0c1b2a3d4e5f60718293a4b5c6d7e8",
+  "stream": true,
+  "stream_options": {"include_usage": true}
+}

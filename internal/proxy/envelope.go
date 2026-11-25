@@ -20,6 +20,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/keys"
 	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
+	"github.com/JoaoVictorVM/comporta/internal/translation"
 	"github.com/JoaoVictorVM/comporta/internal/useridentity"
 )
 
@@ -58,11 +59,14 @@ func known[T any](value T) Optional[T] { return Optional[T]{Value: value, Known:
 // is resolved, when it is dropped. Every generic representation (fmt, slog, JSON) shows
 // approved metadata only, which leaves out the pseudonym as well.
 type Envelope struct {
-	RequestID         string
-	AppName           string
-	KeyID             string
-	ConfigGeneration  int64
-	APIFormat         auth.Format
+	RequestID        string
+	AppName          string
+	KeyID            string
+	ConfigGeneration int64
+	APIFormat        auth.Format
+	// Wire is the protocol of the body, which separates the Responses API from
+	// Chat Completions although both authenticate as OpenAI.
+	Wire              translation.WireFormat
 	Endpoint          string
 	Operation         Operation
 	ModelRequested    string
@@ -200,6 +204,7 @@ func parseRequest(route Route, r *http.Request, body []byte, identity keys.Ident
 		KeyID:            identity.KeyID(),
 		ConfigGeneration: generation,
 		APIFormat:        format,
+		Wire:             route.wire(),
 		Endpoint:         route.path(),
 		Operation:        OperationGeneration,
 		BodySizeOriginal: int64(len(body)),
@@ -218,8 +223,17 @@ func parseRequest(route Route, r *http.Request, body []byte, identity keys.Ident
 	}
 	envelope.ModelRequested, envelope.ModelEffective = name, name
 
-	messages, ok := document.Path("messages")
-	if !ok || document.Kind(messages) != '[' {
+	conversation := "messages"
+	if route == RouteResponses {
+		conversation = "input"
+	}
+	messages, ok := document.Path(conversation)
+	switch {
+	case route == RouteResponses && !ok:
+		return reject("input is required")
+	case route == RouteResponses && document.Kind(messages) != '[' && document.Kind(messages) != '"':
+		return reject("input must be a string or an array")
+	case route != RouteResponses && (!ok || document.Kind(messages) != '['):
 		return reject("messages must be an array")
 	}
 
@@ -238,7 +252,7 @@ func parseRequest(route Route, r *http.Request, body []byte, identity keys.Ident
 	}
 
 	envelope.ImageCount = countImages(document, messages, format)
-	if digest, ok := lastMessagesHash(document, messages, format); ok {
+	if digest, ok := lastMessagesHash(document, messages, envelope.Wire); ok {
 		envelope.LastMessagesHash = known(digest)
 	}
 
@@ -329,6 +343,16 @@ func readOutputLimit(document *Document, route Route, envelope *Envelope, lenien
 			return field + " must be a positive integer"
 		}
 		envelope.MaxTokens, envelope.OutputLimitField = known(value), field
+	case RouteResponses:
+		span, ok := present(document, lenient, "max_output_tokens")
+		if !ok {
+			return ""
+		}
+		value, valid := parsePositive(document, span)
+		if !valid {
+			return "max_output_tokens must be a positive integer"
+		}
+		envelope.MaxTokens, envelope.OutputLimitField = known(value), "max_output_tokens"
 	}
 	return ""
 }
@@ -381,7 +405,9 @@ func readUser(document *Document, r *http.Request, envelope *Envelope) string {
 // whenever present, and patched only when the request streams.
 func applyUsagePatch(p *prepared) string {
 	envelope, document := p.envelope, p.document
-	if envelope.APIFormat != auth.FormatOpenAI {
+	// A Responses body is never forwarded as it is: the renderer asks a Chat
+	// provider for usage itself.
+	if envelope.APIFormat != auth.FormatOpenAI || envelope.Wire == translation.OpenAIResponses {
 		return ""
 	}
 	options, hasOptions := document.Path("stream_options")
@@ -447,6 +473,9 @@ func eachContentBlock(document *Document, message Span, visit func(block Span, k
 // stay intact and uncounted.
 func countImages(document *Document, messages Span, format auth.Format) int64 {
 	var count int64
+	if document.Kind(messages) != '[' {
+		return 0
+	}
 	for _, message := range document.Elements(messages) {
 		eachContentBlock(document, message, func(_ Span, kind string) {
 			if format == auth.FormatAnthropic && kind == "image" {
@@ -458,6 +487,18 @@ func countImages(document *Document, messages Span, format auth.Format) int64 {
 		})
 	}
 	return count
+}
+
+func itemType(document *Document, item Span) string {
+	if document.Kind(item) != '{' {
+		return ""
+	}
+	span, ok := document.Member(item, "type")
+	if !ok {
+		return ""
+	}
+	kind, _ := document.String(span)
+	return kind
 }
 
 func roleOf(document *Document, message Span) string {
@@ -475,14 +516,29 @@ func roleOf(document *Document, message Span) string {
 // lastMessagesHash signs the last user message and the last tool result. Absent
 // parts get distinct markers; with neither there is no signature, so unrelated empty
 // traffic can never share one.
-func lastMessagesHash(document *Document, messages Span, format auth.Format) ([32]byte, bool) {
+func lastMessagesHash(document *Document, messages Span, wire translation.WireFormat) ([32]byte, bool) {
 	var lastUser, lastTool Optional[Span]
-	for _, message := range document.Elements(messages) {
+	// A Responses input given as a string is the user's only message.
+	if document.Kind(messages) == '"' {
+		lastUser = known(messages)
+	}
+	format := auth.FormatOpenAI
+	if wire == translation.AnthropicMessages {
+		format = auth.FormatAnthropic
+	}
+	var items []Span
+	if document.Kind(messages) == '[' {
+		items = document.Elements(messages)
+	}
+	for _, message := range items {
 		role := roleOf(document, message)
 		if role == "user" {
 			lastUser = known(message)
 		}
-		if format == auth.FormatOpenAI && role == "tool" {
+		if wire == translation.OpenAIChat && role == "tool" {
+			lastTool = known(message)
+		}
+		if wire == translation.OpenAIResponses && itemType(document, message) == "function_call_output" {
 			lastTool = known(message)
 		}
 		if format == auth.FormatAnthropic {

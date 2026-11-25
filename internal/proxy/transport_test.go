@@ -34,7 +34,7 @@ func TestHeadersAllowlistAndProviderCredential(t *testing.T) {
 	target, _ := url.Parse("http://provider.example/v1/messages")
 	secret := secretFor(t, "provider-key")
 
-	request, err := newUpstreamRequest(context.Background(), target, incoming, auth.FormatAnthropic, secret, true, false, []byte("{}"))
+	request, err := newUpstreamRequest(context.Background(), target, incoming, upstreamHeaders{format: auth.FormatAnthropic}, secret, true, false, []byte("{}"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestHeadersAllowlistAndProviderCredential(t *testing.T) {
 		t.Fatalf("host %q, GetBody set %v, length %d", request.Host, request.GetBody != nil, request.ContentLength)
 	}
 
-	openAI, err := newUpstreamRequest(context.Background(), target, incoming, auth.FormatOpenAI, secret, true, true, []byte("{}"))
+	openAI, err := newUpstreamRequest(context.Background(), target, incoming, upstreamHeaders{format: auth.FormatOpenAI}, secret, true, true, []byte("{}"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestHeadersAllowlistAndProviderCredential(t *testing.T) {
 		t.Fatal("stream accept missing")
 	}
 
-	local, err := newUpstreamRequest(context.Background(), target, incoming, auth.FormatOpenAI, config.Secret{}, false, false, []byte("{}"))
+	local, err := newUpstreamRequest(context.Background(), target, incoming, upstreamHeaders{format: auth.FormatOpenAI}, config.Secret{}, false, false, []byte("{}"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestConnectionNamedHeadersDropped(t *testing.T) {
 		"Content-Type":      {"application/json"},
 	}
 	target, _ := url.Parse("http://provider.example/v1/messages")
-	request, err := newUpstreamRequest(context.Background(), target, incoming, auth.FormatAnthropic, config.Secret{}, false, false, nil)
+	request, err := newUpstreamRequest(context.Background(), target, incoming, upstreamHeaders{format: auth.FormatAnthropic}, config.Secret{}, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestConfiguredBasePathJoinsV1Once(t *testing.T) {
 		"https://x.example/caf%C3%A9/base": "https://x.example/caf%C3%A9/base/v1/chat/completions",
 	}
 	for base, want := range cases {
-		got, err := upstreamURL(base, RouteChatCompletions)
+		got, err := upstreamURL(base, RouteChatCompletions.path())
 		if err != nil {
 			t.Fatalf("%s: %v", base, err)
 		}

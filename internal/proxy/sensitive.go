@@ -12,6 +12,7 @@ import (
 	"github.com/JoaoVictorVM/comporta/internal/auth"
 	"github.com/JoaoVictorVM/comporta/internal/config"
 	"github.com/JoaoVictorVM/comporta/internal/sensitivedata"
+	"github.com/JoaoVictorVM/comporta/internal/translation"
 )
 
 // SensitiveCut describes a request refused by the inspection. Summary is set only
@@ -129,7 +130,7 @@ func (s *SensitiveStage) inspect(ctx context.Context, snapshot *config.Snapshot,
 		return nil, nil
 	}
 	at := now()
-	selection := &contentSelection{document: request.document, format: envelope.APIFormat}
+	selection := &contentSelection{document: request.document, format: envelope.APIFormat, responses: envelope.Wire == translation.OpenAIResponses}
 	outcome, err := s.Scanner.Scan(ctx, policy, selection.run)
 	defer outcome.Release()
 	if err != nil {
@@ -246,9 +247,12 @@ const (
 type contentSelection struct {
 	document *Document
 	format   auth.Format
-	emit     sensitivedata.Emit
-	targets  []textTarget
-	embedded []*embeddedJSON
+	// responses selects the Responses API body, whose content lives in input
+	// and instructions.
+	responses bool
+	emit      sensitivedata.Emit
+	targets   []textTarget
+	embedded  []*embeddedJSON
 }
 
 func (c *contentSelection) run(emit sensitivedata.Emit) error {
@@ -257,6 +261,13 @@ func (c *contentSelection) run(emit sensitivedata.Emit) error {
 	for _, member := range d.Members(d.Root()) {
 		var err error
 		switch {
+		case c.responses && member.Key == "input":
+			err = c.responsesInput(member.Value)
+		case c.responses && member.Key == "instructions":
+			err = c.text(d, member.Value, -1)
+		case c.responses && member.Key == "tools":
+			err = c.functions(member.Value)
+		case c.responses:
 		case member.Key == "messages":
 			err = c.messages(member.Value)
 		case member.Key == "system" && c.format == auth.FormatAnthropic:
@@ -315,6 +326,59 @@ func (c *contentSelection) textOrBlocks(d *Document, span Span, embedded int) er
 			}
 			if text, ok := d.Member(block, "text"); ok {
 				if err := c.text(d, text, embedded); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// responsesInput reads a Responses input: a string, or items whose content,
+// function call arguments and function outputs are text.
+func (c *contentSelection) responsesInput(span Span) error {
+	d := c.document
+	if d.Kind(span) != '[' {
+		return c.text(d, span, -1)
+	}
+	for _, item := range d.Elements(span) {
+		if d.Kind(item) != '{' {
+			continue
+		}
+		var err error
+		switch itemType(d, item) {
+		case "function_call":
+			if arguments, ok := d.Member(item, "arguments"); ok {
+				err = c.arguments(arguments)
+			}
+		case "function_call_output":
+			if output, ok := d.Member(item, "output"); ok {
+				err = c.responsesParts(output)
+			}
+		default:
+			if content, ok := d.Member(item, "content"); ok {
+				err = c.responsesParts(content)
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// responsesParts reads a string or parts whose input_text and output_text
+// carry text.
+func (c *contentSelection) responsesParts(span Span) error {
+	d := c.document
+	if d.Kind(span) != '[' {
+		return c.text(d, span, -1)
+	}
+	for _, part := range d.Elements(span) {
+		switch blockType(d, part) {
+		case "input_text", "output_text":
+			if text, ok := d.Member(part, "text"); ok {
+				if err := c.text(d, text, -1); err != nil {
 					return err
 				}
 			}

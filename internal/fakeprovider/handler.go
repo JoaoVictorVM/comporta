@@ -96,6 +96,10 @@ func (h *handler) serveConversation(w http.ResponseWriter, r *http.Request, body
 		writeError(w, anthropic, http.StatusBadRequest, "invalid_request_error", "invalid JSON")
 		return
 	}
+	if message := protocolMismatch(body, anthropic); message != "" {
+		writeError(w, anthropic, http.StatusBadRequest, "invalid_request_error", message)
+		return
+	}
 	scenario := h.options.Scenario
 	if chosen, ok := h.options.ByModel[parsed.Model]; ok {
 		scenario = chosen
@@ -240,4 +244,24 @@ func writeError(w http.ResponseWriter, anthropic bool, status int, kind, message
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(data)
+}
+
+// protocolMismatch refuses a body carrying a field of the other protocol, as
+// the real APIs do, so a translation that produced the wrong shape fails in
+// tests instead of passing unnoticed.
+func protocolMismatch(body []byte, anthropic bool) string {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil {
+		return "invalid JSON"
+	}
+	foreign := []string{"input", "instructions", "max_output_tokens", "system", "stop_sequences"}
+	if anthropic {
+		foreign = []string{"input", "instructions", "max_output_tokens", "stream_options", "max_completion_tokens", "user", "parallel_tool_calls"}
+	}
+	for _, field := range foreign {
+		if _, ok := fields[field]; ok {
+			return field + " is not a field of this API"
+		}
+	}
+	return ""
 }

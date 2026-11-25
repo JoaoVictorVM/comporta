@@ -20,6 +20,8 @@ type preparation struct {
 	providerName string
 	provider     config.Provider
 	target       *target
+	// translated is set when effective was rendered for another protocol.
+	translated bool
 }
 
 // target is the downgrade candidate, built from the request after identity,
@@ -31,6 +33,7 @@ type target struct {
 	providerName string
 	provider     config.Provider
 	unavailable  *Rejection
+	translated   bool
 }
 
 func modelNotAllowed(model, app string) *Rejection {
@@ -114,7 +117,12 @@ func (o *operation) buildTarget(request *prepared, app config.App) *target {
 		out.unavailable = asRejection(internalFailure())
 		return out
 	}
-	out.request, out.effective, out.providerName, out.provider = prepared, prepared.effectiveBody(), name, provider
+	body, translated, rejection := o.render(prepared, provider)
+	if rejection != nil {
+		out.unavailable = rejection
+		return out
+	}
+	out.request, out.effective, out.providerName, out.provider, out.translated = prepared, body, name, provider, translated
 	return out
 }
 
@@ -139,6 +147,7 @@ type chosen struct {
 	providerName string
 	provider     config.Provider
 	downgraded   bool
+	translated   bool
 }
 
 // selected returns the only candidate the admission authorized. Anything else
@@ -146,11 +155,11 @@ type chosen struct {
 // as the original.
 func (p *preparation) selected(a Admission) (chosen, bool) {
 	if a.Selected != CandidateDowngrade {
-		return chosen{request: p.request, envelope: p.request.envelope, body: p.effective, providerName: p.providerName, provider: p.provider}, true
+		return chosen{request: p.request, envelope: p.request.envelope, body: p.effective, providerName: p.providerName, provider: p.provider, translated: p.translated}, true
 	}
 	t := p.target
 	if t == nil || t.request == nil {
 		return chosen{}, false
 	}
-	return chosen{request: t.request, envelope: t.request.envelope, body: t.effective, providerName: t.providerName, provider: t.provider, downgraded: true}, true
+	return chosen{request: t.request, envelope: t.request.envelope, body: t.effective, providerName: t.providerName, provider: t.provider, downgraded: true, translated: t.translated}, true
 }

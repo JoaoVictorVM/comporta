@@ -90,7 +90,7 @@ func identityPatches(document *Document, route Route, hash string) ([]Patch, *Fa
 		default:
 			native, err = document.SetMember(metadata, "user_id", value)
 		}
-	case route == RouteChatCompletions && !hasUser:
+	case (route == RouteChatCompletions || route == RouteResponses) && !hasUser:
 		native, err = document.SetMember(document.Root(), "user", value)
 	default:
 		return patches, nil
