@@ -116,6 +116,10 @@ func newCluster(t *testing.T, n int, apps string) *cluster {
 	t.Helper()
 	c := &cluster{t: t, dir: t.TempDir(), dsn: testkit.Postgres(t)}
 	addr, db := testkit.Redis(t)
+	// The configuration accepts databases 0 to 15 only. Clusters never run in
+	// parallel and each one flushes its database below, so reusing an index
+	// after sixteen clusters is safe.
+	db %= 16
 	c.upstream = httptest.NewServer(fakeprovider.New(fakeprovider.Options{}))
 	t.Cleanup(c.upstream.Close)
 	secrets := filepath.Join(c.dir, "secrets")
