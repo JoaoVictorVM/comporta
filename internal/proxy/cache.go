@@ -41,7 +41,7 @@ func (o *operation) cacheFor(r *http.Request, app config.App, choice chosen) *ca
 		return nil
 	}
 	parts := responsecache.KeyParts{
-		Generation: o.snapshot.Generation(), App: e.AppName, Format: strconv.Itoa(int(o.format)), Endpoint: e.Endpoint,
+		Generation: o.snapshot.Generation(), App: e.AppName, Format: strconv.Itoa(int(o.format)) + ":" + string(o.route.wire()), Endpoint: e.Endpoint,
 		Provider: choice.providerName, Model: e.ModelEffective, Stream: e.Stream,
 		HeaderDigest: semanticHeaderDigest(r.Header, o.format), BodyDigest: e.RequestHash,
 	}
@@ -176,6 +176,10 @@ func (o *operation) replay(r *http.Request, choice chosen, lease *responsecache.
 
 	header := o.w.Header()
 	header.Set(cacheHeader, cacheHit)
+	// Recomputed from the current choice; the stored answer never brings it.
+	if choice.translated {
+		header.Set(translatedHeader, translatedValue(o.route.wire(), providerWire(choice.provider.APIFormat)))
+	}
 	header.Set("Content-Type", lease.ContentType())
 	if lease.Kind() == responsecache.KindJSON {
 		body := lease.Body()

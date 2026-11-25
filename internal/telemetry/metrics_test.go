@@ -185,3 +185,24 @@ func TestMoneyExportUsesMicrousd(t *testing.T) {
 		t.Fatalf("unconfirmed settlement not diagnosed: %q", got)
 	}
 }
+
+func TestTranslationMetricsHaveClosedLabels(t *testing.T) {
+	e := newEnv(t, "")
+	op := e.begin(OperationGeneration)
+	op.Authenticated("bot")
+	op.Translation("openai_chat", "anthropic_messages", TranslationOK)
+	op.Translation("openai_chat", "anthropic_messages", TranslationFailed)
+	op.Translation("gemini", "anthropic_messages", TranslationOK)
+	op.TranslationSkipped("provider_beta")
+	op.TranslationSkipped("get_weather")
+	op.End(RequestEnd{Outcome: OutcomeOK, Status: Some(200)})
+	out := e.scrape()
+	if sample(out, `comporta_translations_total{result="ok",source="openai_chat",target="anthropic_messages"}`) != "1" ||
+		sample(out, `comporta_translations_total{result="failed",source="openai_chat",target="anthropic_messages"}`) != "1" ||
+		sample(out, `comporta_translation_skips_total{feature="provider_beta"}`) != "1" {
+		t.Fatalf("translation metrics:\n%s", out)
+	}
+	if strings.Contains(out, "gemini") || strings.Contains(out, "get_weather") {
+		t.Fatalf("an open value became a label:\n%s", out)
+	}
+}

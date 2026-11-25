@@ -250,3 +250,21 @@ func TestAgentLoopScenario(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestFakeRefusesTheOtherProtocol(t *testing.T) {
+	server := httptest.NewServer(New(Options{}))
+	t.Cleanup(server.Close)
+	for path, body := range map[string]string{
+		"/v1/messages":         `{"model":"m","max_tokens":1,"messages":[],"stream_options":{"include_usage":true}}`,
+		"/v1/chat/completions": `{"model":"m","messages":[],"system":"s"}`,
+	} {
+		response, err := http.Post(server.URL+path, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s accepted a body of the other protocol: %d", path, response.StatusCode)
+		}
+	}
+}

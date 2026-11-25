@@ -25,8 +25,8 @@ const (
 // after the first occurrence of initial in the app's chain, or at its start
 // when initial is not in it. Models in another API format, outside the
 // allowlist, undeclared or repeated are left out: they are never sent,
-// reserved or reported as failed. Comparing formats exactly is where a future
-// translation would prepare the body for another format instead.
+// reserved or reported as failed. Entries in another API format stay: whether
+// they can represent the request is decided when the cursor reaches them.
 func (o *operation) fallbackChain(app config.App, envelope *Envelope, initial string) []string {
 	if envelope.Operation != OperationGeneration || len(app.Fallback) == 0 {
 		return nil
@@ -43,9 +43,6 @@ func (o *operation) fallbackChain(app config.App, envelope *Envelope, initial st
 		}
 		seen[model] = true
 		out = append(out, model)
-		if len(out) == maxAttempts-1 {
-			break
-		}
 	}
 	return out
 }
@@ -58,8 +55,8 @@ func (o *operation) eligibleFallback(app config.App, model string) bool {
 	if !ok {
 		return false
 	}
-	provider, ok := o.snapshot.Provider(name)
-	return ok && provider.APIFormat == providerFormat(o.format)
+	_, ok = o.snapshot.Provider(name)
+	return ok
 }
 
 // fallbackCause says whether a failed attempt may be retried on the next model,

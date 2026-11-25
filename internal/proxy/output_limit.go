@@ -1,6 +1,10 @@
 package proxy
 
-import "strconv"
+import (
+	"strconv"
+
+	"github.com/JoaoVictorVM/comporta/internal/translation"
+)
 
 func (p *prepared) capOutput(cap int64) error {
 	if p.envelope.Operation != OperationGeneration || (p.envelope.MaxTokens.Known && p.envelope.MaxTokens.Value <= cap) {
@@ -9,6 +13,9 @@ func (p *prepared) capOutput(cap int64) error {
 	field := p.envelope.OutputLimitField
 	if field == "" {
 		field = "max_tokens"
+		if p.envelope.Wire == translation.OpenAIResponses {
+			field = "max_output_tokens"
+		}
 	}
 	patch, err := p.document.SetMember(p.document.Root(), field, []byte(strconv.FormatInt(cap, 10)))
 	if err != nil {

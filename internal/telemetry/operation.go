@@ -118,6 +118,30 @@ func (o *Op) Fallback(cause string) {
 	o.s.f.fallbacks.add(1, app, cause)
 }
 
+var (
+	translationWires    = set("anthropic_messages", "openai_chat", "openai_responses")
+	translationFeatures = set("provider_beta", "unknown_field", "unsupported_role", "unsupported_content", "image_source", "tool_type",
+		"tool_choice", "tool_result", "structured_output", "reasoning", "stateful_response", "audio", "file", "response_shape")
+)
+
+// Translation counts one conversion of an answer. Labels are closed sets; any
+// other value is not recorded.
+func (o *Op) Translation(source, target string, result TranslationResult) {
+	if o == nil || !o.metrics || !translationWires[source] || !translationWires[target] || (result != TranslationOK && result != TranslationFailed) {
+		return
+	}
+	o.s.f.translations.add(1, source, target, string(result))
+}
+
+// TranslationSkipped counts a model passed over for a feature it cannot
+// represent.
+func (o *Op) TranslationSkipped(feature string) {
+	if o == nil || !o.metrics || !translationFeatures[feature] {
+		return
+	}
+	o.s.f.skips.add(1, feature)
+}
+
 // StageSpan is one executed pipeline step.
 type StageSpan struct{ span trace.Span }
 

@@ -33,7 +33,7 @@ func TestOnlyExactProxyRoutesAllowed(t *testing.T) {
 	rt, recorder := startProxySurface(t)
 	allowed := [][2]string{
 		{"POST", "/v1/messages"}, {"POST", "/v1/messages/count_tokens"},
-		{"POST", "/v1/chat/completions"}, {"GET", "/v1/models"},
+		{"POST", "/v1/chat/completions"}, {"GET", "/v1/models"}, {"POST", "/v1/responses"},
 	}
 	for _, route := range allowed {
 		if status := statusOf(rawRequest(t, rt.ProxyAddr(), call(route[0], route[1]))); status != "204" {
@@ -47,7 +47,7 @@ func TestOnlyExactProxyRoutesAllowed(t *testing.T) {
 	refused := [][2]string{
 		{"GET", "/v1/messages"}, {"PUT", "/v1/messages"}, {"POST", "/v1/models"}, {"OPTIONS", "/v1/messages"},
 		{"DELETE", "/v1/models"}, {"HEAD", "/v1/models"}, {"POST", "/v1/messages/"}, {"POST", "/v1/complete"},
-		{"POST", "/v1/responses"}, {"POST", "/v1/messages/batches"}, {"GET", "/"},
+		{"GET", "/v1/responses"}, {"POST", "/v1/responses/resp_1"}, {"POST", "/v1/messages/batches"}, {"GET", "/"},
 	}
 	for _, route := range refused {
 		reply := rawRequest(t, rt.ProxyAddr(), call(route[0], route[1]))

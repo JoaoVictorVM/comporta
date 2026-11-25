@@ -57,6 +57,10 @@ const (
 	CodeFallbackExhausted             Code = "fallback_exhausted"
 	CodeFallbackDeadlineExceeded      Code = "fallback_deadline_exceeded"
 	CodeFallbackPolicyTargetExhausted Code = "fallback_policy_target_exhausted"
+	// No model of the request's chain can represent it in its protocol, or an
+	// answer could not be converted back to the client's protocol.
+	CodeNoEligibleFallbackModel   Code = "no_eligible_fallback_model"
+	CodeResponseTranslationFailed Code = "response_translation_failed"
 )
 
 // ErrorClass groups failures for internal decisions, such as a later fallback.
@@ -123,7 +127,7 @@ func formatBytes(n int64) string {
 func EndpointNotAllowed() Failure {
 	return Failure{http.StatusNotFound, CodeEndpointNotAllowed, ClassInvalidRequest,
 		"endpoint not allowed by Comporta; allowed endpoints: POST /v1/messages, " +
-			"POST /v1/messages/count_tokens, POST /v1/chat/completions, GET /v1/models"}
+			"POST /v1/messages/count_tokens, POST /v1/chat/completions, POST /v1/responses, GET /v1/models"}
 }
 
 // InvalidTarget rejects request targets that are not a plain path.

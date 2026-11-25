@@ -196,14 +196,14 @@ func (p *TransportPool) newTransport(snapshot *config.Snapshot, provider config.
 
 // upstreamURL joins the configured base with an authorized path. One trailing /v1
 // is optional on the base, because both spellings are common for the same API.
-func upstreamURL(base string, route Route) (*url.URL, error) {
+func upstreamURL(base, path string) (*url.URL, error) {
 	parsed, err := url.Parse(base)
 	if err != nil {
 		return nil, err
 	}
 	prefix := strings.TrimSuffix(parsed.EscapedPath(), "/")
 	prefix = strings.TrimSuffix(prefix, "/v1")
-	return parsed.Parse(prefix + route.path())
+	return parsed.Parse(prefix + path)
 }
 
 var forwardedHeaders = map[auth.Format][]string{
@@ -222,9 +222,19 @@ func connectionNamed(header http.Header) map[string]bool {
 	return named
 }
 
+// upstreamHeaders selects how the outgoing request authenticates and which
+// client headers it may carry: those of the provider's protocol, and none at
+// all for a translated body, whose client headers describe another protocol.
+type upstreamHeaders struct {
+	format           auth.Format
+	translated       bool
+	anthropicVersion string
+}
+
 // newUpstreamRequest builds the outgoing request from nothing, instead of filtering
 // a copy, so that a header added by a future SDK can never leak by default.
-func newUpstreamRequest(ctx context.Context, target *url.URL, incoming http.Header, format auth.Format, secret config.Secret, hasSecret, stream bool, body []byte) (*http.Request, error) {
+func newUpstreamRequest(ctx context.Context, target *url.URL, incoming http.Header, headers upstreamHeaders, secret config.Secret, hasSecret, stream bool, body []byte) (*http.Request, error) {
+	format := headers.format
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), io.NopCloser(bytes.NewReader(body)))
 	if err != nil {
 		return nil, err
@@ -234,13 +244,24 @@ func newUpstreamRequest(ctx context.Context, target *url.URL, incoming http.Head
 	request.GetBody = nil
 	request.ContentLength = int64(len(body))
 
-	named := connectionNamed(incoming)
-	for _, name := range forwardedHeaders[format] {
-		if named[name] {
-			continue
+	if headers.translated {
+		request.Header.Set("Content-Type", "application/json")
+		if format == auth.FormatAnthropic {
+			version := headers.anthropicVersion
+			if version == "" {
+				version = config.DefaultAnthropicVersion
+			}
+			request.Header.Set("Anthropic-Version", version)
 		}
-		if values := incoming.Values(name); len(values) > 0 {
-			request.Header[name] = append([]string(nil), values...)
+	} else {
+		named := connectionNamed(incoming)
+		for _, name := range forwardedHeaders[format] {
+			if named[name] {
+				continue
+			}
+			if values := incoming.Values(name); len(values) > 0 {
+				request.Header[name] = append([]string(nil), values...)
+			}
 		}
 	}
 	if hasSecret {

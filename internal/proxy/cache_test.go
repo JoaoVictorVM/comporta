@@ -306,3 +306,30 @@ func TestFailedDetectScanBypassesCache(t *testing.T) {
 		t.Fatal("a scan that could not finish never reads nor feeds the cache")
 	}
 }
+
+func TestTranslatedHeaderOnReplay(t *testing.T) {
+	fx, upstream, _, cache := cacheFixture(t, cacheSettings, jsonReply(cachedOpenAI))
+	body := `{"model":"fake-gpt","input":"` + cachePrompt + `","temperature":0,"max_output_tokens":16}`
+	first, firstBody := fx.post("/v1/responses", "openai", body)
+	settled(t, cache)
+	second, secondBody := fx.post("/v1/responses", "openai", body)
+	if upstream.count() != 1 || second.Header.Get(cacheHeader) != cacheHit || secondBody != firstBody {
+		t.Fatalf("translated answer not replayed: %d calls, %q", upstream.count(), second.Header.Get(cacheHeader))
+	}
+	if first.Header.Get(translatedHeader) != "openai-chat->openai-responses" || second.Header.Get(translatedHeader) != first.Header.Get(translatedHeader) {
+		t.Fatalf("translated header %q then %q", first.Header.Get(translatedHeader), second.Header.Get(translatedHeader))
+	}
+	if !strings.Contains(secondBody, `"object":"response"`) {
+		t.Fatalf("the replay must be in the client's format: %s", secondBody)
+	}
+}
+
+func TestTranslationFormatsDoNotShareCacheKey(t *testing.T) {
+	fx, upstream, _, cache := cacheFixture(t, cacheSettings, jsonReply(cachedOpenAI))
+	fx.post("/v1/chat/completions", "openai", zeroTempOpenAI)
+	settled(t, cache)
+	response, body := fx.post("/v1/responses", "openai", `{"model":"fake-gpt","input":[{"role":"user","content":"`+cachePrompt+`"}],"temperature":0,"max_output_tokens":16}`)
+	if upstream.count() != 2 || response.Header.Get(cacheHeader) != "" || strings.Contains(body, "chat.completion") {
+		t.Fatalf("a Chat answer served a Responses request: %d calls, %s", upstream.count(), body)
+	}
+}

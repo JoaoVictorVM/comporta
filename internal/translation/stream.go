@@ -29,6 +29,7 @@ type StreamTranslator struct {
 	usage   Usage
 	done    bool
 	out     [][]byte
+	start   *streamEvent
 }
 
 // streamEvent is the canonical unit between a decoder and an encoder.
@@ -105,6 +106,22 @@ func (t *StreamTranslator) Feed(name string, data []byte, usage Usage) ([][]byte
 	t.usage = usage
 	t.out = t.out[:0]
 	err := t.decoder.decode(name, data, func(event streamEvent) error {
+		// The opening event waits for the first content: a provider stream that
+		// starts with something untranslatable, such as reasoning, then fails
+		// before anything reached the client and still gets an HTTP error.
+		if event.kind == eventStart {
+			held := event
+			t.start = &held
+			return nil
+		}
+		if t.start != nil {
+			frames, err := t.encoder.encode(*t.start, t.usage)
+			if err != nil {
+				return err
+			}
+			t.start = nil
+			t.out = append(t.out, frames...)
+		}
 		frames, err := t.encoder.encode(event, t.usage)
 		if err != nil {
 			return err
