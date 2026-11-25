@@ -69,6 +69,13 @@ type Payload struct {
 	FromModel string `json:"from_model,omitempty"`
 	ToModel   string `json:"to_model,omitempty"`
 	Cause     string `json:"cause,omitempty"`
+	// ChainPosition, Model, SourceFormat, TargetFormat and Feature exist only
+	// on translation skips: a configured model name and closed values.
+	ChainPosition int    `json:"chain_position,omitempty"`
+	Model         string `json:"model,omitempty"`
+	SourceFormat  string `json:"source_format,omitempty"`
+	TargetFormat  string `json:"target_format,omitempty"`
+	Feature       string `json:"feature,omitempty"`
 }
 
 // PolicyEventID derives the event of one policy admission, so a retried write
@@ -208,9 +215,12 @@ func New(kind Type, at time.Time) Event {
 }
 func (e Event) Validate() error {
 	switch e.Type {
-	case RequestCompleted, Blocked, Cached, Fallback, Downgraded, Warned, LoopCut, ConfigChanged, ConfigReloadFailed, Paused, SensitiveDataDetected, LimitStateUnavailable, LimitStateRecovered:
+	case RequestCompleted, Blocked, Cached, Fallback, Downgraded, Warned, LoopCut, ConfigChanged, ConfigReloadFailed, Paused, SensitiveDataDetected, LimitStateUnavailable, LimitStateRecovered, TranslationSkipped:
 	default:
 		return errors.New("invalid event type")
+	}
+	if err := e.validateTranslationFields(); err != nil {
+		return err
 	}
 	if err := e.validateLimitFields(); err != nil {
 		return err
@@ -250,7 +260,8 @@ func (e Event) Validate() error {
 	switch e.Payload.ErrorCode {
 	case "", "provider_unreachable", "provider_timeout", "provider_redirect", "invalid_upstream_response", "provider_rate_limited", "provider_overloaded", "provider_error", "internal_error", "client_disconnected", "price_unknown", "pricing_overflow", "usage_storage_unavailable",
 		"rate_limited", "concurrency_exceeded", "budget_exceeded", "budget_reserved", "hard_cap_exceeded", "limits_unavailable", "app_paused", "user_maintenance", "model_not_allowed", "provider_format_mismatch",
-		"loop_detected", "loop_guard_unavailable", "sensitive_data_blocked", "sensitive_data_scan_failed", "response_rehydration_failed":
+		"loop_detected", "loop_guard_unavailable", "sensitive_data_blocked", "sensitive_data_scan_failed", "response_rehydration_failed",
+		"no_eligible_fallback_model", "response_translation_failed":
 	default:
 		return errors.New("invalid event error code")
 	}
@@ -302,6 +313,10 @@ func (e Event) validateLimitFields() error {
 		}
 	case ReasonSimilarRequests, ReasonRequestRate:
 		if e.Type != LoopCut {
+			return errors.New("invalid event reason")
+		}
+	case ReasonUntranslatable:
+		if e.Type != TranslationSkipped {
 			return errors.New("invalid event reason")
 		}
 	default:
@@ -370,7 +385,7 @@ func (e Event) validateLoop() error {
 
 func ValidType(kind Type) bool {
 	switch kind {
-	case RequestCompleted, Blocked, Cached, Fallback, Downgraded, Warned, LoopCut, ConfigChanged, ConfigReloadFailed, Paused, SensitiveDataDetected, LimitStateUnavailable, LimitStateRecovered:
+	case RequestCompleted, Blocked, Cached, Fallback, Downgraded, Warned, LoopCut, ConfigChanged, ConfigReloadFailed, Paused, SensitiveDataDetected, LimitStateUnavailable, LimitStateRecovered, TranslationSkipped:
 		return true
 	}
 	return false

@@ -29,12 +29,15 @@ var panelSchema string
 //go:embed migrations/0006_alerts.sql
 var alertsSchema string
 
+//go:embed migrations/0007_translation_events.sql
+var translationSchema string
+
 var errSchema = errors.New("incompatible database version or migration checksum")
 
 // migrations is the ordered registry. Applied files are never edited: a new
 // change is a new version.
 func migrations() []migration {
-	return []migration{{1, schema}, {2, limitsSchema}, {3, policiesSchema}, {4, fallbackSchema}, {5, panelSchema}, {6, alertsSchema}}
+	return []migration{{1, schema}, {2, limitsSchema}, {3, policiesSchema}, {4, fallbackSchema}, {5, panelSchema}, {6, alertsSchema}, {7, translationSchema}}
 }
 
 // checkSchema accepts any intact prefix of the known migrations, so a database

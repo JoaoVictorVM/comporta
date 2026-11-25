@@ -11,7 +11,7 @@ import (
 // ignored, so a label never comes from a payload.
 var knownEvents = set(events.RequestCompleted, events.Blocked, events.Cached, events.Fallback, events.Downgraded, events.Warned,
 	events.LoopCut, events.ConfigChanged, events.ConfigReloadFailed, events.Paused, events.SensitiveDataDetected,
-	events.LimitStateUnavailable, events.LimitStateRecovered)
+	events.LimitStateUnavailable, events.LimitStateRecovered, events.TranslationSkipped)
 
 // Subscriber is the event bus as seen by the diagnostics.
 type Subscriber interface {
