@@ -78,7 +78,7 @@ def binary(tmp_path_factory):
 
 
 class Gateway:
-    def __init__(self, binary, scenario, cache=False):
+    def __init__(self, binary, scenario, cache=False, fallback=(), model_scenarios=None):
         self.dir = tempfile.mkdtemp(prefix="comporta-sdk-")
         self.fake_port, self.proxy_port, self.admin_port = free_port(), free_port(), free_port()
         self.processes = []
@@ -102,7 +102,7 @@ pricing:
 apps:
   sdk-tests:
     allowed_models: [fake-claude, fake-gpt]
-{"    cache:" + chr(10) + "      enabled: true" + chr(10) if cache else ""}listeners:
+{"    fallback: [" + ", ".join(fallback) + "]" + chr(10) if fallback else ""}{"    cache:" + chr(10) + "      enabled: true" + chr(10) if cache else ""}listeners:
   proxy: {{port: {self.proxy_port}}}
   admin: {{port: {self.admin_port}}}
 """,
@@ -113,7 +113,8 @@ apps:
             capture_output=True, text=True, check=True, env=environment,
         )
         self.key = re.search(r"cmp_[0-9A-Za-z]{43}", created.stdout).group(0)
-        fake = self.start([binary, "fake-provider", "--port", str(self.fake_port), "--scenario", scenario], environment)
+        overrides = [flag for model, chosen in (model_scenarios or {}).items() for flag in ("--model-scenario", f"{model}={chosen}")]
+        fake = self.start([binary, "fake-provider", "--port", str(self.fake_port), "--scenario", scenario, *overrides], environment)
         wait_for_port(self.fake_port, fake)
         serve = self.start([binary, "serve", "--config", str(config)], environment)
         wait_for_port(self.proxy_port, serve)
@@ -150,8 +151,8 @@ apps:
 def make_gateway(binary):
     started = []
 
-    def make(scenario="success", cache=False):
-        gateway = Gateway(binary, scenario, cache)
+    def make(scenario="success", cache=False, fallback=(), model_scenarios=None):
+        gateway = Gateway(binary, scenario, cache, fallback, model_scenarios)
         started.append(gateway)
         return gateway
 
@@ -342,3 +343,78 @@ def test_cached_anthropic_stream(make_gateway):
     assert first.headers.get("x-comporta-cache") is None
     assert second.headers.get("x-comporta-cache") == "hit"
     assert second.parse().content[0].text == first.parse().content[0].text == "Olá"
+
+
+def test_anthropic_sdk_fallbacks_to_openai_with_tools(make_gateway):
+    gateway = make_gateway(fallback=["fake-gpt"], model_scenarios={"fake-claude": "overload", "fake-gpt": "agent-loop"})
+    client = gateway.anthropic()
+    raw = client.messages.with_raw_response.create(
+        model="fake-claude", max_tokens=32, tools=[WEATHER_TOOL], messages=[{"role": "user", "content": prompt("synthetic")}],
+    )
+    assert raw.headers.get("x-comporta-translated") == "openai->anthropic"
+    assert raw.headers.get("x-comporta-fallback") == "fake-claude->fake-gpt (529)"
+    message = raw.parse()
+    assert message.stop_reason == "tool_use"
+    assert message.content[0].type == "tool_use"
+    assert message.content[0].name == "read_status"
+    assert message.content[0].input == {"path": "status.txt"}
+    assert message.usage.input_tokens == 10
+
+    with client.messages.stream(model="fake-claude", max_tokens=32, tools=[WEATHER_TOOL], messages=[{"role": "user", "content": prompt("synthetic")}]) as stream:
+        final = stream.get_final_message()
+    assert final.stop_reason == "tool_use"
+    assert final.content[0].input == {"path": "status.txt"}
+    assert final.usage.output_tokens == 2
+
+
+def test_openai_chat_sdk_fallbacks_to_anthropic(make_gateway):
+    gateway = make_gateway(fallback=["fake-claude"], model_scenarios={"fake-gpt": "overload"})
+    client = gateway.openai()
+    raw = client.chat.completions.with_raw_response.create(model="fake-gpt", messages=[{"role": "user", "content": prompt("synthetic")}])
+    assert raw.headers.get("x-comporta-translated") == "anthropic->openai"
+    completion = raw.parse()
+    assert completion.choices[0].message.content == "Olá"
+    assert completion.choices[0].finish_reason == "stop"
+    assert completion.usage.total_tokens == 12
+
+    chunks = list(client.chat.completions.create(
+        model="fake-gpt", stream=True, stream_options={"include_usage": True}, messages=[{"role": "user", "content": prompt("synthetic")}],
+    ))
+    assert "".join(chunk.choices[0].delta.content or "" for chunk in chunks if chunk.choices) == "Olá mundo"
+    assert chunks[-1].usage.completion_tokens == 2
+
+
+def test_openai_responses_sync_and_stream(gateway):
+    client = gateway.openai()
+    for model in ("fake-gpt", "fake-claude"):
+        response = client.responses.create(model=model, instructions="Seja breve.", input=prompt("synthetic"), store=False)
+        assert response.status == "completed"
+        assert response.output_text == "Olá"
+        assert response.usage.output_tokens == 2
+
+        with client.responses.stream(model=model, input=[{"role": "user", "content": prompt("synthetic")}]) as stream:
+            deltas = "".join(event.delta for event in stream if event.type == "response.output_text.delta")
+            final = stream.get_final_response()
+        assert deltas == "Olá mundo"
+        assert final.output_text == "Olá mundo"
+        assert final.status == "completed"
+
+
+def test_openai_responses_function_call(make_gateway):
+    client = make_gateway("agent-loop").openai()
+    tools = [{"type": "function", "name": "read_status", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}]
+    for model in ("fake-gpt", "fake-claude"):
+        response = client.responses.create(model=model, input=prompt("synthetic"), tools=tools)
+        call = response.output[0]
+        assert call.type == "function_call"
+        assert call.name == "read_status"
+        assert json.loads(call.arguments) == {"path": "status.txt"}
+        follow_up = client.responses.create(
+            model=model, tools=tools,
+            input=[
+                {"role": "user", "content": prompt("synthetic")},
+                {"type": "function_call", "call_id": call.call_id, "name": call.name, "arguments": call.arguments},
+                {"type": "function_call_output", "call_id": call.call_id, "output": prompt("status: ok")},
+            ],
+        )
+        assert follow_up.output[0].type == "function_call"

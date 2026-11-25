@@ -13,6 +13,11 @@
     "tests/integration/proxy_metering_test.go",
     "tests/integration/metering_bench_test.go",
     "tests/privacy/canary_test.go",
+    "internal/proxy/translation_test.go",
+    "tests/integration/fallback_translation_test.go",
+    "tests/integration/proxy_translation_test.go",
+    "tests/privacy/canary_fallback_translation_test.go",
+    "tests/distributed/translation_test.go",
     "tests/integration/proxy_limits_test.go",
     "tests/integration/limits_failmode_test.go",
     "tests/integration/limits_bootstrap_test.go",
@@ -50,6 +55,22 @@
     {
       "file": "internal/proxy/fuzz_test.go",
       "reason": "Fuzz seeds for the content selection and the restoration of placeholders. They call the selection and the patches directly and never reach a log, a sink, a provider or an error path."
+    },
+    {
+      "file": "internal/translation/request_test.go",
+      "reason": "Protocol conversion cases for the translator. They call the parser, the analysis and the renderers directly and never reach a log, a sink, a provider or an error path."
+    },
+    {
+      "file": "internal/translation/response_test.go",
+      "reason": "Protocol conversion cases for the translator. They call the parser, the analysis and the renderers directly and never reach a log, a sink, a provider or an error path."
+    },
+    {
+      "file": "internal/translation/stream_test.go",
+      "reason": "Protocol conversion cases for the translator. They call the parser, the analysis and the renderers directly and never reach a log, a sink, a provider or an error path."
+    },
+    {
+      "file": "internal/translation/fuzz_test.go",
+      "reason": "Protocol conversion cases for the translator. They call the parser, the analysis and the renderers directly and never reach a log, a sink, a provider or an error path."
     }
   ],
   "instrumented_sdk_file": "tests/sdk/compatibility_test.py",
@@ -70,7 +91,7 @@
     "process/loop-cut",
     "process/sensitive-data",
     "process/limit-policies",
-    "process/fallback", "process/response-cache", "process/response-cache-shared", "process/response-cache-errors", "process/telemetry", "process/alerts",
+    "process/fallback", "process/translation", "process/response-cache", "process/response-cache-shared", "process/response-cache-errors", "process/telemetry", "process/alerts",
     "pipeline/provider-receives-prompt",
     "pipeline/upstream-error-echo",
     "pipeline/stream-error-echo",
