@@ -1,0 +1,68 @@
+{
+  "max_tokens": 256,
+  "messages": [
+    {
+      "content": "Responda de forma objetiva.",
+      "role": "system"
+    },
+    {
+      "content": [
+        {
+          "text": "Qual é o clima?",
+          "type": "text"
+        },
+        {
+          "image_url": {
+            "url": "data:image/png;base64,iVBORw0KGgo="
+          },
+          "type": "image_url"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": null,
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"city\":\"Recife\"}",
+            "name": "get_weather"
+          },
+          "id": "call_123",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "28 graus",
+      "role": "tool",
+      "tool_call_id": "call_123"
+    }
+  ],
+  "model": "gpt-4.1",
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "function": {
+        "description": "Consulta o clima",
+        "name": "get_weather",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        },
+        "strict": true
+      },
+      "type": "function"
+    }
+  ],
+  "user": "5f0c1b2a3d4e5f60718293a4b5c6d7e8"
+}

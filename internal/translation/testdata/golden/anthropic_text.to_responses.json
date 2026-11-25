@@ -1,0 +1,42 @@
+{
+  "created_at": 1795478400,
+  "error": null,
+  "id": "resp_82792dbb29aaa74013b67d2f",
+  "incomplete_details": null,
+  "instructions": null,
+  "metadata": {},
+  "model": "claude-sonnet-4-5",
+  "object": "response",
+  "output": [
+    {
+      "content": [
+        {
+          "annotations": [],
+          "text": "Está ensolarado.",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_f1d9b9ee00e6d909202e597e",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "status": "completed",
+  "temperature": null,
+  "tool_choice": "auto",
+  "tools": [],
+  "top_p": null,
+  "usage": {
+    "input_tokens": 24,
+    "input_tokens_details": {
+      "cached_tokens": 4
+    },
+    "output_tokens": 6,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 30
+  }
+}

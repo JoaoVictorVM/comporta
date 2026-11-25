@@ -1,0 +1,75 @@
+{
+  "max_tokens": 256,
+  "messages": [
+    {
+      "content": "Use ferramentas quando necessário.",
+      "role": "system"
+    },
+    {
+      "content": [
+        {
+          "text": "Qual é o clima em Recife?",
+          "type": "text"
+        },
+        {
+          "image_url": {
+            "url": "data:image/png;base64,iVBORw0KGgo="
+          },
+          "type": "image_url"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": "Vou consultar.",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"city\":\"Recife\"}",
+            "name": "get_weather"
+          },
+          "id": "toolu_01A",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "28 graus",
+      "role": "tool",
+      "tool_call_id": "toolu_01A"
+    },
+    {
+      "content": "E amanhã?",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4.1",
+  "parallel_tool_calls": false,
+  "stop": [
+    "FIM"
+  ],
+  "temperature": 0.2,
+  "tool_choice": "required",
+  "tools": [
+    {
+      "function": {
+        "description": "Consulta o clima",
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ],
+  "user": "5f0c1b2a3d4e5f60718293a4b5c6d7e8"
+}

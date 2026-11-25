@@ -1,0 +1,37 @@
+{
+  "created_at": 1795478400,
+  "error": null,
+  "id": "resp_feec4c35ff6381715bef49ad",
+  "incomplete_details": null,
+  "instructions": null,
+  "metadata": {},
+  "model": "gpt-4.1-2025-04-14",
+  "object": "response",
+  "output": [
+    {
+      "arguments": "{\"city\":\"Recife\"}",
+      "call_id": "call_0123456789abcdef",
+      "id": "fc_83224f8dbeeb651564bf041a",
+      "name": "get_weather",
+      "status": "completed",
+      "type": "function_call"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "status": "completed",
+  "temperature": null,
+  "tool_choice": "auto",
+  "tools": [],
+  "top_p": null,
+  "usage": {
+    "input_tokens": 30,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 12,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 42
+  }
+}

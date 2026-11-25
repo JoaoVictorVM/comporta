@@ -1,0 +1,26 @@
+{
+  "model": "claude-sonnet-4-5",
+  "max_tokens": 256,
+  "system": "Use ferramentas quando necessário.",
+  "temperature": 0.2,
+  "stop_sequences": ["FIM"],
+  "metadata": {"user_id": "5f0c1b2a3d4e5f60718293a4b5c6d7e8"},
+  "messages": [
+    {"role": "user", "content": [
+      {"type": "text", "text": "Qual é o clima em Recife?"},
+      {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+    ]},
+    {"role": "assistant", "content": [
+      {"type": "text", "text": "Vou consultar."},
+      {"type": "tool_use", "id": "toolu_01A", "name": "get_weather", "input": {"city": "Recife"}}
+    ]},
+    {"role": "user", "content": [
+      {"type": "tool_result", "tool_use_id": "toolu_01A", "content": "28 graus"},
+      {"type": "text", "text": "E amanhã?"}
+    ]}
+  ],
+  "tools": [
+    {"name": "get_weather", "description": "Consulta o clima", "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}
+  ],
+  "tool_choice": {"type": "any", "disable_parallel_tool_use": true}
+}

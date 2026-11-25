@@ -1,0 +1,104 @@
+{
+  "max_tokens": 300,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Compare o clima.",
+          "type": "text"
+        },
+        {
+          "source": {
+            "type": "url",
+            "url": "https://example.com/mapa.png"
+          },
+          "type": "image"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "id": "call_a",
+          "input": {
+            "city": "Recife"
+          },
+          "name": "get_weather",
+          "type": "tool_use"
+        },
+        {
+          "id": "call_b",
+          "input": {
+            "city": "Natal"
+          },
+          "name": "get_weather",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": [
+            {
+              "text": "28 graus",
+              "type": "text"
+            }
+          ],
+          "tool_use_id": "call_a",
+          "type": "tool_result"
+        },
+        {
+          "content": [
+            {
+              "text": "30 graus",
+              "type": "text"
+            }
+          ],
+          "tool_use_id": "call_b",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "metadata": {
+    "user_id": "5f0c1b2a3d4e5f60718293a4b5c6d7e8"
+  },
+  "model": "claude-sonnet-4-5",
+  "stop_sequences": [
+    "FIM"
+  ],
+  "stream": true,
+  "system": [
+    {
+      "text": "Seja breve.",
+      "type": "text"
+    },
+    {
+      "text": "Responda em português.",
+      "type": "text"
+    }
+  ],
+  "temperature": 0,
+  "tool_choice": {
+    "name": "get_weather",
+    "type": "tool"
+  },
+  "tools": [
+    {
+      "description": "Consulta o clima",
+      "input_schema": {
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "get_weather"
+    }
+  ]
+}
