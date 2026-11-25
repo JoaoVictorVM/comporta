@@ -87,7 +87,12 @@ func TestCacheJSONHitAndMiss(t *testing.T) {
 	if second.Header.Get("X-Request-Id") != "" {
 		t.Fatal("the provider's request id is never replayed")
 	}
+	// The hit is concluded when its operation ends, which can be after the
+	// client already read the answer.
 	results := accounting.all()
+	for deadline := time.Now().Add(5 * time.Second); len(results) < 2 && time.Now().Before(deadline); results = accounting.all() {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if len(results) != 2 || results[0].CacheHit || !results[1].CacheHit || !results[1].NotSent || results[1].UpstreamStatus.Known || results[1].DownstreamStatus != known(200) {
 		t.Fatalf("results = %+v", results)
 	}
