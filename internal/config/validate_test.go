@@ -182,9 +182,35 @@ func TestFallbackRules(t *testing.T) {
 	requireDiagnostic(t, six, CodeInvalidValue, "apps.bot.fallback")
 
 	mixed := replaced(t, baseYAML, "allowed_models: [model-a, model-b]", "allowed_models: [model-a, local/model]\n    fallback: [local/model]")
-	warnings := requireValid(t, mixed).Warnings()
-	if !hasDiagnostic(warnings, CodeFallbackMixedFormat, "apps.bot.fallback") {
-		t.Fatalf("mixed formats must warn without removing entries: %+v", warnings)
+	if warnings := requireValid(t, mixed).Warnings(); len(warnings) != 0 {
+		t.Fatalf("a chain mixing formats is translated and must not warn: %+v", warnings)
+	}
+}
+
+func TestAnthropicVersionValidation(t *testing.T) {
+	cfg := requireValid(t, baseYAML).cfg
+	if cfg.Providers["anthropic"].AnthropicVersion != DefaultAnthropicVersion {
+		t.Fatalf("default version: %q", cfg.Providers["anthropic"].AnthropicVersion)
+	}
+	if cfg.Providers["local"].AnthropicVersion != "" {
+		t.Fatal("a version on a non-Anthropic provider")
+	}
+	withVersion := func(format, version string) string {
+		return replaced(t, baseYAML, "    api_format: "+format+"\n", "    api_format: "+format+"\n    anthropic_version: "+version+"\n")
+	}
+	if got := requireValid(t, withVersion("anthropic", "2023-06-01")).cfg.Providers["anthropic"].AnthropicVersion; got != "2023-06-01" {
+		t.Fatalf("configured version: %q", got)
+	}
+	requireDiagnostic(t, withVersion("anthropic", "latest"), CodeInvalidValue, "providers.anthropic.anthropic_version")
+	requireDiagnostic(t, withVersion("openai", "2026-10-21"), CodeInvalidValue, "providers.local.anthropic_version")
+}
+
+func TestMixedFormatFallbackNoLongerWarns(t *testing.T) {
+	text := replaced(t, baseYAML, "allowed_models: [model-a, model-b]", "allowed_models: [model-a, model-b, local/model]\n    fallback: [model-b, local/model]")
+	for _, w := range requireValid(t, text).Warnings() {
+		if w.Code == CodeFallbackMixedFormat || w.Code == CodeFallbackDisabled {
+			t.Fatalf("unexpected warning: %+v", w)
+		}
 	}
 }
 
@@ -202,19 +228,9 @@ func TestFallbackWarningsByFormat(t *testing.T) {
 	if warnings := chain("model-a", "model-a"); !hasDiagnostic(warnings, CodeFallbackDisabled, "apps.bot.fallback") {
 		t.Fatalf("chain without alternative: %+v", warnings)
 	}
-	// A chain with entries of another format only disables fallback for the
-	// format left without entries, and says so once per format.
-	warnings := chain("model-a, model-b, local/model", "local/model")
-	disabled := 0
-	for _, w := range warnings {
-		if w.Code == CodeFallbackDisabled {
-			disabled++
-			if !strings.Contains(w.Message, "anthropic") && !strings.Contains(w.Message, "openai") {
-				t.Fatalf("format not named: %+v", w)
-			}
-		}
-	}
-	if disabled != 2 || !hasDiagnostic(warnings, CodeFallbackMixedFormat, "apps.bot.fallback") {
+	// A chain with an entry of another format is an alternative for every
+	// other allowed model, since requests are translated.
+	if warnings := chain("model-a, model-b, local/model", "local/model"); len(warnings) != 0 {
 		t.Fatalf("mixed chain warnings: %+v", warnings)
 	}
 	// An invalid chain still fails validation instead of being ignored.

@@ -303,7 +303,8 @@ func validateDowngrade(app *App, path string, cfg *Config, owners map[string]str
 
 // warnDowngradeFormats accepts an app whose allowed models span API formats,
 // but tells the operator that requests in another format than the target are
-// refused at the limit instead of downgraded, until translation exists.
+// refused at the limit instead of downgraded: a downgrade keeps the body as
+// it is, without translation.
 func warnDowngradeFormats(app *App, path string, cfg *Config, owners map[string]string, d *decoder, warnings *diagnosticList) {
 	if app.OnLimit != OnLimitDowngrade || app.DowngradeTo == "" {
 		return
@@ -319,7 +320,7 @@ func warnDowngradeFormats(app *App, path string, cfg *Config, owners map[string]
 			position := d.positions[targetPath]
 			warnings.add(Diagnostic{
 				Code: CodeDowngradeMixedFormat, Path: targetPath, Line: position.Line, Column: position.Column,
-				Message: "allowed_models include another API format than downgrade_to; those requests are blocked at the limit instead of downgraded until cross-provider translation exists",
+				Message: "allowed_models include another API format than downgrade_to; those requests are blocked at the limit instead of downgraded, since the downgrade target is not translated",
 			})
 			return
 		}
@@ -331,58 +332,36 @@ func validateFallback(app *App, path string, cfg *Config, owners map[string]stri
 	if len(app.Fallback) > 4 {
 		d.reportAt(CodeInvalidValue, chainPath, "must have at most 4 entries")
 	}
-	formats := map[APIFormat]bool{}
-	for _, model := range app.AllowedModels {
-		if owner, declared := owners[model]; declared {
-			formats[cfg.Providers[owner].APIFormat] = true
-		}
-	}
 	for i, model := range app.Fallback {
-		owner, declared := owners[model]
+		_, declared := owners[model]
 		switch {
 		case !declared:
 			d.reportAt(CodeInvalidReference, indexPath(chainPath, i), "model "+quoteText(model)+" is not declared by any provider")
 		case !slices.Contains(app.AllowedModels, model):
 			d.reportAt(CodeInvalidReference, indexPath(chainPath, i), "model "+quoteText(model)+" is not in allowed_models")
-		default:
-			formats[cfg.Providers[owner].APIFormat] = true
 		}
-	}
-	if len(app.Fallback) > 0 && len(formats) > 1 {
-		position := d.positions[chainPath]
-		warnings.add(Diagnostic{
-			Code: CodeFallbackMixedFormat, Path: chainPath, Line: position.Line, Column: position.Column,
-			Message: "fallback chain mixes API formats; entries in another format are not eligible until cross-provider translation exists",
-		})
 	}
 	if len(app.Fallback) == 0 {
 		return
 	}
-	// A request can only fall back to a chain entry of its own format other than
-	// the model it was sent to. A format whose requests never have one runs
-	// without fallback, which is said once per format.
-	allowed := map[APIFormat]int{}
+	// Requests are translated between API formats, so any chain entry other
+	// than the model a request was sent to is an alternative. Fallback only
+	// never happens when every allowed model is the chain's single entry.
 	for _, model := range app.AllowedModels {
-		if owner, declared := owners[model]; declared {
-			allowed[cfg.Providers[owner].APIFormat]++
-		}
-	}
-	chained := map[APIFormat]bool{}
-	for _, model := range app.Fallback {
-		if owner, declared := owners[model]; declared && slices.Contains(app.AllowedModels, model) {
-			chained[cfg.Providers[owner].APIFormat] = true
-		}
-	}
-	for _, format := range []APIFormat{FormatAnthropic, FormatOpenAI} {
-		if allowed[format] == 0 || (chained[format] && allowed[format] > 1) {
+		if _, declared := owners[model]; !declared {
 			continue
 		}
-		position := d.positions[chainPath]
-		warnings.add(Diagnostic{
-			Code: CodeFallbackDisabled, Path: chainPath, Line: position.Line, Column: position.Column,
-			Message: "fallback chain has no alternative for " + string(format) + " requests; fallback is disabled for that format",
-		})
+		for _, entry := range app.Fallback {
+			if entry != model && slices.Contains(app.AllowedModels, entry) {
+				return
+			}
+		}
 	}
+	position := d.positions[chainPath]
+	warnings.add(Diagnostic{
+		Code: CodeFallbackDisabled, Path: chainPath, Line: position.Line, Column: position.Column,
+		Message: "fallback chain has no alternative to any allowed model; fallback is disabled",
+	})
 }
 
 func validateHardCap(budget Budget, hardCap *Budget, path string, derive bool, d *decoder) {

@@ -155,6 +155,9 @@ func (s *Snapshot) DistributedFingerprint() string {
 	for _, name := range slices.Sorted(maps.Keys(cfg.Providers)) {
 		p := cfg.Providers[name]
 		entry := map[string]any{"api_format": string(p.APIFormat), "base_url": p.BaseURL, "models": stringsToAny(p.Models), "tls_min_version": p.TLSMinVersion}
+		if p.APIFormat == FormatAnthropic {
+			entry["anthropic_version"] = p.AnthropicVersion
+		}
 		addSecret(entry, "api_key", p.APIKey)
 		providers[name] = entry
 	}

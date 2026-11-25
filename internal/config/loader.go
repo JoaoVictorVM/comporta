@@ -721,7 +721,7 @@ func (d *decoder) decodeListeners(node *yaml.Node, out *Listeners) {
 
 func (d *decoder) decodeProvider(node *yaml.Node, path, name string) Provider {
 	out := Provider{TLSMinVersion: "1.2"}
-	fields := d.fields(node, path, "api_format", "base_url", "api_key", "api_key_file", "models", "tls_min_version")
+	fields := d.fields(node, path, "api_format", "base_url", "api_key", "api_key_file", "models", "tls_min_version", "anthropic_version")
 	if !d.requireFields(node, fields, path, "api_format", "base_url", "models") {
 		return out
 	}
@@ -732,8 +732,35 @@ func (d *decoder) decodeProvider(node *yaml.Node, path, name string) Provider {
 		d.report(CodeInvalidValue, joinPath(path, "models"), fields["models"], "must not be empty")
 	}
 	optEnum(d, fields, "tls_min_version", path, CodeInvalidValue, &out.TLSMinVersion, "1.2", "1.3")
+	d.decodeAnthropicVersion(fields, path, &out)
 	out.APIKey, _ = d.secretRef(fields, path, name, "api_key", "api_key_file")
 	return out
+}
+
+var anthropicVersion = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`)
+
+// decodeAnthropicVersion reads the API version of an Anthropic provider. The
+// field means nothing to another format, so setting it there is an error.
+func (d *decoder) decodeAnthropicVersion(fields fieldSet, path string, out *Provider) {
+	node, ok := fields["anthropic_version"]
+	if !ok {
+		if out.APIFormat == FormatAnthropic {
+			out.AnthropicVersion = DefaultAnthropicVersion
+		}
+		return
+	}
+	// YAML reads an unquoted date as a timestamp; the scalar text is what the
+	// header needs, so both spellings are accepted.
+	if node.Kind == yaml.ScalarNode && (node.Tag == "!!timestamp" || node.Tag == "!!str") {
+		out.AnthropicVersion = node.Value
+	}
+	switch {
+	case out.APIFormat != FormatAnthropic:
+		d.report(CodeInvalidValue, joinPath(path, "anthropic_version"), node, "is only valid for providers with api_format anthropic")
+		out.AnthropicVersion = ""
+	case !anthropicVersion.MatchString(out.AnthropicVersion):
+		d.report(CodeInvalidValue, joinPath(path, "anthropic_version"), node, "must be a date such as 2026-10-21")
+	}
 }
 
 // requireFields reports each absent mandatory field, returning whether all are

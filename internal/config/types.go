@@ -94,12 +94,19 @@ type Config struct {
 	Deployment Deployment
 }
 
+// DefaultAnthropicVersion is the Claude API version sent with translated
+// requests when the provider does not set one.
+const DefaultAnthropicVersion = "2026-10-21"
+
 type Provider struct {
 	APIFormat     APIFormat
 	BaseURL       string
 	APIKey        SecretRef
 	Models        []string
 	TLSMinVersion string
+	// AnthropicVersion is the anthropic-version header of translated requests
+	// sent to an Anthropic provider, which have no client header to forward.
+	AnthropicVersion string
 	// Local marks loopback or private destinations, which may omit a key and
 	// use plain HTTP.
 	Local bool
